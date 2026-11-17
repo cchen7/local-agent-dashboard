@@ -11,6 +11,7 @@ struct MainWindow: View {
                 } detail: {
                     EmptyPanel(title: "No token usage yet", symbol: "gauge.with.needle",
                                message: "Usage and list-price estimates will appear after indexing.")
+                        .accessibilityIdentifier("empty.tokens")
                         .navigationTitle("Token Usage")
                 }
             } else {
@@ -20,11 +21,13 @@ struct MainWindow: View {
                     EmptyPanel(title: model.page == .projects ? "No projects yet" : "No sessions yet",
                                symbol: model.page == .projects ? "folder" : "bubble.left.and.text.bubble.right",
                                message: "Your local library is empty.")
+                        .accessibilityIdentifier(model.page == .projects ? "empty.projects" : "empty.sessions")
                         .navigationSplitViewColumnWidth(min: 300, ideal: 356, max: 420)
                         .navigationTitle(Text((model.page ?? .sessions).title))
                 } detail: {
                     EmptyPanel(title: "Your private, local dashboard", symbol: "lock.shield",
                                message: "Zero network. Read-only sources. Everything stays on this Mac.")
+                        .accessibilityIdentifier("empty.detail")
                 }
             }
         }
@@ -37,6 +40,7 @@ struct MainWindow: View {
         .toolbar {
             ToolbarItem {
                 SettingsLink { Label("Source Access", systemImage: "folder.badge.gearshape") }
+                    .accessibilityIdentifier("openSettings")
             }
         }
     }

@@ -72,6 +72,12 @@ Tools/pricing/models-seen
 Tools/pricing/install
 ```
 
+For local ad-hoc App validation, follow the build/re-sign/test-without-building
+procedure in `docs/reports/M0-FOUNDATION.md`; inspect the actual frozen entitlements
+and runtime flag. If the UI host cannot expose a menu entry, a skipped test is not
+acceptance: run its documented manual-entry mode and obtain the real panel/reopen
+assertions. Visual review may use the owner's authorized Computer Use tool.
+
 ## Code map
 
 | Path | What lives there |

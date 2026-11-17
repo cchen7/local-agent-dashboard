@@ -8,6 +8,7 @@ struct SettingsView: View {
         TabView {
             Form {
                 Text("Zero network. Read-only sources. Everything stays on this Mac.")
+                    .accessibilityIdentifier("settingsPrivacyPromise")
                 Text("This foundation build does not index sessions yet.").foregroundStyle(.secondary)
             }
             .padding()

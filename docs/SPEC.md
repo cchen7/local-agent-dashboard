@@ -1048,7 +1048,7 @@ Launch → onboarding → sessions appear → search a Chinese word → open a s
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| M0 Skeleton and guardrails | Project, modules, entitlements, CI scripts, migrations, empty window + menu bar; verify the sandbox read exceptions | §14.4 passes; the four default directories are readable (or the fallback works) |
+| M0 Skeleton and guardrails | Project, modules, entitlements, CI scripts, migrations, empty window + menu bar; verify the sandbox read exceptions | §14.4 passes; installed agents' default directories are readable (or the fallback works). Report unavailable sources explicitly; the owner-confirmed absent Grok installation is deferred locally (DEV-008). |
 | M1 Claude Code + Codex | EXP-1 first; two adapters, full + incremental ingestion, session list, basic detail, Codex environment tagging | Golden tests pass; NFR-2 met; EXP-1 findings in FORMATS.md |
 | M2 Copilot + Grok Build + Sources settings | Two adapters, source management, path mappings, environment rules, health panel, onboarding | Golden tests pass; custom-directory sources work |
 | M3 Search and insights | Tokenizer, query syntax, snippets, match navigation, Overview tab, Projects page, status inference | NFR-4 met; Chinese search tests pass |

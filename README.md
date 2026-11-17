@@ -7,5 +7,6 @@ Development starts with [AGENTS.md](AGENTS.md) and [the specification](docs/SPEC
 See [the development plan](docs/DEVELOPMENT_PLAN.md) for milestones and review gates,
 and [the handover](docs/HANDOVER.md) for worktrees and task prompts.
 
-Current stage: M0. This repository is being bootstrapped; an application build is
-not yet available. Full Xcode 27 is required for app and sandbox verification.
+Current stage: M0 foundation validated; M1 data ingestion is next. The native shell
+and store build with Xcode 27, but the app does not index sessions yet. See
+[CHECKPOINT.md](CHECKPOINT.md) for verification and the next handover.

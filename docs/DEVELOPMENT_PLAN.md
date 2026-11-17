@@ -8,7 +8,7 @@ evidence. The product owner resolves changes to confirmed product decisions.
 
 2026-11-17: the owner asked the coordinator to launch standard-environment
 `gpt-6.1-sol` coding agents. This supersedes the earlier plan for manual agent launch.
-The coordinator also owns EXP-1. No implementation milestone is complete yet.
+The coordinator also owns EXP-1. M0 local acceptance is now complete; consult CHECKPOINT.md and the actual PR state before starting M1.
 
 The first commit establishes the previously uncommitted specification, repository
 instructions, and this handover. It is the prerequisite for linked worktrees, not
@@ -74,7 +74,7 @@ wave from the accepted `main` after its contracts and prerequisites are availabl
 
 | Item | Current disposition |
 |---|---|
-| Xcode | Only Command Line Tools was selected; `xcodebuild -version` failed. The owner will install Xcode 27. No installation or global `xcode-select` change is delegated. |
+| Xcode | Xcode 27.2 is installed. Use command-local `DEVELOPER_DIR`; actual M0 build and signed/UI evidence is in the report. No global developer-directory change is needed. |
 | GRDB version | The dependency is approved but no exact version is specified. Foundation selects a compatible release using official/versioned docs and commits an exact pin plus `Package.resolved`. |
 | FTS registration | M0's schema requires `agentdash` to be registered before migration. GRDB-specific registration belongs in ADStore; reusable pure token splitting can live in ADCore. Do not create ADStore → ADSearch or use `unicode61` while claiming CJK acceptance. |
 | Codex environments | See `FORMATS.md`. A model ID does not identify the execution environment; independently verify provider and model when launching a worker. |

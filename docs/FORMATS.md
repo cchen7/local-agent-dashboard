@@ -258,3 +258,13 @@ deployment telemetry. Do not classify the `exec` entrypoint as a separate enviro
 Claude, Codex, Copilot and Grok adapter fixtures have not yet been captured or
 approved. M0-TOOLING must first deliver and validate the sanitizer. EXP-1 does not
 waive capture-before-parser, accounting golden tests, or read-only source access.
+
+## Local source availability for M0
+
+2026-11-17: the real, sandboxed and hardened App's Sources panel successfully
+enumerated the default Claude Code, Codex and Copilot directories (top-level entry
+counts 46, 70 and 55 at that observation). This verifies directory access, not
+session discovery or parser/accounting accuracy. No session contents were opened.
+The Grok default directory was absent; the owner confirmed Grok is not installed
+and asked to ignore it for now (DEV-008). No Grok fixture or compatibility result
+is claimed.

@@ -1,257 +1,156 @@
-# M0-FOUNDATION handover — 2026-11-17
+# M0 foundation acceptance — 2026-11-17
 
-Status: implementation ready for coordinator review; **M0 acceptance remains blocked
-on full Xcode, signed sandbox access and UI execution**. No commits, pushes, PRs or
-merges were made. The initial working tree was clean. Only `App/`,
-`AgentDashboard.xcodeproj/`, `Packages/AgentDashKit/` and this report were added.
-`Tools/` and shared documents were not edited or imported from another worktree.
+M0's local foundation has been validated. This is an empty native shell and storage
+baseline; vendor adapters, ingestion, populated session/project views, token charts,
+pricing and release qualification belong to later milestones.
 
-### Coordinator integration status
+## Implementation
 
-The worker statements above describe its original handover. The coordinator has
-now published Draft PR #2 and integrated merged tooling PR #1. On the combined
-source tree, the coordinator reran the API guard (18 production files), dependency
-guard (exact GRDB 7.11.1, matching locks), all 40 tool tests (zero skipped), and
-the 13 package test functions including 20 tokenizer cases: all passed. The schema
-extension is recorded in SPEC §6.3 and DEV-006. Original notes below about missing
-Tools are historical; actual App build, signed sandbox access and rendered UI
-verification remain pending. No M0 acceptance or release claim is made.
+- macOS 27 / arm64 Xcode project, shared scheme, Swift 6 complete concurrency,
+  eight-module package with the SPEC §4.2 dependency direction.
+- Exact GRDB.swift 7.11.1 pin, revision
+  `b83108d10f42680d78f23fe4d4d80fc88dab3212`, identical package/Xcode locks.
+- App-owned WAL database, v1 migrations and FTS triggers. ADStore registers
+  `agentdash` before migration on every connection; pure token splitting is in ADCore.
+- Idempotent source/file/record writes and atomic record/checkpoint updates.
+  Same-session corrections update rows; inherited records retain their first owner.
+  `last_seq` and `previous_ts` preserve file ordering and timestamp inheritance.
+- Native empty Sessions/Projects/Token Usage navigation, Settings and menu panel,
+  English/Simplified Chinese catalog, directory-access verification only.
+- Native outer-window minimum is 960×600. Settled toolbar chrome is measured instead
+  of hardcoding its height; unchanged native properties are not repeatedly assigned.
+- Test-only `--synthetic` launches select one of the three SPEC sizes and app-local
+  dark/light appearance. They never resolve or read the user's source roots.
 
-Verified cwd:
-`.worktrees/m0-foundation`.
-Verified branch: `feat/m0-foundation`.
+The store boundary does not yet maintain usage rollups, pricing, insights or
+retention. No vendor parser or real fixture was introduced in M0.
 
-Coordinator review follow-up: removed the top-level `strict` helper and inlined
-the identical `[.enableExperimentalFeature("StrictConcurrency")]` array on all
-eight module targets and both test targets. `let package` is now the manifest's
-only top-level declaration; Swift 6 complete concurrency and exact GRDB 7.11.1
-remain unchanged. Before/after `swift package … dump-package` JSON is identical;
-both lockfiles, the required `func accept` callback and cross-session dedupe
-regression tests are byte-identical. No Tools changes were made.
+## Execution evidence
 
-Re-ran the documented package-test command after this manifest-only code change:
-**13 test functions passed**, including **20 parameterized tokenizer cases**
-(32 individual invocations). Log:
-`/private/tmp/agentdash-m0-foundation/review-fix/package-tests.log`.
-The existing CLT developer framework search-path linker warnings remain. The
-coordinator's dependency guard and tooling worker's `func accept` false-positive
-fix still require integration; actual App/UI/signed sandbox checks remain pending.
+Xcode 27.2 (27B52), macOS SDK 27.2, Apple silicon. Commands selected Xcode through
+`DEVELOPER_DIR`; the global developer-directory setting was not changed.
 
-## Delivered and exported contracts
-
-Requirements: M0, SEC-1…8, FR-SRC-1/2, ADP-3/5; foundational checkpoint support
-for ADP-2/4; tokenizer cases from SPEC §9.2 and DEV-004.
-
-`AgentDashKit` is one library product containing exactly the eight specified
-modules. Its manifest declares only the SPEC §4.2 dependency edges. It uses Swift 6
-language mode and strict concurrency, targeting macOS 27. The Xcode targets inherit
-`ARCHS=arm64`, `MACOSX_DEPLOYMENT_TARGET=27.0`, `SWIFT_VERSION=6.0` and
-`SWIFT_STRICT_CONCURRENCY=complete`.
-
-| Public boundary | Contract for subsequent workers |
+| Check | Observed result |
 |---|---|
-| `ADCore.Source`, `AccessKind`, `PathMapping`, `EnvironmentRule` | Sendable/Codable values; new sources have a nil database ID. Access is a default read-only location or opaque bookmark data. Mapping/rule execution is deferred. |
-| `SourceFile`, `Checkpoint` | File identity is `(sourceID, relativePath)`. Checkpoint contains inode, observed byte size, next byte offset, parser version, last consumed sequence and previous UTC-millisecond timestamp. Register the source first; per-source adapters/ingestion receive its assigned ID. No file is opened by these values. |
-| `SessionKey`, `SessionRecord` | Stable identity is `(agent, nativeID)`, independent of database session row IDs. Session metadata is intentionally minimal; remaining schema fields are reserved for later milestones. |
-| `EventRecord`, `TokenEvent`, `NormalizedRecord` | Session records precede their event/token records. Adapters supply deterministic globally unique dedupe keys. Same-session corrections update a row; copied history from another session retains the first owner. Unknown event kind is representable. Truncation and vendor accounting remain adapter responsibilities. |
-| `TokenCounts`, `TokenPrecision` | Total = fresh + cache read + both cache write classes + output. Reasoning is a subset of output. Store rejects negative components and reasoning greater than output. Usage remains unpriced in M0. |
-| `ADAdapters.AgentAdapter` | SPEC §5.8 protocol only: discover, parse from checkpoint, and copyable resume-command text. No vendor implementation, source scan or compression dependency. |
-| `ADStore.AgentStore` | Sendable synchronous facade over a private GRDB `DatabasePool`. APIs: `upsertSource`, `sources`, `upsertFile`, `checkpoint(for:)`, `write(_:fileID:checkpoint:)`, `events(in:)`. Call off the UI actor. No public SQL/GRDB objects; App imports ADCore/ADStore through the local package product. |
-| Other five modules | Named module boundaries only, with no simulated ingestion, insights, search UI, privacy engine or pricing implementation. |
+| App build and build-for-testing | Passed with no compiler or metadata-extraction warnings |
+| Actual App signature | Exact frozen entitlements, valid signature and Hardened Runtime passed the guard |
+| Package tests with full Xcode | 13 test functions, including 20 tokenizer cases, passed |
+| Developer-tool tests | 40 passed, zero skipped |
+| API/dependency guards | 18 production source files passed; exact GRDB pin and locks consistent |
+| Native UI navigation and Settings | Sessions/Projects/Token Usage switching and two Settings reopen cycles passed |
+| Native UI geometry | All six combinations of 960×600, 1120×720, 1440×900 and dark/light passed |
+| Menu panel/reopen | User opened the visible menu entry; XCTest asserted the real 360-point Dialog, clicked Open Dashboard and verified the main window returned |
+| Visual review | Six actual synthetic-window screenshots captured through the owner's already-authorized Computer Use tool and inspected |
+| Real default-source access | Claude Code, Codex and Copilot directory enumeration succeeded; no session content opened |
+| Grok | Default root absent; owner confirmed not installed and deferred local validation |
 
-Store writes use natural-key upserts, never `REPLACE`. A record batch and its
-optional checkpoint commit in one transaction. File metadata refresh with a nil
-checkpoint preserves the old parser version so a later ingester can detect a
-required reparse. `events(in:)` orders by sequence, then row ID, rather than time.
-The initializer must receive an **app-owned** database URL, never a source database.
+The normal unattended UI run reported **2 passed, 1 skipped, 0 failures** on this
+Mac because the native menu entry was not exposed to XCTest. That skip is not a
+pass. The same menu test was separately executed in explicit manual-entry mode and
+**passed its real panel and reopening assertions**. Changes to that feature still
+require manual entry validation when the automation host cannot locate the item.
 
-The v1 migration includes all SPEC §6.3 tables/indexes, external-content FTS and
-insert/update/delete triggers. GRDB enables WAL and foreign keys; `agentdash` is
-registered in `Configuration.prepareDatabase` **before migration**, on writer and
-reader connections. DEV-004 is preserved: pure splitting is in ADCore and GRDB
-registration is in ADStore; ADStore does not import ADSearch.
+No additional screen-recording permission was granted to the runner. Failed runner
+screenshots were replaced by an explicitly approved native Computer Use review;
+the failure was not converted into a passing automated screenshot claim.
 
-The unicode61 wrapper preserves original UTF-8 byte slices before case folding,
-then emits ordered overlapping CJK bigrams and colocated identifier aliases. This
-keeps camelCase, snake_case, kebab-case and whole filenames such as `auth.ts`
-searchable. CJK phrase tests check substring order and a reversed negative case.
-The M3 query builder/ranking/snippets remain unimplemented; multi-character CJK
-substring queries must be submitted as ordered FTS phrases. Identifier aliases
-share a position and can intentionally broaden a whole-identifier query.
+## Native visual review
 
-`write` is an M0 persistence primitive: it **does not yet maintain session totals,
-token rollups, costs, retention, keywords or observations**. Their schema is present;
-complete those transactionally before connecting ingestion/dashboard UI. No claim
-of parser or full accounting acceptance is made.
+Compared the M0 shell with the relevant Figma window structure and SPEC §11/§18:
 
-## Dependency pin and API evidence
+| Window | Figma window node | Dark | Light |
+|---|---|---|---|
+| 960×600 | `43:961` inside frame `43:959` | Captured and inspected | Captured and inspected |
+| 1120×720 | `11:2624` | Captured and inspected | Captured and inspected |
+| 1440×900 | `45:1643` inside frame `45:1641` | Captured and inspected | Captured and inspected |
 
-Only external package: `https://github.com/groue/GRDB.swift.git`, exact **7.11.1**,
-revision **b83108d10f42680d78f23fe4d4d80fc88dab3212**. Package and Xcode-workspace
-lockfiles contain that identical single pin. GRDB and all eight project modules
-compiled with the installed Swift 6.4.2 compiler. No zstd package was added.
+The native toolbar/sidebar/three-column structure remains usable at all sizes;
+empty-state text wraps without clipping or overflow. The initial minimum dark
+capture is an inactive-window state; the other five were raised before capture.
+The cursor halo in some images belongs to the capture interaction, not App UI.
 
-Context7 resolved `/groue/grdb.swift/v7.11.1`; version-specific API documentation was
-checked for DatabasePool, DatabaseMigrator, Configuration.prepareDatabase,
-FTS5WrapperTokenizer and token callbacks. The original-case bridge and unicode61
-configuration were also checked against the pinned official source:
+This is a comparison of M0 chrome, navigation and empty layouts, not pixel parity
+with the populated prototype. Session rows, transcript/overview content, charts and
+full responsive list-width interpolation remain their planned later-milestone work.
+The current bounded native list uses a 356-point ideal width.
 
-- [FTS5 tokenizers](https://github.com/groue/GRDB.swift/blob/v7.11.1/Documentation/FTS5Tokenizers.md)
-- [Tokenizer callback protocol](https://github.com/groue/GRDB.swift/blob/v7.11.1/GRDB/FTS/FTS5Tokenizer.swift)
-- [unicode61 descriptor](https://github.com/groue/GRDB.swift/blob/v7.11.1/GRDB/FTS/FTS5TokenizerDescriptor.swift)
-- [Concurrency](https://github.com/groue/GRDB.swift/blob/v7.11.1/GRDB/Documentation.docc/Concurrency.md)
+Native captures are local JPEG files (2× pixels per point) under
+`/private/tmp/agentdash-m0-visual/captures/`; `manifest.json` records dimensions and
+SHA-256 hashes. They contain only synthetic empty windows. They are not committed.
 
-All dependency checkouts, package caches, build output, development logs and helper
-scripts are under `/private/tmp/agentdash-m0-foundation/`. No global configuration,
-software, credentials, agent logs, memory or another worktree was inspected or
-changed. Test records are inline synthetic values, not captured sessions.
+## Source-access evidence
 
-## Native skeleton and access path
+The normal signed, sandboxed, hardened App was launched independently of the UI
+runner. Sources → Verify Access reported top-level entry counts:
 
-The shared `AgentDashboard` scheme builds the app and declares an XCUITest target.
-Bundle ID is `com.chenxin.AgentDashboard`; signing team remains for the owner to
-select. App Sandbox and Hardened Runtime are enabled. The entitlement plist matches
-SPEC §12.1 exactly. `CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` prevents an automatic
-debug entitlement from expanding that list; the scheme launches without debugger
-attachment. Actual signature entitlements have **not** been verified.
+| Source | Result |
+|---|---|
+| Claude Code | Readable, 46 entries |
+| Codex | Readable, 70 entries |
+| Copilot CLI | Readable, 55 entries |
+| Grok Build | Directory not found; owner-confirmed local deferral |
 
-The app has an empty three-column Sessions/Projects window, two-column Token Usage
-entry, 360-point menu panel, Settings, menu commands and English/Simplified Chinese
-String Catalog (33 keys). Default size is 1120×720, minimum 960×600; sidebar and
-list column bounds follow SPEC. Window-close keeps the menu app alive. No data or
-active-session counts are fabricated. No SQL, network API, AI, child-process API,
-source write or session-content logging was introduced in App/package sources.
+Counts describe that observation, not session totals. The available default roots
+worked through the frozen read-only exceptions, so the fallback was not required.
+Valid bookmark-grant persistence is not claimed as executed; invalid-bookmark and
+synthetic-directory cases were checked separately. Source management/bookmark
+lifecycle coverage is completed in M2.
 
-Settings → Sources → Verify Access is a deliberately narrow M0 check: list each
-root's immediate directory entries and display the count/status. It does not open
-transcript contents, infer session counts, walk subdirectories or start ingestion.
-The real account home is resolved by read-only `getpwuid_r`; sandbox-container home
-is not mistaken for the user's agent root. Grant access again pre-navigates an
-NSOpenPanel with hidden directories visible, requires the listed directory, creates
-an **app-scoped read-only** bookmark, and saves it only in the app database.
-Verification resolves the bookmark, detects staleness and balances scoped access.
-Nothing reads source directories automatically at launch. Full source lifecycle and
-launch-time bookmark health refresh remain M2 work.
+## Reproduction and local artifacts
 
-The UI smoke test's `--synthetic` launch uses a unique temporary app database and
-does not even resolve default agent roots. It has not been run. No app was launched
-against real source directories during this task.
+Use a task-specific directory outside the repository for all build products:
 
-Figma design context/screenshots for Sessions `11:2624` and menu panel `31:847`
-were read using the `figma-design-to-code` guidance. Native SwiftUI/system controls
-are used for the empty M0 shell; populated rows/charts/prototype image assets are
-outside this task. **No rendered app-to-Figma comparison has run**, including
-960×600, 1120×720 and 1440×900, dark/light modes.
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project AgentDashboard.xcodeproj -scheme AgentDashboard \
+  -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData \
+  -clonedSourcePackagesDirPath /private/tmp/agentdash-m0-xcode-worker/packages \
+  CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- build-for-testing
 
-## Commands and observed results
+codesign --force --sign - --options runtime \
+  --entitlements App/AgentDashboard.entitlements \
+  /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData/Build/Products/Debug/AgentDashboard.app
 
-Environment: `swift --version` reported Apple Swift 6.4.2, arm64 macOS 27.2 target;
-`xcode-select -p` returned `/Library/Developer/CommandLineTools`.
-`xcodebuild -version` failed with: `tool 'xcodebuild' requires Xcode ... active
-developer directory ... is a command line tools instance`.
-
-Reproducible package command setup, run from this worktree:
-
-```zsh
-m0_tmp=/private/tmp/agentdash-m0-foundation
-mkdir -p "$m0_tmp/tmp"
-m0_swift_args=(
-  --package-path Packages/AgentDashKit
-  --scratch-path "$m0_tmp/scratch"
-  --cache-path "$m0_tmp/cache"
-  --config-path "$m0_tmp/config"
-  --security-path "$m0_tmp/security"
-  --disable-netrc --disable-keychain --disable-sandbox
-  --explicit-target-dependency-import-check error
-)
-env TMPDIR="$m0_tmp/tmp" CLANG_MODULE_CACHE_PATH="$m0_tmp/module-cache" \
-  swift build "${m0_swift_args[@]}"
-env TMPDIR="$m0_tmp/tmp" CLANG_MODULE_CACHE_PATH="$m0_tmp/module-cache" \
-  swift test "${m0_swift_args[@]}" \
-  -Xswiftc -plugin-path \
-  -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing
+Tools/check-entitlements.sh \
+  /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData/Build/Products/Debug/AgentDashboard.app
 ```
 
-`--disable-sandbox` here disables only SwiftPM's nested build-tool sandbox, which
-this worker environment cannot create; it does not change the app sandbox or the
-worker's filesystem restrictions.
+Then use `xcodebuild test-without-building` with the generated `.xctestrun` file.
+Xcode ad-hoc builds omit the runtime flag, and test builds add testing entitlements;
+explicit re-signing/readback is necessary for this local M0 validation. App Debug
+uses `ENABLE_DEBUG_DYLIB=NO` to avoid the real library-validation launch failure.
+No security exceptions were added. Release Developer ID/notarization remains M5.
 
-| Check actually executed | Result / evidence under the task temp directory |
-|---|---|
-| Package dependency resolution | Passed, exact GRDB 7.11.1, local isolated cache/security/config paths, credential lookup disabled. |
-| `swift build` using the arguments above | Passed; `package-build.log`. CLT emitted missing developer framework search-path linker warnings. Not a warning-free Xcode build claim. |
-| `swift test` with explicit Testing plugin path | Passed: **13 test functions**, including **20 parameterized tokenizer cases** (32 individual invocations); `package-tests-final.log`. Coverage includes fresh/reopened WAL DB, v1 tables/FKs, source settings, stable dedupe IDs, copied-history ownership, token correction, rollback, checkpoint atomicity, parser-version preservation, ordering, and FTS insert/update/delete/cascade integrity. |
-| App model/probe/views `swiftc -typecheck` in Swift 6 strict mode | Passed with no diagnostics after correcting an unused Task result; `app-views-typecheck.log`. Excludes App entry and XCTest source. |
-| Synthetic source-probe executable | Passed: readable top-level count, missing path, invalid bookmark, unchanged synthetic file bytes/mtime. `source-probe-harness`; source is `SourceProbeHarness.swift`. This is unsigned helper execution, not sandbox/bookmark acceptance. |
-| `plutil -lint AgentDashboard.xcodeproj/project.pbxproj App/AgentDashboard.entitlements` | Passed. Project converted to `project.json` for reference/settings validation. |
-| `swift package … dump-package` plus `python3 /private/tmp/agentdash-m0-foundation/verify-foundation.py` | Passed: eight-module graph, Swift/platform settings, single matching pin, exact entitlement plist, project/scheme references, EN/zh-Hans catalog, App SQL boundary, forbidden API scan and whitespace. This is a task-local static check, not the parallel worker's guardrail scripts. |
-| `git diff --check` | Passed; added/untracked files also received the explicit whitespace check above. |
+Ordinary UI tests neither request recording permission nor capture screenshots.
+For visual review, a local copy of the `.xctestrun` target's environment sets
+`AGENTDASH_VISUAL_REVIEW_DIR` to a fresh directory beneath
+`/private/tmp/agentdash-m0-visual/`. The geometry test emits
+`AGENTDASH_VISUAL_REVIEW_READY <case>` and waits for `<case>.ack`. The coordinator
+captures and inspects the actual window before writing that acknowledgment.
+Normal tests do not wait. Never create acknowledgments without inspecting images.
 
-The App view/model typecheck command was:
+For the menu host limitation, set `AGENTDASH_MANUAL_MENU_REVIEW=1` in a local test
+configuration. If the native entry is unavailable to XCTest, the test waits for a
+person to open the **real** panel, then retains all width/reopening assertions.
+No fake panel or weakened assertion substitutes for the feature.
 
-```zsh
-env CLANG_MODULE_CACHE_PATH="$m0_tmp/module-cache" swiftc \
-  -typecheck -parse-as-library -swift-version 6 -strict-concurrency=complete \
-  -target arm64-apple-macos27.0 -module-cache-path "$m0_tmp/app-module-cache" \
-  -I "$m0_tmp/scratch/out/Products/Debug" \
-  -F "$m0_tmp/scratch/out/Products/Debug/PackageFrameworks" \
-  -Xcc -fmodule-map-file="$m0_tmp/scratch/checkouts/GRDB.swift/Sources/GRDBSQLite/module.modulemap" \
-  App/SourceAccessProbe.swift App/DashboardModel.swift App/MainWindow.swift \
-  App/SettingsView.swift App/MenuBarPanel.swift
-```
+Key local evidence:
 
-Development failures resolved or bounded:
+- `agentdash-m0-xcode/package-tests.log`: full-Xcode package tests.
+- `agentdash-m0-xcode/UI-CUA-review2.xcresult`: six serialized native geometry/visual handoffs.
+- `agentdash-m0-xcode/UI-manual-menu.xcresult`: actual panel and reopening assertions passed.
+- `agentdash-m0-xcode/UI-unattended-final.xcresult`: two passed and one explicitly skipped UI test.
+- `agentdash-m0-visual/captures/manifest.json`: six captured images and hashes.
 
-- Nested SwiftPM sandbox initially failed `sandbox_apply: Operation not permitted`;
-  the command-local SwiftPM flag above allowed package compilation without global
-  changes.
-- Initial Swift Testing expectations inside otherwise nonthrowing GRDB closures
-  needed explicit `throws -> Void` closure signatures; fixed.
-- Default CLT incremental SwiftBuild lost Testing macro discovery. Explicit
-  `-plugin-path …/plugins/testing` restored repeatable test execution. A native
-  build-engine fallback was also tried: it first lacked `Testing`; adding CLT
-  framework/plugin paths ran tests but is not the final recommended command.
-- An initial FTS update test reused the alias `tool` in old/new camelCase names;
-  colocated synonym matching correctly matched both. Independent lowercase
-  sentinels now test stale-index removal; identifier behavior has separate tests.
-- Whole-App CLI typecheck reached `@State` but failed because this CLT installation
-  lacks `SwiftUIMacros.StateMacro`. No compatibility branch or substitute toolchain
-  was added. Full App build remains pending Xcode 27.
+All paths above are relative to `/private/tmp/`. Keep raw diagnostic bundles local;
+failed-test artifacts can include system UI metadata. No real session text,
+credentials or unsanitized source fixtures were published.
 
-## Coordinator integration and remaining acceptance
+## Remaining milestone gates
 
-1. Review the uncommitted additions, then integrate the reviewed tooling through
-   the coordinator's process. `Tools/` is absent in this branch; neither
-   `Tools/forbid-apis.sh` nor `Tools/check-entitlements.sh` was available to run.
-   No GitHub publication was attempted.
-2. Record the small schema extension in shared SPEC/DECISIONS: `source_files.last_seq`
-   and `previous_ts` persist file ordering/timestamp inheritance across restarts.
-   They are the only additional columns beyond SPEC §6.3. Shared docs were left
-   untouched under ownership rules. FORMATS needs no parser-format update in M0.
-3. After the owner installs/selects Xcode 27, resolve the exact lockfile with an
-   isolated package cache and run the real app build/UI test commands, for example:
-
-   ```zsh
-   xcodebuild -project AgentDashboard.xcodeproj -scheme AgentDashboard \
-     -destination 'platform=macOS,arch=arm64' \
-     -derivedDataPath /private/tmp/agentdash-m0-foundation/DerivedData \
-     -clonedSourcePackagesDirPath /private/tmp/agentdash-m0-foundation/xcode-packages build
-   xcodebuild test -project AgentDashboard.xcodeproj -scheme AgentDashboard \
-     -destination 'platform=macOS,arch=arm64' \
-     -derivedDataPath /private/tmp/agentdash-m0-foundation/DerivedData \
-     -clonedSourcePackagesDirPath /private/tmp/agentdash-m0-foundation/xcode-packages
-   ```
-
-4. Select the owner's signing team without expanding entitlements, check the
-   **actual signed .app** with the reviewed guardrails, and test Sources → Verify
-   Access for each default root. If denied, grant its directory via NSOpenPanel,
-   verify again, quit/relaunch and verify persisted bookmark resolution. Record
-   counts/status only, never raw transcript text. Real-source runtime verification
-   belongs to the coordinator/owner; this worker used only synthetic data.
-5. Render the empty shell at 960×600, 1120×720 and 1440×900 in dark then light mode,
-   including window restoration, closing/reopening via the menu panel, settings,
-   localization and synthetic UI smoke. Compare geometry against Figma. App launch,
-   UI, signed sandbox exceptions, valid security-scoped bookmark persistence and
-   manual zero-network observation are all **unverified**.
-6. Do not mark M0 accepted until those checks pass. No NFR, adapter, live ingestion,
-   pricing, full search or real-session accuracy result is implied by these tests.
+M1 starts with reviewed real-file capture before any adapter. Compressed Codex files
+are confirmed, but the capture/decoder path still needs its scoped implementation.
+Feature-scale performance budgets, real-session accounting accuracy, archive and
+pricing behavior, populated Figma parity and release network observation remain
+future acceptance work; this report does not claim them completed.

@@ -14,6 +14,7 @@ struct MenuBarPanel: View {
                 openWindow(id: "dashboard")
                 NSApp.activate(ignoringOtherApps: true)
             }.keyboardShortcut("d")
+                .accessibilityIdentifier("openDashboard")
             SettingsLink { Text("Settings…") }.keyboardShortcut(",")
             Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
         }

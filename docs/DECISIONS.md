@@ -19,12 +19,11 @@ running. Inferred pending-tool approval is labeled "possibly needs approval";
 file silence is not proof of an approval request. Old terminal events cannot
 override later resumed activity. The corrected rules are in SPEC §10.4.
 
-## DEV-003 — Missing full Xcode (2026-11-17)
+## DEV-003 — Initial missing full Xcode (resolved 2026-11-17)
 
-The current developer directory is Command Line Tools; `xcodebuild -version`
-failed. Swift 6.4.2 is available. The owner will install Xcode 27. Proceed with
-independent tooling/package work; do not mark app build, UI, signed sandbox access
-or the M0 milestone as verified until the required execution evidence exists.
+At bootstrap only Command Line Tools was selected. The owner subsequently installed
+Xcode 27.2; actual build, signed access and UI evidence is recorded in the M0 report.
+Command-local `DEVELOPER_DIR` selects it without changing the global selection.
 
 ## DEV-004 — Store owns FTS registration (2026-11-17)
 
@@ -53,3 +52,44 @@ These fields are now included in SPEC §6.3. Same-session dedupe conflicts updat
 the existing row; copied events/tokens keep their first session owner instead of
 moving old history to a resumed session. Full inheritance display and aggregate
 maintenance remain later milestone work.
+
+## DEV-007 — Local Xcode validation signing (2026-11-17)
+
+The owner installed and initialized Xcode 27.2. Use command-local `DEVELOPER_DIR`
+to select it; no global developer-directory change is needed. For local M0 checks,
+build with ad-hoc signing, then explicitly sign the App with the frozen entitlement
+plist and `--options runtime`, and inspect the actual signature. Xcode otherwise
+omits Hardened Runtime for ad-hoc builds and testing builds add test entitlements.
+App Debug uses `ENABLE_DEBUG_DYLIB=NO`: the separate debug dylib was rejected by
+library validation in a real launch. No library-validation exception is added.
+`LM_SKIP_METADATA_EXTRACTION=YES`, verified on Xcode 27.2, skips unused AppIntents
+metadata work without adding a framework or broadly suppressing warnings.
+Developer ID distribution/notarization remains the separate D-8/M5 requirement.
+
+## DEV-008 — Grok unavailable on this Mac (owner confirmed 2026-11-17)
+
+The owner confirmed Grok is not installed and asked to ignore it for now. Treat its
+missing default root as an unavailable source, not a permission failure; it does
+not block the current local M0 access check. Do not install Grok, create its source
+directory, or fabricate observed fixtures. Local Grok capture/validation is deferred
+until an actual source is available; retain the adapter extension point.
+
+## DEV-009 — Native visual review without runner recording access (2026-11-17)
+
+The owner explicitly approved the existing Codex Computer Use capture route for
+synthetic App windows. XCTest verifies interaction and native geometry; the
+authorized tool captures the real windows for Figma review. The test runner does
+not request recording permissions. An opt-in serialized handoff permits captures
+between geometry assertions, with acknowledgments only after image inspection.
+On this desktop the menu entry was visible to the owner but unavailable in the
+XCTest hierarchy. The explicit manual-entry mode still requires the real Dialog,
+its 360-point width, and successful Open Dashboard assertions. A skip alone never
+satisfies that acceptance check; the assisted case was executed and passed.
+
+## DEV-010 — Native outer-window sizing (2026-11-17)
+
+SPEC window sizes include native chrome. SwiftUI content minima alone produced a
+960×652 outer window. A narrow AppKit bridge measures settled native chrome and
+converts the 960×600 outer minimum to content constraints without a fixed toolbar
+height. Its state belongs to window content; unchanged native values are not
+reassigned. All six size/appearance combinations were executed and visually checked.
