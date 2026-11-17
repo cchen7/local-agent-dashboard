@@ -42,3 +42,14 @@ worktree. A completed preflight verified provider/model, successful commands and
 normal exit (FORMATS.md). The owner explicitly approved transmitting project
 instructions, code and necessary tool output through the existing standard proxy;
 raw agent-session content and credentials are excluded. Global config is unchanged.
+
+## DEV-006 — M0 storage baseline (2026-11-17)
+
+Pin the already-approved GRDB.swift dependency exactly to 7.11.1, revision
+`b83108d10f42680d78f23fe4d4d80fc88dab3212`; keep the package and Xcode lockfiles
+identical. The v1 migration adds `source_files.last_seq` and `previous_ts` so file
+ordering and timestamp inheritance survive an incremental restart (ADP-2/5).
+These fields are now included in SPEC §6.3. Same-session dedupe conflicts update
+the existing row; copied events/tokens keep their first session owner instead of
+moving old history to a resumed session. Full inheritance display and aggregate
+maintenance remain later milestone work.

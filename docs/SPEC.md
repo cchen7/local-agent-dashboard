@@ -355,6 +355,8 @@ CREATE TABLE source_files (
   role TEXT NOT NULL,                  -- session | subagent | prompt_history | sidecar | metadata_db
   inode INTEGER, size INTEGER, mtime_ns INTEGER,
   read_offset INTEGER NOT NULL DEFAULT 0,
+  last_seq INTEGER NOT NULL DEFAULT -1,  -- preserve file order across restarts (ADP-2/5)
+  previous_ts INTEGER,                 -- preserve inherited UTC timestamp across restarts
   parser_version INTEGER NOT NULL,
   state TEXT NOT NULL,                 -- ok | partial | error | gone
   unknown_records INTEGER NOT NULL DEFAULT 0,

@@ -1,0 +1,103 @@
+import Foundation
+
+/// Stable cross-file identity; adapters never need database session row IDs.
+public struct SessionKey: Codable, Equatable, Hashable, Sendable {
+    public var agent: AgentKind
+    public var nativeID: String
+    /// Create a normalized value without performing file access.
+    public init(agent: AgentKind, nativeID: String) { self.agent = agent; self.nativeID = nativeID }
+}
+
+/// A conservative normalized status. Status inference is implemented in M3.
+public enum SessionStatus: String, Codable, Sendable {
+    case running, waiting, completed, failed, unknown
+}
+
+/// Minimal session metadata. All times are UTC epoch milliseconds.
+public struct SessionRecord: Codable, Equatable, Sendable {
+    public var key: SessionKey
+    public var sourceID: Int64
+    public var fileID: Int64?
+    public var environment: String
+    public var cwd: String?
+    public var title: String?
+    public var startedAt: Int64?
+    public var lastEventAt: Int64?
+    public var status: SessionStatus
+    /// Create a normalized value without performing file access.
+    public init(key: SessionKey, sourceID: Int64, fileID: Int64? = nil, environment: String,
+                cwd: String? = nil, title: String? = nil, startedAt: Int64? = nil,
+                lastEventAt: Int64? = nil, status: SessionStatus = .unknown) {
+        self.key = key; self.sourceID = sourceID; self.fileID = fileID; self.environment = environment
+        self.cwd = cwd; self.title = title; self.startedAt = startedAt; self.lastEventAt = lastEventAt
+        self.status = status
+    }
+}
+
+/// Unknown records are retained by adapters as truncated metadata, never silently dropped.
+public enum EventKind: String, Codable, Sendable {
+    case user, assistant, toolCall = "tool_call", toolResult = "tool_result", summary, system, error
+    case promptHistory = "prompt_history", unknown
+}
+
+/// Searchable normalized event. The adapter owns truncation and the globally deterministic dedupe key.
+public struct EventRecord: Codable, Equatable, Sendable {
+    public var session: SessionKey
+    public var sequence: Int64
+    public var timestamp: Int64
+    public var kind: EventKind
+    public var toolName: String?
+    public var text: String?
+    public var metadataJSON: String?
+    public var dedupeKey: String
+    /// Create a normalized value without performing file access.
+    public init(session: SessionKey, sequence: Int64, timestamp: Int64, kind: EventKind,
+                toolName: String? = nil, text: String? = nil, metadataJSON: String? = nil, dedupeKey: String) {
+        self.session = session; self.sequence = sequence; self.timestamp = timestamp; self.kind = kind
+        self.toolName = toolName; self.text = text; self.metadataJSON = metadataJSON; self.dedupeKey = dedupeKey
+    }
+}
+
+/// Cache-inclusive token components. Reasoning is already included in output (SPEC §8.1).
+public struct TokenCounts: Codable, Equatable, Sendable {
+    public var inputFresh: Int64
+    public var cacheRead: Int64
+    public var cacheWrite: Int64
+    public var cacheWrite1h: Int64
+    public var output: Int64
+    public var reasoning: Int64
+    public var input: Int64 { inputFresh + cacheRead + cacheWrite + cacheWrite1h }
+    public var total: Int64 { input + output }
+    /// Create a normalized value without performing file access.
+    public init(inputFresh: Int64 = 0, cacheRead: Int64 = 0, cacheWrite: Int64 = 0,
+                cacheWrite1h: Int64 = 0, output: Int64 = 0, reasoning: Int64 = 0) {
+        self.inputFresh = inputFresh; self.cacheRead = cacheRead; self.cacheWrite = cacheWrite
+        self.cacheWrite1h = cacheWrite1h; self.output = output; self.reasoning = reasoning
+    }
+}
+
+/// Normalized usage precision; coarse snapshots must not be used for peak calculations.
+public enum TokenPrecision: String, Codable, Sendable { case call, snapshot, checkpoint }
+
+/// Unpriced normalized token usage. Pricing and rollup calculation arrive with M4.
+public struct TokenEvent: Codable, Equatable, Sendable {
+    public var session: SessionKey
+    public var timestamp: Int64
+    public var model: String?
+    public var counts: TokenCounts
+    public var precision: TokenPrecision
+    public var dedupeKey: String
+    /// Create a normalized value without performing file access.
+    public init(session: SessionKey, timestamp: Int64, model: String? = nil, counts: TokenCounts,
+                precision: TokenPrecision = .call, dedupeKey: String) {
+        self.session = session; self.timestamp = timestamp; self.model = model
+        self.counts = counts; self.precision = precision; self.dedupeKey = dedupeKey
+    }
+}
+
+/// Adapter output. Sessions precede their events/tokens in a transaction.
+public enum NormalizedRecord: Equatable, Sendable {
+    case session(SessionRecord)
+    case event(EventRecord)
+    case tokens(TokenEvent)
+}

@@ -1,0 +1,304 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		F559CE7892B061A053E0DA39 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentDashboardApp.swift"; sourceTree = "<group>";
+		};
+		3916FD5CC53B5054B39B6967 = {
+			isa = PBXBuildFile; fileRef = F559CE7892B061A053E0DA39;
+		};
+		D6CA445C859407AE720EE507 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DashboardModel.swift"; sourceTree = "<group>";
+		};
+		F4C4CACC3F158EBB5F3C42EE = {
+			isa = PBXBuildFile; fileRef = D6CA445C859407AE720EE507;
+		};
+		323361D59B06F84B9DA7AC45 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MainWindow.swift"; sourceTree = "<group>";
+		};
+		2B591F16733271636F8467C5 = {
+			isa = PBXBuildFile; fileRef = 323361D59B06F84B9DA7AC45;
+		};
+		48B9829DDB297129458B3902 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MenuBarPanel.swift"; sourceTree = "<group>";
+		};
+		C497F0C95670E0D8F1966C44 = {
+			isa = PBXBuildFile; fileRef = 48B9829DDB297129458B3902;
+		};
+		03AF56BE2C9FDF9DEFBDE818 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView.swift"; sourceTree = "<group>";
+		};
+		D2740EFD5804A93FE8C32426 = {
+			isa = PBXBuildFile; fileRef = 03AF56BE2C9FDF9DEFBDE818;
+		};
+		7BF0346EAFE21A43227B2108 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SourceAccessProbe.swift"; sourceTree = "<group>";
+		};
+		DB58144FCB6BA78D6866E33F = {
+			isa = PBXBuildFile; fileRef = 7BF0346EAFE21A43227B2108;
+		};
+		652F55016243BF1B9F1BBEA4 = {
+			isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>";
+		};
+		BAB7530B9399702DECCC3C35 = {
+			isa = PBXBuildFile; fileRef = 652F55016243BF1B9F1BBEA4;
+		};
+		CCB32DA757F8CB91EA8A9F9D = {
+			isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentDashboard.entitlements; sourceTree = "<group>";
+		};
+		3FA65313F3EE7C23D31896E7 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>";
+		};
+		C9F6181A603CEC80DBFCC70D = {
+			isa = PBXBuildFile; fileRef = 3FA65313F3EE7C23D31896E7;
+		};
+		681C948D238C526E9E3424E0 = {
+			isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AgentDashboard.app; sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		F739566ED5280322FF98A798 = {
+			isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AgentDashboardUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		19F479106CE8C3BA8C106518 = {
+			isa = PBXGroup; children = (
+				FC233BDA2344D97687F5A251,
+				B9E7F2871A3402983868AFC8,
+			); sourceTree = "<group>";
+		};
+		FC233BDA2344D97687F5A251 = {
+			isa = PBXGroup; children = (
+				F559CE7892B061A053E0DA39,
+				D6CA445C859407AE720EE507,
+				323361D59B06F84B9DA7AC45,
+				48B9829DDB297129458B3902,
+				03AF56BE2C9FDF9DEFBDE818,
+				7BF0346EAFE21A43227B2108,
+				CCB32DA757F8CB91EA8A9F9D,
+				C5E55183ECB076EB335DF6EE,
+				C4DF94A42CA730B26E01C133,
+			); path = App; sourceTree = "<group>";
+		};
+		C5E55183ECB076EB335DF6EE = {
+			isa = PBXGroup; children = (
+				652F55016243BF1B9F1BBEA4,
+			); path = Resources; sourceTree = "<group>";
+		};
+		C4DF94A42CA730B26E01C133 = {
+			isa = PBXGroup; children = (
+				3FA65313F3EE7C23D31896E7,
+			); path = Tests; sourceTree = "<group>";
+		};
+		B9E7F2871A3402983868AFC8 = {
+			isa = PBXGroup; children = (
+				681C948D238C526E9E3424E0,
+				F739566ED5280322FF98A798,
+			); name = Products; sourceTree = "<group>";
+		};
+		BC4A71180870F7945155FBB0 = {
+			isa = XCLocalSwiftPackageReference; relativePath = Packages/AgentDashKit;
+		};
+		ED3DC570B697046E1D6DC405 = {
+			isa = XCSwiftPackageProductDependency; package = BC4A71180870F7945155FBB0; productName = AgentDashKit;
+		};
+		BBE189F87790362F4781096F = {
+			isa = PBXBuildFile; productRef = ED3DC570B697046E1D6DC405;
+		};
+		AFF87A50730392B6633ACECE = {
+			isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (
+				3916FD5CC53B5054B39B6967,
+				F4C4CACC3F158EBB5F3C42EE,
+				2B591F16733271636F8467C5,
+				C497F0C95670E0D8F1966C44,
+				D2740EFD5804A93FE8C32426,
+				DB58144FCB6BA78D6866E33F,
+			); runOnlyForDeploymentPostprocessing = 0;
+		};
+		F9187E824FE171A6F0EFAE28 = {
+			isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (
+				BAB7530B9399702DECCC3C35,
+			); runOnlyForDeploymentPostprocessing = 0;
+		};
+		7A4C2DC8FCA657188648E999 = {
+			isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (
+				BBE189F87790362F4781096F,
+			); runOnlyForDeploymentPostprocessing = 0;
+		};
+		DEE94446A282611C16F7781C = {
+			isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (
+				C9F6181A603CEC80DBFCC70D,
+			); runOnlyForDeploymentPostprocessing = 0;
+		};
+		1F030AB36D1A3A4389CF71AE = {
+			isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (
+			); runOnlyForDeploymentPostprocessing = 0;
+		};
+		B10CDED79664567B030B2B4F = {
+			isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (
+			); runOnlyForDeploymentPostprocessing = 0;
+		};
+		00B65C7FF4DF955E2B77DCDC = {
+			isa = PBXContainerItemProxy; containerPortal = 244210E48437B6556980A702; proxyType = 1; remoteGlobalIDString = C1E9827DB735CA9BAA54A540; remoteInfo = AgentDashboard;
+		};
+		74F52A58B40386BC8A8260F6 = {
+			isa = PBXTargetDependency; target = C1E9827DB735CA9BAA54A540; targetProxy = 00B65C7FF4DF955E2B77DCDC;
+		};
+		C1E9827DB735CA9BAA54A540 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C083D18A2C4AFE9B841204B8;
+			buildPhases = (
+				AFF87A50730392B6633ACECE,
+				7A4C2DC8FCA657188648E999,
+				F9187E824FE171A6F0EFAE28,
+			);
+			buildRules = (); dependencies = (
+			);
+			name = AgentDashboard; packageProductDependencies = (
+				ED3DC570B697046E1D6DC405,
+			);
+			productName = AgentDashboard; productReference = 681C948D238C526E9E3424E0; productType = "com.apple.product-type.application";
+		};
+		9805CBD60EB4F66728D5D195 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B640E943BD57DC71742C38D0;
+			buildPhases = (
+				DEE94446A282611C16F7781C,
+				B10CDED79664567B030B2B4F,
+				1F030AB36D1A3A4389CF71AE,
+			);
+			buildRules = (); dependencies = (
+				74F52A58B40386BC8A8260F6,
+			);
+			name = AgentDashboardUITests; packageProductDependencies = (
+			);
+			productName = AgentDashboardUITests; productReference = F739566ED5280322FF98A798; productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		488864B3D19480A82F7F1786 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				ARCHS = "arm64";
+				SDKROOT = "macosx";
+				MACOSX_DEPLOYMENT_TARGET = "27.0";
+				SWIFT_VERSION = "6.0";
+				SWIFT_STRICT_CONCURRENCY = "complete";
+				CLANG_ENABLE_MODULES = "YES";
+				CLANG_ENABLE_OBJC_ARC = "YES";
+				GCC_C_LANGUAGE_STANDARD = "gnu17";
+				ONLY_ACTIVE_ARCH = "YES";
+				SWIFT_EMIT_LOC_STRINGS = "YES";
+				DEBUG_INFORMATION_FORMAT = "dwarf";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				ENABLE_TESTABILITY = "YES";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+			}; name = Debug;
+		};
+		35B1014F135DE9B45529B733 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				ARCHS = "arm64";
+				SDKROOT = "macosx";
+				MACOSX_DEPLOYMENT_TARGET = "27.0";
+				SWIFT_VERSION = "6.0";
+				SWIFT_STRICT_CONCURRENCY = "complete";
+				CLANG_ENABLE_MODULES = "YES";
+				CLANG_ENABLE_OBJC_ARC = "YES";
+				GCC_C_LANGUAGE_STANDARD = "gnu17";
+				ONLY_ACTIVE_ARCH = "YES";
+				SWIFT_EMIT_LOC_STRINGS = "YES";
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				ENABLE_TESTABILITY = "NO";
+			}; name = Release;
+		};
+		B4E10CAA9C5E22150B71559C = {
+			isa = XCConfigurationList; buildConfigurations = (
+				488864B3D19480A82F7F1786,
+				35B1014F135DE9B45529B733,
+			); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;
+		};
+		03CA35BB2534EEA6D70E5210 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				CODE_SIGN_STYLE = "Automatic";
+				CODE_SIGN_ENTITLEMENTS = "App/AgentDashboard.entitlements";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = "NO";
+				ENABLE_APP_SANDBOX = "YES";
+				ENABLE_HARDENED_RUNTIME = "YES";
+				GENERATE_INFOPLIST_FILE = "YES";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Agent Dashboard";
+				MARKETING_VERSION = "0.1.0";
+				CURRENT_PROJECT_VERSION = "1";
+				SUPPORTED_PLATFORMS = "macosx";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
+			}; name = Debug;
+		};
+		C4105CD76E02D5765B7DA9D2 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				CODE_SIGN_STYLE = "Automatic";
+				CODE_SIGN_ENTITLEMENTS = "App/AgentDashboard.entitlements";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = "NO";
+				ENABLE_APP_SANDBOX = "YES";
+				ENABLE_HARDENED_RUNTIME = "YES";
+				GENERATE_INFOPLIST_FILE = "YES";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Agent Dashboard";
+				MARKETING_VERSION = "0.1.0";
+				CURRENT_PROJECT_VERSION = "1";
+				SUPPORTED_PLATFORMS = "macosx";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
+			}; name = Release;
+		};
+		C083D18A2C4AFE9B841204B8 = {
+			isa = XCConfigurationList; buildConfigurations = (
+				03CA35BB2534EEA6D70E5210,
+				C4105CD76E02D5765B7DA9D2,
+			); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;
+		};
+		8510D108BF38EA639E810748 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboardUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				CODE_SIGN_STYLE = "Automatic";
+				GENERATE_INFOPLIST_FILE = "YES";
+				TEST_TARGET_NAME = "AgentDashboard";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
+			}; name = Debug;
+		};
+		F8B3D11D88B6E73D70BF5925 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboardUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				CODE_SIGN_STYLE = "Automatic";
+				GENERATE_INFOPLIST_FILE = "YES";
+				TEST_TARGET_NAME = "AgentDashboard";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
+			}; name = Release;
+		};
+		B640E943BD57DC71742C38D0 = {
+			isa = XCConfigurationList; buildConfigurations = (
+				8510D108BF38EA639E810748,
+				F8B3D11D88B6E73D70BF5925,
+			); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;
+		};
+		244210E48437B6556980A702 = {
+			isa = PBXProject;
+			attributes = { BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2700; TargetAttributes = { C1E9827DB735CA9BAA54A540 = { CreatedOnToolsVersion = 27.0; }; 9805CBD60EB4F66728D5D195 = { CreatedOnToolsVersion = 27.0; TestTargetID = C1E9827DB735CA9BAA54A540; }; }; };
+			buildConfigurationList = B4E10CAA9C5E22150B71559C; compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, "zh-Hans");
+			mainGroup = 19F479106CE8C3BA8C106518; productRefGroup = B9E7F2871A3402983868AFC8;
+			packageReferences = (
+				BC4A71180870F7945155FBB0,
+			); projectDirPath = ""; projectRoot = "";
+			targets = (
+				C1E9827DB735CA9BAA54A540,
+				9805CBD60EB4F66728D5D195,
+			);
+		};
+	};
+	rootObject = 244210E48437B6556980A702;
+}
