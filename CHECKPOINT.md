@@ -1,37 +1,51 @@
 # Coordinator checkpoint
 
-## Current handover
+## Current state
 
-- SPEC, development plan, task ownership and PR review gate are established.
-- Owner approved the status-inference precedence clarification in SPEC §10.4.
-- EXP-1 completed; metadata counts and caveats are in `docs/FORMATS.md`.
-- Full Xcode 27 is not installed/selected; owner will install it. No M0 app
-  build, UI or signed sandbox-access acceptance has run.
-- Standard Codex preflight completed with provider `azure`, model `gpt-6.1-sol`,
-  successful tool calls and process exit 0. Direct parent spawn retained Foundry.
+M0 local acceptance is complete; PR #2 is ready for final review/merge. Read its
+actual GitHub state before proceeding. The implementation is an empty native shell
+and storage baseline, not the complete dashboard.
+
+- Xcode 27.2 and macOS SDK 27.2 installed/initialized by owner; use command-local
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
+- Real App build/build-for-testing passed without compiler/metadata warnings.
+- Actual App signature passed exact entitlements and Hardened Runtime checks.
+- Full-Xcode package tests passed (13 functions, including 20 tokenizer cases).
+- Tool tests passed (40, zero skipped); API/dependency guards passed.
+- Navigation/Settings and six size/appearance geometry cases passed automatically.
+- Six real synthetic-window screenshots were captured with the explicitly
+  authorized Computer Use tool and inspected. No runner recording access was added.
+- The menu entry is not exposed to XCTest on this desktop. The owner opened it in
+  manual-entry mode; actual panel width and Open Dashboard assertions passed.
+  The unattended skip is recorded separately and is never counted as a pass.
+- Signed App directory access succeeded for Claude/Codex/Copilot (metadata only).
+  Grok is not installed; owner explicitly deferred it locally.
+- EXP-1 findings and compressed Codex evidence are in `docs/FORMATS.md`.
+
+Evidence and exact commands: `docs/reports/M0-FOUNDATION.md`.
+Private local runtime details: main checkout `.worktrees/COORDINATOR-LOCAL.md`.
+No real adapters or source fixtures have been implemented/captured yet.
 
 ## Worktrees
 
-| Relative path | Branch | Assignment |
+| Path relative to main checkout | Branch | Purpose |
 |---|---|---|
-| Main checkout | `main` | Coordinator, shared docs, code review, PR merge |
-| `.worktrees/m0-foundation` | `feat/m0-foundation` | `docs/tasks/M0-FOUNDATION.md` |
-| `.worktrees/m0-tooling` | `feat/m0-tooling` | `docs/tasks/M0-TOOLING.md` |
+| Main checkout | `main` | Coordinator and accepted baseline |
+| `.worktrees/m0-foundation` | `feat/m0-foundation` | PR #2 foundation and UI acceptance |
+| `.worktrees/m0-tooling` | `feat/m0-tooling` | Merged PR #1 tooling, retained |
 
-Run `git worktree list`, `git status` and check each branch before continuing;
-do not overwrite another agent's changes. Runtime process/session IDs and the
-latest worker status belong in ignored `.worktrees/COORDINATOR-LOCAL.md`.
+Recheck branch/status before editing. Preserve uncommitted changes and retained
+worktrees; do not force-reset or delete them as cleanup.
 
-## Resume
+## Next stage
 
-1. Read `AGENTS.md`, `docs/DEVELOPMENT_PLAN.md`, `docs/HANDOVER.md`, and the local
-   coordinator note. Reconcile pending owner answers and actual process state.
-2. Inspect worker diffs and their `docs/reports/M0-*.md`; verify relevant checks.
-3. Review tooling first; then integrate it into the foundation branch and verify
-   the combined result. Keep app acceptance pending until Xcode evidence exists.
-4. The coordinator owns PR creation/review/merge. No raw sessions, credentials,
-   runtime output archives or real-session screenshots may be published.
+After PR #2 is merged, create M1 worktrees from accepted `main`. First extend and
+review the compressed fixture-capture path, then capture/sanitize representative
+Claude/Codex data locally before writing adapters. Golden accounting tests must be
+hand-computed and exact. Keep raw session content and credentials out of model
+context, logs, commits and PRs. Grok remains deferred until real local data exists.
 
-Validation so far: metadata-only discovery, standard-agent preflight, local
-worktree creation, Markdown file/link/whitespace checks, and Git diff checks.
-These are setup checks, not app or package test results.
+Use standard Codex `gpt-6.1-sol` through the verified ordinary provider (`azure`)
+for coding workers. Direct spawn from the coordinator retains its Foundry provider;
+use separate ordinary Codex processes in assigned worktrees. The coordinator owns
+review and merge. Existing publication/provider authorization remains in scope.
