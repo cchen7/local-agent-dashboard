@@ -61,6 +61,10 @@ xcodebuild test -project AgentDashboard.xcodeproj -scheme AgentDashboard \
 # Guardrails — must pass before every commit
 Tools/check-entitlements.sh path/to/AgentDashboard.app
 Tools/forbid-apis.sh
+Tools/check-dependencies.sh
+
+# Developer-tool tests (synthetic inputs only)
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tools/tests -v
 
 # Price table
 Tools/pricing/validate pricing/pricing.json
