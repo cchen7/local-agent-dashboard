@@ -32,3 +32,13 @@ The `agentdash` tokenizer is referenced by M0's schema, while ADSearch depends o
 ADStore. Keep GRDB registration in ADStore and any shared pure splitting in ADCore,
 so migrations can run without a dependency cycle. M3 still owns the full search
 syntax, ranking, snippets and UI. The required CJK behavior is not weakened.
+
+## DEV-005 — Standard Codex workers (2026-11-17)
+
+Fresh subagent model override inherited the coordinator's `astra_foundry` provider.
+Use separate ordinary `codex --no-daemon exec` processes with `gpt-6.1-sol` and the
+locally verified ordinary provider `azure`, with each cwd set to its assigned
+worktree. A completed preflight verified provider/model, successful commands and
+normal exit (FORMATS.md). The owner explicitly approved transmitting project
+instructions, code and necessary tool output through the existing standard proxy;
+raw agent-session content and credentials are excluded. Global config is unchanged.

@@ -236,10 +236,22 @@ A completed read-only delegation preflight from the coordinator used:
 - Tool execution and final marker completed successfully.
 
 This proves model override works here but does **not** switch to the standard
-environment. A fresh ordinary-Codex preflight is required before standard workers
-can be described as verified. Its first launch was blocked by automatic approval
-review pending explicit approval of the existing proxy destination and project
-context; no standard-process success is claimed by this report.
+environment. After the owner explicitly approved the standard destination and
+project-context scope, a fresh ordinary-Codex process completed a second preflight:
+
+| Evidence | Observed result |
+|---|---|
+| Launch | Ordinary `codex --no-daemon exec`, explicit `model_provider="azure"`, fresh task |
+| `session_meta.model_provider` | `azure` |
+| `turn_context.model` | `gpt-6.1-sol` |
+| `originator` / `source` | `codex_exec` / `exec` |
+| Tool execution | `pwd` and `git status --short --branch`, both exit 0 |
+| Completion | `turn.completed`, final preflight marker, process exit 0 |
+
+Use this ordinary-process method for the coding workers. This preflight occurred
+after the inventory snapshot and is not included in the tables above. It verifies
+the configured provider/model and a completed agent tool loop, not upstream model
+deployment telemetry. Do not classify the `exec` entrypoint as a separate environment.
 
 ## Adapter fixture status
 
