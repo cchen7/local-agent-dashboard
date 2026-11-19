@@ -517,7 +517,7 @@ A WAL-mode database still needs to write its `-shm` file even when opened read-o
 ## 7. Ingestion pipeline (near real time)
 
 1. **Launch:** resolve every source's access → run `discover` on each root → diff against `source_files` → queue new and changed files, **most recently modified first** so recent sessions appear quickly.
-2. **Watch:** one FSEvents stream per root. Debounce per file (JSONL 300 ms; whole-file JSON rewrites 1 s).
+2. **Watch:** one FSEvents stream per root. Use validated, private root-relative file hints to debounce per file (JSONL 300 ms; whole-file JSON rewrites 1 s). Rescan the root on lost, coalesced or ambiguous events. File hints are not authorization to open a path.
 3. **Read:** JSONL incrementally per ADP-2; rewritten JSON files are re-parsed and upserted by dedupe key.
 4. **Write:** batch normalized records; in the same transaction update `sessions` aggregates, `token_minute`, `file_touches`, `commands`, and cost fields.
 5. **Derive:** after new events, recompute status after a 2 s debounce (§10.4) and keywords after 30 s (§10.2).
