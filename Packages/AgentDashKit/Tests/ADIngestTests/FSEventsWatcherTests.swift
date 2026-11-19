@@ -17,27 +17,44 @@ struct FSEventsWatcherTests {
         kFSEventStreamEventFlagUnmount
     ])
     func rescanFlags(_ flag: Int) {
-        // Check a standalone flag as well as a mixed batch. No path is needed,
-        // including for RootChanged (whose native event ID is zero).
-        for flags in [[UInt32(flag)], [UInt32(kFSEventStreamEventFlagItemModified), UInt32(flag)]] {
-            flags.withUnsafeBufferPointer { buffer in
-                #expect(FSEventsWatcher.signal(for: buffer) == .rescanRequired)
-            }
-        }
+        #expect(signals([(nil, flag)]) == [.rescanRequired])
+        #expect(signals([("/synthetic/root/a.jsonl", fileModified), (nil, flag)]) == [.rescanRequired])
     }
 
-    @Test("All ordinary and unknown event kinds invalidate the root; empty batches do not")
+    @Test("Only well-formed file hints within the root are delivered by path")
     func conservativeSignals() {
+        let valid = "/synthetic/root/目录/a.jsonl"
+        #expect(signals([(valid, fileModified), (valid, fileModified),
+                         ("/synthetic/root/b.json", fileModified)]) ==
+                [.fileChanged(relativePath: "目录/a.jsonl"), .fileChanged(relativePath: "b.json")])
         for flag in [kFSEventStreamEventFlagNone, kFSEventStreamEventFlagItemCreated,
-                     kFSEventStreamEventFlagItemModified, kFSEventStreamEventFlagItemRemoved,
-                     kFSEventStreamEventFlagItemRenamed, kFSEventStreamEventFlagItemIsDir,
-                     Int(0x80000000)] {
-            [UInt32(flag)].withUnsafeBufferPointer { buffer in
-                #expect(FSEventsWatcher.signal(for: buffer) == .changed)
-            }
+                     fileModified | kFSEventStreamEventFlagItemIsDir,
+                     fileModified | kFSEventStreamEventFlagItemIsSymlink, fileModified | Int(0x80000000)] {
+            #expect(signals([(valid, flag)]) == [.rescanRequired])
         }
-        [FSEventStreamEventFlags]().withUnsafeBufferPointer { buffer in
-            #expect(FSEventsWatcher.signal(for: buffer) == nil)
+        for path in [nil, "/synthetic/root", "/synthetic/root/", "/synthetic/root2/a.json",
+                     "/synthetic/root/../a", "/synthetic/root/./a", "/synthetic/root//a",
+                     "/synthetic/root/a/", "/synthetic/root/nul\0suffix"] {
+            #expect(signals([(path, fileModified)]) == [.rescanRequired])
+        }
+        #expect(signals([]).isEmpty)
+    }
+
+    @Test("Edits to two files under one root retain distinct relative identities")
+    func independentFiles() throws {
+        try withSyntheticRoot { root in
+            let names = ["first.jsonl", "second.json"]
+            let files = names.map { root.appendingPathComponent($0) }
+            for file in files { try Data([1]).write(to: file) }
+            let recorder = SignalRecorder()
+            let watcher = try FSEventsWatcher(authorizedRoot: root, onChange: recorder.record)
+            defer { watcher.cancel() }
+            try #require(recorder.waitForQuiet())
+            for (file, name) in zip(files, names) {
+                let baseline = recorder.count
+                try append(Data([2]), to: file)
+                try #require(recorder.wait(after: baseline, matching: .fileChanged(relativePath: name), timeout: 5))
+            }
         }
     }
 
@@ -92,7 +109,8 @@ struct FSEventsWatcherTests {
             try #require(recorder.waitForQuiet())
             let baseline = recorder.count
             try append(Data("append\n".utf8), to: file)
-            try #require(recorder.wait(after: baseline, timeout: 5))
+            try #require(recorder.wait(after: baseline, matching: .fileChanged(relativePath: "目录/synthetic.jsonl"),
+                                       timeout: 5))
             #expect(try Data(contentsOf: file) == Data("seed\nappend\n".utf8))
 
             let cancelled = DispatchSemaphore(value: 0)
@@ -228,6 +246,14 @@ struct FSEventsWatcherTests {
             #expect(second.wait(after: secondCount, timeout: 5))
             #expect(!first.wait(after: firstCount, timeout: 1.2))
         }
+    }
+}
+
+private let fileModified = kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemModified
+
+private func signals(_ events: [(String?, Int)]) -> [FSEventsWatcher.Signal] {
+    events.map { UInt32($0.1) }.withUnsafeBufferPointer { flags in
+        FSEventsWatcher.signals(rootPath: "/synthetic/root", flags: flags) { events[$0].0 }
     }
 }
 

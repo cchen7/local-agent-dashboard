@@ -7,12 +7,12 @@ import Foundation
 /// Own one watcher per root. This primitive does not discover sources, obtain
 /// permission, read files, schedule work, or follow a renamed root.
 public final class FSEventsWatcher: Sendable {
-    /// Root-level hints only. Native callback paths and event IDs are discarded.
+    /// Advisory hints for the ingest coordinator. Keep file identifiers private.
     public enum Signal: Equatable, Sendable {
-        /// Something changed; file-level flags are advisory, so nothing is filtered.
-        case changed
-        /// Events were lost/coalesced, or the root/volume changed. The coordinator
-        /// must revalidate access and rescan; this watcher never restarts itself.
+        /// A file event under this root. Not authorization to open the path.
+        case fileChanged(relativePath: String)
+        /// Loss, coalescing or a change that cannot be attributed to one file.
+        /// The coordinator must revalidate access and rescan.
         case rescanRequired
     }
 
@@ -33,8 +33,8 @@ public final class FSEventsWatcher: Sendable {
     /// Capture the watcher weakly if the callback needs to refer to its owner.
     public init(authorizedRoot: URL, onChange: @escaping @Sendable (Signal) -> Void) throws {
         let path = try Self.validatedPath(authorizedRoot)
-        let state = StreamState(onChange: onChange)
-        try state.start(path: path)
+        let state = StreamState(path: path, onChange: onChange)
+        try state.start()
         self.state = state
     }
 
@@ -45,16 +45,37 @@ public final class FSEventsWatcher: Sendable {
 
     deinit { state.cancel() }
 
-    // Internal so the rare loss/root flags can be tested without inducing actual
-    // kernel overload, changing mounts, or touching any real source hierarchy.
-    static func signal(for flags: UnsafeBufferPointer<FSEventStreamEventFlags>) -> Signal? {
-        guard !flags.isEmpty else { return nil }
-        let rescanMask = FSEventStreamEventFlags(
-            kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped
-            | kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagEventIdsWrapped
-            | kFSEventStreamEventFlagRootChanged | kFSEventStreamEventFlagMount
-            | kFSEventStreamEventFlagUnmount)
-        return flags.contains(where: { $0 & rescanMask != 0 }) ? .rescanRequired : .changed
+    // Internal so loss/root and malformed paths can be tested without inducing
+    // kernel overload or touching any real source hierarchy.
+    static func signals(rootPath: String, flags: UnsafeBufferPointer<FSEventStreamEventFlags>,
+                        pathAt: (Int) -> String?) -> [Signal] {
+        let fileFlags = FSEventStreamEventFlags(
+            kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemCreated
+            | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemRenamed
+            | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemInodeMetaMod
+            | kFSEventStreamEventFlagItemFinderInfoMod | kFSEventStreamEventFlagItemChangeOwner
+            | kFSEventStreamEventFlagItemXattrMod | kFSEventStreamEventFlagItemIsHardlink
+            | kFSEventStreamEventFlagItemIsLastHardlink | kFSEventStreamEventFlagOwnEvent)
+        let file = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)
+        let prefix = rootPath == "/" ? rootPath.utf8 : (rootPath + "/").utf8
+        var result: [Signal] = []
+        var seen = Set<String>()
+        for (index, flag) in flags.enumerated() {
+            // Any lost/coalesced/root/directory/unknown event takes precedence
+            // over precise hints in this callback.
+            guard flag & file != 0, flag & ~fileFlags == 0,
+                  let path = pathAt(index), path.utf8.starts(with: prefix) else {
+                return [.rescanRequired]
+            }
+            let relative = path.utf8.dropFirst(prefix.count)
+            let components = relative.split(separator: 0x2F, omittingEmptySubsequences: false)
+            guard !components.isEmpty, components.allSatisfy({
+                !$0.isEmpty && !$0.contains(0) && !$0.elementsEqual([0x2E]) && !$0.elementsEqual([0x2E, 0x2E])
+            }) else { return [.rescanRequired] }
+            let identifier = String(decoding: relative, as: UTF8.self)
+            if seen.insert(identifier).inserted { result.append(.fileChanged(relativePath: identifier)) }
+        }
+        return result
     }
 
     private static func validatedPath(_ root: URL) throws -> String {
@@ -74,7 +95,12 @@ public final class FSEventsWatcher: Sendable {
         guard lstat(directory, &status) == 0, status.st_mode & S_IFMT == S_IFDIR else {
             throw Failure.rootUnavailable
         }
-        return directory
+        // Match the native stream's spelling when an ancestor is an alias
+        // such as /var → /private/var. Never resolve a delivered event path.
+        guard let resolved = realpath(directory, nil) else { throw Failure.rootUnavailable }
+        defer { free(resolved) }
+        guard let canonical = String(validatingCString: resolved) else { throw Failure.invalidRoot }
+        return canonical
     }
 }
 
@@ -85,15 +111,17 @@ public final class FSEventsWatcher: Sendable {
 private final class StreamState: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.agentdashboard.ingest.fsevents", qos: .utility)
     private let queueKey = DispatchSpecificKey<Bool>()
+    private let path: String
     private var stream: FSEventStreamRef?
     private var onChange: (@Sendable (FSEventsWatcher.Signal) -> Void)?
 
-    init(onChange: @escaping @Sendable (FSEventsWatcher.Signal) -> Void) {
+    init(path: String, onChange: @escaping @Sendable (FSEventsWatcher.Signal) -> Void) {
+        self.path = path
         self.onChange = onChange
         queue.setSpecific(key: queueKey, value: true)
     }
 
-    func start(path: String) throws {
+    func start() throws {
         try queue.sync {
             var context = FSEventStreamContext(
                 version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
@@ -110,13 +138,16 @@ private final class StreamState: @unchecked Sendable {
                 kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot)
             guard let created = FSEventStreamCreate(
                 kCFAllocatorDefault,
-                { _, info, count, _, flags, _ in
+                { _, info, count, paths, flags, _ in
                     guard let info else { return }
                     let state = Unmanaged<StreamState>.fromOpaque(info).takeUnretainedValue()
-                    // Never inspect or retain the native path/content arguments.
-                    if let signal = FSEventsWatcher.signal(for: UnsafeBufferPointer(start: flags, count: count)) {
-                        state.onChange?(signal)
+                    // Without UseCFTypes, paths is a callback-owned C string array.
+                    let strings = paths.assumingMemoryBound(to: UnsafePointer<CChar>?.self)
+                    let signals = FSEventsWatcher.signals(rootPath: state.path,
+                        flags: UnsafeBufferPointer(start: flags, count: count)) {
+                        strings[$0].flatMap { String(validatingCString: $0) }
                     }
+                    for signal in signals { state.onChange?(signal) }
                 },
                 &context, [path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
                 0.4, flags) else { throw FSEventsWatcher.Failure.streamCreationFailed }

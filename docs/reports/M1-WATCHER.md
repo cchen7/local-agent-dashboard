@@ -10,7 +10,7 @@ authorized directory; no adapter or App wiring is included.
 ```swift
 public final class FSEventsWatcher: Sendable {
     public enum Signal: Equatable, Sendable {
-        case changed
+        case fileChanged(relativePath: String)
         case rescanRequired
     }
     public enum Failure: Error, Equatable, Sendable {
@@ -36,19 +36,19 @@ queue, and `FSEventStreamStart`. Native latency is a batching setting, not a
 delivery deadline. Start watching before the initial scan to avoid a scan/watch
 gap; initial scan coordination remains the caller's responsibility.
 
-Every nonempty native batch emits one root-level signal. A batch emits
-`rescanRequired` if any event has `MustScanSubDirs`, `UserDropped`, `KernelDropped`,
-`EventIdsWrapped`, `RootChanged`, `Mount` or `Unmount`; otherwise it emits
-`changed`. Both are advisory invalidations. The coordinator determines subsequent
-discovery/reading work; on a rescan signal it must revalidate access and rescan.
-Empty batches emit nothing. Unknown event flags still invalidate the root.
+Regular-file events emit one `fileChanged(relativePath:)` per distinct file in
+the native batch. If any event cannot be safely attributed to a file (including
+directory or unknown events, loss/coalescing, and root or volume changes), the
+batch emits only `rescanRequired`. Empty batches emit nothing.
 
 ### Scoped implementation decision
 
-Use conservative root-level invalidation. Do not filter by file-event kind or
-path: coalesced/lost events and filesystem changes make those hints insufficient
-for correctness. The callback never inspects or retains native paths or event IDs
-and emits no logs. No source content is read by this primitive. Debouncing,
+Match a file path against the canonical root at a component boundary, reject
+empty, dot and traversal components, and copy only the relative identifier.
+Keep identifiers inside ingest and out of logs. They are scheduling hints, so
+subsequent reads still use existing authorization and read-only open checks.
+The callback discards native absolute paths and event IDs and emits no logs.
+No source content is read by this primitive. Debouncing,
 scheduling, discovery, parsing, vendor rules, automatic recovery and persistent
 event cursors remain coordinator work. This decision is recorded here for
 coordinator review per `DEVELOPMENT_PLAN.md`; no format or product decision changes
@@ -128,12 +128,17 @@ re-sign and `Tools/check-entitlements.sh` followed the existing M0 report.
 - The signed sandboxed app has not exercised this watcher. No coordinator or app
   integration, source authorization/bookmark lifecycle, UI behavior or NFR-2
   end-to-end timing is claimed. No real source roots were used as test inputs.
-- Signals deliberately contain no file list. The coordinator must retain a
-  root-to-watcher association and implement discovery/rescan/recovery separately.
+- The coordinator must retain a root-to-watcher association and implement per-file
+  scheduling and fallback discovery/rescan/recovery separately.
 - No adapter or source format changed; no fixture capture was needed. Shared
   SPEC/FORMATS/DECISIONS files remain coordinator-owned under the development plan.
 
 API semantics were checked against the installed macOS 27.2 SDK's `FSEvents.h`
 and Apple's [File System Events Programming Guide](https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/FSEvents_ProgGuide/UsingtheFSEventsFramework/UsingtheFSEventsFramework.html).
-Context7 did not have suitable Apple FSEvents coverage; the official SDK header
-provides the current dispatch-queue lifecycle details.
+Apple's [callback documentation](https://developer.apple.com/documentation/coreservices/fseventstreamcallback)
+also confirms the callback-owned C string array when `UseCFTypes` is absent.
+
+Review follow-up: 53 package tests passed with native FSEvents service access,
+including 11 watcher tests. Two files under one synthetic root delivered their
+own relative identifiers; the nested Unicode append also delivered its exact
+relative identifier. The default execution sandbox still blocks stream startup.
