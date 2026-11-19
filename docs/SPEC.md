@@ -804,6 +804,10 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 | 30D / 90D | 1 day | bars stacked by agent + cumulative dashed line | tok/day |
 | All / Custom | automatic, keep ≤ 500 points | automatic | automatic |
 
+30D and 90D remain exact rolling durations for totals and comparisons. Their
+daily chart bars use calendar days in the display time zone, including days that
+are shorter or longer than 24 hours. Count only events inside the report range.
+
 The page subtitle states the range explicitly, e.g. "Today 00:00–15:12 · all agents" or "Last 24 hours", so "Today" and "24H" are never confused.
 
 **Readouts** (4 cards, following period and metric):
