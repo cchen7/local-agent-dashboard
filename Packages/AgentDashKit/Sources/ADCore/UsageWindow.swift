@@ -31,8 +31,15 @@ public struct UsageRange: Equatable, Sendable {
     fileprivate var duration: Int64 { upperBound - lowerBound }
 }
 
-/// Pure range and UTC bucket selection; performs no I/O and never reads the current clock.
+/// Pure range and chart bucket selection; performs no I/O and never reads the current clock.
 public struct UsageWindow: Equatable, Sendable {
+    public enum Bucket: Equatable, Sendable {
+        /// Epoch-aligned interval with a positive, fixed duration.
+        case fixed(milliseconds: Int64)
+        /// One Gregorian calendar day in the chart's display time zone.
+        case localDay(timeZone: TimeZone)
+    }
+
     /// Invalid inputs or results that cannot be represented without overflow.
     public enum Failure: Error, Equatable, Sendable {
         /// Reversed bounds or an empty range outside the supported All/Today cases.
@@ -51,36 +58,37 @@ public struct UsageWindow: Equatable, Sendable {
     public let range: UsageRange
     /// Adjacent equal-duration comparison, or nil for All; Today compares elapsed local days.
     public let previous: UsageRange?
-    /// Positive UTC bucket width, in milliseconds; automatic widths are minute multiples.
-    public let bucketMilliseconds: Int64
+    public let bucket: Bucket
 
     private static let minute: Int64 = 60_000
 
     /// Make a rolling 1/24/168/720/2160-hour window, All history, or an exact Custom range.
     /// All runs from firstTimestamp (or now if absent) to now and has no comparison.
     /// Custom requires a nonempty range and ignores now. Extra arguments for other periods
-    /// are ignored. All/Custom select at most 500 intersecting, epoch-aligned buckets.
+    /// are ignored. 30D/90D use display-local days for chart buckets only.
+    /// All/Custom select at most 500 intersecting, epoch-aligned buckets.
     public static func make(_ period: UsagePeriod, now: Int64, firstTimestamp: Int64? = nil,
-                            custom: UsageRange? = nil) throws -> UsageWindow {
+                            custom: UsageRange? = nil, timeZone: TimeZone = .gmt) throws -> UsageWindow {
         switch period {
         case .hour:
-            return try rolling(now: now, duration: 3_600_000, bucket: minute)
+            return try rolling(now: now, duration: 3_600_000, bucket: .fixed(milliseconds: minute))
         case .day:
-            return try rolling(now: now, duration: 86_400_000, bucket: 300_000)
+            return try rolling(now: now, duration: 86_400_000, bucket: .fixed(milliseconds: 300_000))
         case .week:
-            return try rolling(now: now, duration: 604_800_000, bucket: 3_600_000)
+            return try rolling(now: now, duration: 604_800_000, bucket: .fixed(milliseconds: 3_600_000))
         case .month:
-            return try rolling(now: now, duration: 2_592_000_000, bucket: 86_400_000)
+            return try rolling(now: now, duration: 2_592_000_000, bucket: .localDay(timeZone: timeZone))
         case .quarter:
-            return try rolling(now: now, duration: 7_776_000_000, bucket: 86_400_000)
+            return try rolling(now: now, duration: 7_776_000_000, bucket: .localDay(timeZone: timeZone))
         case .all:
             let range = try UsageRange(lowerBound: firstTimestamp ?? now, upperBound: now, allowingEmpty: true)
-            return try UsageWindow(range: range, previous: nil, bucketMilliseconds: automaticBucket(for: range))
+            return try UsageWindow(range: range, previous: nil, bucket: .fixed(milliseconds: automaticBucket(for: range)))
         case .custom:
             guard let custom else { throw Failure.missingCustomRange }
             // An empty All/Today range is still invalid as Custom.
             let range = try UsageRange(lowerBound: custom.lowerBound, upperBound: custom.upperBound)
-            return try UsageWindow(range: range, previous: preceding(range), bucketMilliseconds: automaticBucket(for: range))
+            return try UsageWindow(range: range, previous: preceding(range),
+                                   bucket: .fixed(milliseconds: automaticBucket(for: range)))
         }
     }
 
@@ -89,25 +97,26 @@ public struct UsageWindow: Equatable, Sendable {
     /// capped at that day's end when DST makes it shorter. Both ranges are empty at midnight.
     /// Gregorian calendar calculations use only the supplied time zone, never Calendar.current.
     public static func today(now: Int64, timeZone: TimeZone) throws -> UsageWindow {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = timeZone
-        let date = Date(timeIntervalSince1970: Double(now) / 1_000)
-        guard let day = calendar.dateInterval(of: .day, for: date),
-              let previousDay = calendar.dateInterval(of: .day, for: day.start.addingTimeInterval(-1)) else {
-            throw Failure.invalidCalendarDate
-        }
-        let start = try milliseconds(day.start)
-        let end = try milliseconds(day.end)
-        let previousStart = try milliseconds(previousDay.start)
-        guard start <= now, now < end, previousStart < start,
-              try milliseconds(previousDay.end) == start else {
-            throw Failure.invalidCalendarDate
-        }
+        let day = try localDay(containing: now, timeZone: timeZone)
+        let start = day.lowerBound
+        let previousDay = try localDay(containing: subtract(start, 1), timeZone: timeZone)
+        guard previousDay.upperBound == start else { throw Failure.invalidCalendarDate }
         let range = try UsageRange(lowerBound: start, upperBound: now, allowingEmpty: true)
-        let previousDayRange = try UsageRange(lowerBound: previousStart, upperBound: start)
-        let previousEnd = try add(previousStart, min(range.duration, previousDayRange.duration))
-        let previous = try UsageRange(lowerBound: previousStart, upperBound: previousEnd, allowingEmpty: true)
-        return try UsageWindow(range: range, previous: previous, bucketMilliseconds: 300_000)
+        let previousEnd = try add(previousDay.lowerBound, min(range.duration, previousDay.duration))
+        let previous = try UsageRange(lowerBound: previousDay.lowerBound, upperBound: previousEnd, allowingEmpty: true)
+        return try UsageWindow(range: range, previous: previous, bucket: .fixed(milliseconds: 300_000))
+    }
+
+    /// Full chart bucket containing the timestamp. Intersect this with the exact
+    /// report range before aggregation so partial first/last bars do not add events.
+    public func bucketRange(containing timestamp: Int64) throws -> UsageRange {
+        switch bucket {
+        case .fixed(let width):
+            let start = try Self.bucketStart(timestamp, width: width)
+            return try UsageRange(lowerBound: start, upperBound: Self.add(start, width))
+        case .localDay(let timeZone):
+            return try Self.localDay(containing: timestamp, timeZone: timeZone)
+        }
     }
 
     /// Floor a UTC epoch millisecond timestamp to a positive-width bucket anchored at epoch 0.
@@ -118,18 +127,23 @@ public struct UsageWindow: Equatable, Sendable {
         return try multiply(floorQuotient(timestamp, width: width), width)
     }
 
-    private init(range: UsageRange, previous: UsageRange?, bucketMilliseconds: Int64) throws {
+    private init(range: UsageRange, previous: UsageRange?, bucket: Bucket) throws {
         if range.duration > 0 {
-            _ = try Self.bucketStart(range.lowerBound, width: bucketMilliseconds)
+            switch bucket {
+            case .fixed(let width): _ = try Self.bucketStart(range.lowerBound, width: width)
+            case .localDay(let timeZone):
+                _ = try Self.localDay(containing: range.lowerBound, timeZone: timeZone)
+                _ = try Self.localDay(containing: range.upperBound - 1, timeZone: timeZone)
+            }
         }
         self.range = range
         self.previous = previous
-        self.bucketMilliseconds = bucketMilliseconds
+        self.bucket = bucket
     }
 
-    private static func rolling(now: Int64, duration: Int64, bucket: Int64) throws -> UsageWindow {
+    private static func rolling(now: Int64, duration: Int64, bucket: Bucket) throws -> UsageWindow {
         let range = try UsageRange(lowerBound: subtract(now, duration), upperBound: now)
-        return try UsageWindow(range: range, previous: preceding(range), bucketMilliseconds: bucket)
+        return try UsageWindow(range: range, previous: preceding(range), bucket: bucket)
     }
 
     private static func preceding(_ range: UsageRange) throws -> UsageRange {
@@ -156,6 +170,18 @@ public struct UsageWindow: Equatable, Sendable {
 
     private static func ceilingQuotient(_ value: Int64, width: Int64) -> Int64 {
         value / width + (value % width == 0 ? 0 : 1)
+    }
+
+    private static func localDay(containing timestamp: Int64, timeZone: TimeZone) throws -> UsageRange {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        // Calendar day boundaries are whole seconds. Floor before making the
+        // Date so the last millisecond cannot round into the following day.
+        let date = Date(timeIntervalSince1970: Double(floorQuotient(timestamp, width: 1_000)))
+        guard let day = calendar.dateInterval(of: .day, for: date) else { throw Failure.invalidCalendarDate }
+        let start = try milliseconds(day.start), end = try milliseconds(day.end)
+        guard start <= timestamp, timestamp < end else { throw Failure.invalidCalendarDate }
+        return try UsageRange(lowerBound: start, upperBound: end)
     }
 
     private static func milliseconds(_ date: Date) throws -> Int64 {

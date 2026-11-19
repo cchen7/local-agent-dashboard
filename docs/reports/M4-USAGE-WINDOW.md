@@ -20,6 +20,11 @@ public struct UsageRange: Equatable, Sendable {
 }
 
 public struct UsageWindow: Equatable, Sendable {
+    public enum Bucket: Equatable, Sendable {
+        case fixed(milliseconds: Int64)
+        case localDay(timeZone: TimeZone)
+    }
+
     public enum Failure: Error, Equatable, Sendable {
         case invalidRange, missingCustomRange, invalidBucketWidth
         case arithmeticOverflow, invalidCalendarDate
@@ -27,17 +32,19 @@ public struct UsageWindow: Equatable, Sendable {
 
     public let range: UsageRange
     public let previous: UsageRange?
-    public let bucketMilliseconds: Int64
+    public let bucket: Bucket
 
     public static func make(
         _ period: UsagePeriod,
         now: Int64,
         firstTimestamp: Int64? = nil,
-        custom: UsageRange? = nil
+        custom: UsageRange? = nil,
+        timeZone: TimeZone = .gmt
     ) throws -> UsageWindow
 
     public static func today(now: Int64, timeZone: TimeZone) throws -> UsageWindow
 
+    public func bucketRange(containing timestamp: Int64) throws -> UsageRange
     public static func bucketStart(_ timestamp: Int64, width: Int64) throws -> Int64
 }
 ```
@@ -45,7 +52,9 @@ public struct UsageWindow: Equatable, Sendable {
 Coordinator integration note: **`bucketStart` throws**. Its result is mathematical
 floor division anchored at Unix epoch zero. A nonpositive width or an origin below
 `Int64.min` is an error; it never traps, truncates negative timestamps toward zero,
-or saturates to an unaligned boundary. Callers need `try`.
+or saturates to an unaligned boundary. For daily bars, pass the display zone to
+`make` and use `bucketRange(containing:)` for aggregation and hover lookup; the
+full bucket must be intersected with the half-open report range.
 
 ## Behavior and proposed integration decisions
 
@@ -55,9 +64,10 @@ or saturates to an unaligned boundary. Callers need `try`.
   duration. Only All and Today can internally produce empty ranges, including
   Today's empty comparison at the local day boundary. Passing an empty range
   obtained from either factory to Custom is rejected.
-- Hour/day/week/month/quarter are exactly 1/24/168/720/2160 elapsed hours, using
-  1-minute/5-minute/1-hour/1-day/1-day buckets. Their comparisons are the immediately
-  preceding equal-length ranges. They do not use calendar month arithmetic.
+- Hour/day/week/month/quarter are exactly 1/24/168/720/2160 elapsed hours. Their
+  comparisons are the immediately preceding equal-length ranges. The first three
+  use 1-minute/5-minute/1-hour fixed buckets. Month and quarter use Gregorian days
+  in the supplied display time zone, including 23- and 25-hour DST days.
 - All spans `[firstTimestamp ?? now, now)` and has `previous == nil`. A missing
   first timestamp, or one equal to now, yields an empty range with a one-minute
   bucket. A future first timestamp is invalid. All does not invent a baseline
@@ -121,8 +131,8 @@ Observed results (Apple Swift 6.4.2 / Xcode 27.2 / arm64):
 - **36 ADCore test functions passed**, zero failures or skips; no compiler warnings.
   This includes **20 new UsageWindow functions**, 13 existing synthetic source-reader
   functions and 3 existing contract functions. Several functions are parameterized.
-- The new tests cover all seven raw period values; all five fixed durations and
-  bucket widths; exact half-open boundaries; adjacent previous periods; empty All;
+- The tests cover all seven raw period values; exact rolling durations; fixed
+  widths; exact half-open boundaries; adjacent previous periods; empty All;
   invalid/future/missing/custom-empty inputs; 500 aligned versus 501 intersecting
   buckets; deterministic automatic widths across negative timestamps and durations
   near Int64 limits; mathematical floor for negative timestamps; invalid widths;
@@ -137,3 +147,7 @@ Test output is `tests.log` in scratch; the expected initial compile failure is
 `red.log`. Full-package, Store, App, UI, entitlement/runtime and performance checks
 were not run: this assignment is limited to the pure ADCore primitive. There is
 no store/chart/menu integration claim.
+
+Review follow-up: 64 package tests passed, including 38 ADCore functions. Both
+daily periods are covered on either side of Shanghai midnight and on 23-hour
+and 25-hour Los Angeles days, with exact rolling ranges unchanged.

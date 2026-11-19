@@ -2,7 +2,7 @@ import ADCore
 import Foundation
 import Testing
 
-@Suite("FR-TK-1: pure usage ranges and UTC chart axes")
+@Suite("FR-TK-1: exact usage ranges and chart buckets")
 private struct UsageWindowTests {
     @Test("The public period raw values are stable and exhaustive")
     func periods() {
@@ -13,15 +13,52 @@ private struct UsageWindowTests {
         #expect(UsagePeriod(rawValue: "today") == nil)
     }
 
-    @Test("Fixed periods use exact elapsed durations, buckets and adjacent comparisons",
+    @Test("Rolling periods use exact elapsed durations and adjacent comparisons",
           arguments: rollingCases)
     func rolling(_ sample: RollingCase) throws {
-        for now: Int64 in [-1, 0, 1_800_000_123_456, Int64.max] {
+        let extreme: [Int64] = sample.bucket == nil ? [] : [.max]
+        for now in [-1, 0, 1_800_000_123_456] + extreme {
             let window = try UsageWindow.make(sample.period, now: now)
             #expect(try window.range == UsageRange(lowerBound: now - sample.duration, upperBound: now))
             #expect(try window.previous == UsageRange(lowerBound: now - 2 * sample.duration,
                                                   upperBound: now - sample.duration))
-            #expect(window.bucketMilliseconds == sample.bucket)
+            #expect(window.bucket == (sample.bucket.map { .fixed(milliseconds: $0) } ?? .localDay(timeZone: .gmt)))
+        }
+    }
+
+    @Test("30D and 90D split at Shanghai midnight without changing either elapsed range",
+          arguments: [UsagePeriod.month, .quarter])
+    func shanghaiDailyBuckets(_ period: UsagePeriod) throws {
+        let zone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+        let midnight = try timestamp("2026-11-18T16:00:00Z")
+        let now = try timestamp("2026-11-19T07:12:34Z") + 567
+        let window = try UsageWindow.make(period, now: now, timeZone: zone)
+        let utc = try UsageWindow.make(period, now: now, timeZone: .gmt)
+        #expect(window.range == utc.range)
+        #expect(window.previous == utc.previous)
+        let before = try window.bucketRange(containing: midnight - 1)
+        let after = try window.bucketRange(containing: midnight + 30 * 60_000)
+        #expect(try before.lowerBound == timestamp("2026-11-17T16:00:00Z"))
+        #expect(before.upperBound == midnight)
+        #expect(after.lowerBound == midnight)
+        #expect(try after.upperBound == timestamp("2026-11-19T16:00:00Z"))
+        #expect(try window.bucketRange(containing: midnight) == after)
+    }
+
+    @Test("Daily chart buckets use 23-hour and 25-hour calendar days",
+          arguments: [UsagePeriod.month, .quarter])
+    func daylightSavingBuckets(_ period: UsagePeriod) throws {
+        let zone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        for (start, end, hours) in [("2026-03-08T08:00:00Z", "2026-03-09T07:00:00Z", 23),
+                                    ("2026-11-01T07:00:00Z", "2026-11-02T08:00:00Z", 25)] {
+            let lower = try timestamp(start), upper = try timestamp(end)
+            let window = try UsageWindow.make(period, now: upper + 1, timeZone: zone)
+            let day = try window.bucketRange(containing: lower)
+            #expect(day.lowerBound == lower)
+            #expect(day.upperBound == upper)
+            #expect(day.upperBound - day.lowerBound == Int64(hours) * 3_600_000)
+            #expect(try window.bucketRange(containing: upper - 1) == day)
+            #expect(try window.bucketRange(containing: upper).lowerBound == day.upperBound)
         }
     }
 
@@ -55,7 +92,7 @@ private struct UsageWindowTests {
                 #expect(window.range.lowerBound == now)
                 #expect(window.range.upperBound == now)
                 #expect(window.previous == nil)
-                #expect(window.bucketMilliseconds == 60_000)
+                #expect(window.bucket == .fixed(milliseconds: 60_000))
             }
         }
     }
@@ -65,7 +102,7 @@ private struct UsageWindowTests {
         let window = try UsageWindow.make(.all, now: 12_345_678, firstTimestamp: 123)
         #expect(try window.range == UsageRange(lowerBound: 123, upperBound: 12_345_678))
         #expect(window.previous == nil)
-        #expect(window.bucketMilliseconds == 60_000)
+        #expect(window.bucket == .fixed(milliseconds: 60_000))
         #expect(throws: UsageWindow.Failure.invalidRange) {
             try UsageWindow.make(.all, now: 10, firstTimestamp: 11)
         }
@@ -100,10 +137,10 @@ private struct UsageWindowTests {
     func alignedBucketLimit() throws {
         let exact = try UsageRange(lowerBound: 0, upperBound: 500 * 60_000)
         let shifted = try UsageRange(lowerBound: 1, upperBound: 500 * 60_000 + 1)
-        #expect(try UsageWindow.make(.custom, now: 0, custom: exact).bucketMilliseconds == 60_000)
-        #expect(try UsageWindow.make(.custom, now: 0, custom: shifted).bucketMilliseconds == 120_000)
+        #expect(try UsageWindow.make(.custom, now: 0, custom: exact).bucket == .fixed(milliseconds: 60_000))
+        #expect(try UsageWindow.make(.custom, now: 0, custom: shifted).bucket == .fixed(milliseconds: 120_000))
         let negative = try UsageRange(lowerBound: -500 * 60_000, upperBound: 0)
-        #expect(try UsageWindow.make(.custom, now: 0, custom: negative).bucketMilliseconds == 60_000)
+        #expect(try UsageWindow.make(.custom, now: 0, custom: negative).bucket == .fixed(milliseconds: 60_000))
     }
 
     @Test("Automatic axes stay deterministic, minute-multiple and within 500 points")
@@ -113,7 +150,10 @@ private struct UsageWindowTests {
         for lower: Int64 in [-120_001, -1, 0, 1, 59_999] {
             for span in spans {
                 let window = try UsageWindow.make(.all, now: lower + span, firstTimestamp: lower)
-                let width = window.bucketMilliseconds
+                guard case .fixed(let width) = window.bucket else {
+                    Issue.record("All should use a fixed bucket")
+                    continue
+                }
                 #expect(width >= 60_000)
                 #expect(width % 60_000 == 0)
                 let first = try UsageWindow.bucketStart(lower, width: width)
@@ -130,9 +170,9 @@ private struct UsageWindowTests {
     func stableAlignment() throws {
         let first = try UsageWindow.make(.all, now: 20_000_123, firstTimestamp: 123)
         let next = try UsageWindow.make(.all, now: 20_000_124, firstTimestamp: 123)
-        #expect(first.bucketMilliseconds == next.bucketMilliseconds)
-        #expect(try UsageWindow.bucketStart(19_999_999, width: first.bucketMilliseconds) == 19_980_000)
-        #expect(try UsageWindow.bucketStart(19_999_999, width: next.bucketMilliseconds) == 19_980_000)
+        #expect(first.bucket == next.bucket)
+        #expect(try first.bucketRange(containing: 19_999_999).lowerBound == 19_980_000)
+        #expect(try next.bucketRange(containing: 19_999_999).lowerBound == 19_980_000)
     }
 
     @Test("Buckets floor toward negative infinity, independent of the window", arguments: bucketCases)
@@ -176,7 +216,7 @@ private struct UsageWindowTests {
         #expect(try window.range == UsageRange(lowerBound: timestamp("2026-11-18T16:00:00Z"), upperBound: now))
         #expect(try window.previous == UsageRange(lowerBound: timestamp("2026-11-17T16:00:00Z"),
                                               upperBound: timestamp("2026-11-18T07:12:34Z") + 567))
-        #expect(window.bucketMilliseconds == 300_000)
+        #expect(window.bucket == .fixed(milliseconds: 300_000))
         #expect(try window.range != UsageWindow.make(.day, now: now).range)
     }
 
@@ -230,15 +270,15 @@ private struct UsageWindowTests {
 private struct RollingCase: Sendable {
     let period: UsagePeriod
     let duration: Int64
-    let bucket: Int64
+    let bucket: Int64?
 }
 
 private let rollingCases = [
     RollingCase(period: .hour, duration: 3_600_000, bucket: 60_000),
     RollingCase(period: .day, duration: 86_400_000, bucket: 300_000),
     RollingCase(period: .week, duration: 604_800_000, bucket: 3_600_000),
-    RollingCase(period: .month, duration: 2_592_000_000, bucket: 86_400_000),
-    RollingCase(period: .quarter, duration: 7_776_000_000, bucket: 86_400_000)
+    RollingCase(period: .month, duration: 2_592_000_000, bucket: nil),
+    RollingCase(period: .quarter, duration: 7_776_000_000, bucket: nil)
 ]
 
 private struct BucketCase: Sendable {
