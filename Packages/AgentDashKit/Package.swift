@@ -20,11 +20,13 @@ let package = Package(
                 resources: [.process("Resources")], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADIngest", dependencies: ["ADCore", "ADAdapters", "ADStore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADSearch", dependencies: ["ADCore", "ADStore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
-        .target(name: "ADInsights", dependencies: ["ADCore", "ADStore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
+        .target(name: "ADInsights", dependencies: ["ADCore", "ADStore"],
+                resources: [.process("Resources")], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADPrivacy", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADPricing", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADZstdTests", dependencies: ["ADZstd"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADCoreTests", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
+        .testTarget(name: "ADInsightsTests", dependencies: ["ADInsights"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADStoreTests", dependencies: ["ADStore", "ADCore", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")])
     ],
     swiftLanguageModes: [.v6]
