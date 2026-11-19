@@ -1,4 +1,4 @@
-"""Local, fail-closed JSON/JSONL fixture sanitizer (SPEC 15.2).
+"""Local, fail-closed JSON/JSONL/zstd fixture sanitizer (SPEC 15.2).
 
 No source discovery, network, external libraries, or source writes. See README.md
 for the deliberately narrow input contract and privacy/Unicode limitations.
@@ -7,6 +7,7 @@ for the deliberately narrow input contract and privacy/Unicode limitations.
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import math
 import os
@@ -16,7 +17,13 @@ import secrets
 import stat
 import sys
 
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None  # Plain inputs do not require Python 3.14+.
+
 MAX_BYTES = 64 * 1024 * 1024
+MAX_ZSTD_WINDOW_LOG = 26  # 64 MiB decoder window; independent of output size.
 PROTECTED_NAMES = {".claude", ".codex", ".copilot", ".grok"}
 
 # Only schema keys reviewed here survive verbatim. Unknown/dynamic keys are
@@ -78,6 +85,10 @@ SECRET_FIELD = re.compile(r"(?:key|token|secret|password|credential|credentials|
 
 class CaptureError(Exception):
     """Safe diagnostic: never includes source values or a JSON decoder excerpt."""
+
+
+class MissingDecoder(CaptureError):
+    """Compressed capture prerequisite is missing; plain capture still works."""
 
 
 def normalized(key):
@@ -225,6 +236,22 @@ def parse_records(raw, suffix):
     return [result]
 
 
+def decompress_jsonl(raw):
+    if zstd is None:
+        raise MissingDecoder(".jsonl.zst capture requires Python 3.14+ with compression.zstd")
+    try:
+        # ZstdFile handles concatenated frames. Bounded reads avoid trusting the
+        # frame's claimed size or materializing an arbitrarily large expansion.
+        options = {zstd.DecompressionParameter.window_log_max: MAX_ZSTD_WINDOW_LOG}
+        with zstd.ZstdFile(io.BytesIO(raw), options=options) as stream:
+            decoded = stream.read(MAX_BYTES + 1)
+    except (zstd.ZstdError, EOFError):
+        raise CaptureError("invalid, incomplete or unsupported zstd input (source details omitted)") from None
+    if len(decoded) > MAX_BYTES:
+        raise CaptureError("decoded input exceeds the 64 MiB capture limit; select a smaller reviewed source")
+    return decoded
+
+
 def encode_records(records, suffix):
     if suffix == ".jsonl":
         return ("".join(json.dumps(r, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
@@ -297,10 +324,11 @@ def paths(input_path, output_path, source_root):
     marker = Path(str(output) + ".sanitized")
     if not root.is_dir() or not within(source, root):
         raise CaptureError("input must be inside the declared source root")
-    if not source.is_file() or source.suffix not in {".json", ".jsonl"}:
-        raise CaptureError("input must be a regular .json or .jsonl file; compressed/other formats are unsupported")
-    if output.suffix != source.suffix:
-        raise CaptureError("output extension must match the input format")
+    suffix = ".jsonl" if source.name.endswith(".jsonl.zst") else source.suffix
+    if not source.is_file() or suffix not in {".json", ".jsonl"}:
+        raise CaptureError("input must be a regular .json, .jsonl or .jsonl.zst file")
+    if output.suffix != suffix:
+        raise CaptureError(f"output extension must be {suffix}; fixtures are always uncompressed")
     boundaries = [root, source.parent]
     boundaries += [p for p in (source, *source.parents) if p.name.casefold() in PROTECTED_NAMES]
     for target in (output, marker):
@@ -313,7 +341,7 @@ def paths(input_path, output_path, source_root):
     if not output.parent.is_dir():
         raise CaptureError("output parent directory must already exist")
     # Use the canonical parent; a symlink alias never weakens containment checks.
-    return source, output.resolve(), marker.resolve()
+    return source, output.resolve(), marker.resolve(), suffix
 
 
 def open_directory(path):
@@ -352,7 +380,7 @@ def capture(input_path, output_path, source_root=None):
     published = None
     parent_fd = None
     try:
-        source, output, marker = paths(input_path, output_path, source_root)
+        source, output, marker, suffix = paths(input_path, output_path, source_root)
         parent_fd = open_directory(output.parent)
         parent_identity = signature(os.fstat(parent_fd))[:2]
         before = source_signature(source)
@@ -367,11 +395,13 @@ def capture(input_path, output_path, source_root=None):
                 raise CaptureError("source changed while being read")
         if len(raw) > MAX_BYTES:
             raise CaptureError("input exceeds the 64 MiB capture limit; select a smaller reviewed source")
-        records = parse_records(raw, source.suffix)
+        if source.suffix == ".zst":
+            raw = decompress_jsonl(raw)
+        records = parse_records(raw, suffix)
         sanitizer = Sanitizer()
         sanitized = [sanitizer.transform(record) for record in records]
-        encoded = encode_records(sanitized, source.suffix)
-        validate_sanitized(records, sanitized, encoded, source.suffix)
+        encoded = encode_records(sanitized, suffix)
+        validate_sanitized(records, sanitized, encoded, suffix)
         if source_signature(source) != before:
             raise CaptureError("source changed during capture; retry on a stable file")
         if signature(os.stat(output.parent, follow_symlinks=False))[:2] != parent_identity:
@@ -408,7 +438,7 @@ def capture(input_path, output_path, source_root=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sanitize one explicit JSON/JSONL file into a new isolated fixture.")
+    parser = argparse.ArgumentParser(description="Sanitize one JSON, JSONL or .jsonl.zst file into a new fixture.")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--source-root", type=Path,
@@ -418,7 +448,7 @@ def main():
         capture(args.input, args.output, args.source_root)
     except CaptureError as error:
         print(f"fixture-capture: {error}", file=sys.stderr)
-        return 1
+        return 2 if isinstance(error, MissingDecoder) else 1
     print("fixture-capture: sanitized fixture and digest marker created; human review required")
     return 0
 
