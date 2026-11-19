@@ -253,6 +253,34 @@ func unscopedApprovalResumed() {
     #expect(result.reason == .recentActivity)
 }
 
+@Test("§10.4: resolving either concurrent approval leaves the other waiting",
+      arguments: ["a", "b"])
+func concurrentApprovals(first: String) {
+    let remaining = first == "a" ? "b" : "a"
+    let events = [signal(1, age: 400, .toolCall(id: "a")),
+                  signal(2, age: 300, .toolCall(id: "b")),
+                  signal(3, age: 200, .approvalRequested(toolCallID: "a")),
+                  signal(4, age: 100, .approvalRequested(toolCallID: "b"))]
+    let initial = engine.infer(events, nowMilliseconds: now)
+    #expect(initial.evidence.decisiveSignal?.signal.kind == .approvalRequested(toolCallID: "b"))
+
+    // An unscoped request can coexist; later tool activity supersedes that
+    // request and resolves only the scoped request for the matching call.
+    for history in [events, events + [signal(5, age: 50, .approvalRequested(toolCallID: nil))]] {
+        let resolvingFirst = history + [signal(6, age: 20, .toolResult(id: first, outcome: .success))]
+        let waiting = engine.infer(resolvingFirst, nowMilliseconds: now)
+        #expect(waiting.status == .waiting)
+        #expect(waiting.reason == .needsApproval)
+        #expect(waiting.evidence.pendingTools.map(\.id) == [remaining])
+        #expect(waiting.evidence.decisiveSignal?.signal.kind == .approvalRequested(toolCallID: remaining))
+
+        let resolved = engine.infer(resolvingFirst + [signal(7, age: 0, .toolResult(id: remaining, outcome: .success))],
+                                    nowMilliseconds: now)
+        #expect(resolved.reason == .recentActivity)
+        #expect(resolved.evidence.pendingTools.isEmpty)
+    }
+}
+
 @Test("ADP-5 / §10.4: missing timestamps do not borrow now",
       arguments: [StatusActivitySignal.Kind.activity, .toolCall(id: "a"), .turnEnded])
 func missingTimestamp(kind: StatusActivitySignal.Kind) {

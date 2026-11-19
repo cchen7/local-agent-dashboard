@@ -172,14 +172,17 @@ public struct StatusInferenceEngine: Sendable {
         var failure: (reason: StatusInferenceReason, signal: StatusSignalEvidence)?
         var sessionEnd: StatusSignalEvidence?
         var turnEnd: StatusSignalEvidence?
-        var approval: (toolID: String?, signal: StatusSignalEvidence)?
+        typealias Approval = (order: Int, evidence: StatusSignalEvidence)
+        var scopedApprovals: [String: Approval] = [:]
+        var unscopedApproval: Approval?
         var pending: [StatusPendingToolEvidence] = []
 
         func resume() {
             failure = nil; sessionEnd = nil; turnEnd = nil
         }
 
-        for (_, signal) in ordered {
+        for (order, entry) in ordered.enumerated() {
+            let signal = entry.element
             let item = StatusSignalEvidence(signal: signal, previousTime: previousTime, now: nowMilliseconds)
             if let timestamp = signal.timestampMilliseconds {
                 previousTime = (timestamp, signal.sequence)
@@ -188,15 +191,18 @@ public struct StatusInferenceEngine: Sendable {
             switch signal.kind {
             case .activity:
                 resume()
-                approval = nil
+                scopedApprovals.removeAll()
+                unscopedApproval = nil
             case .toolCall(let id):
                 resume()
-                if approval?.toolID == nil || approval?.toolID == id { approval = nil }
+                scopedApprovals.removeValue(forKey: id)
+                unscopedApproval = nil
                 pending.removeAll { $0.id == id }
                 pending.append(.init(id: id, call: item))
             case .toolResult(let id, let outcome):
                 resume()
-                if approval?.toolID == nil || approval?.toolID == id { approval = nil }
+                scopedApprovals.removeValue(forKey: id)
+                unscopedApproval = nil
                 pending.removeAll { $0.id == id }
                 if outcome == .failure { failure = (.toolResultError, item) }
             case .failure(let error):
@@ -207,7 +213,8 @@ public struct StatusInferenceEngine: Sendable {
                 turnEnd = item
             case .approvalRequested(let toolID):
                 resume()
-                approval = (toolID, item)
+                if let toolID { scopedApprovals[toolID] = (order, item) }
+                else { unscopedApproval = (order, item) }
             }
         }
 
@@ -225,7 +232,11 @@ public struct StatusInferenceEngine: Sendable {
         if let turnEnd, let silence, silenceOverflowed || silence > thresholds.turnCompletionSilenceMilliseconds {
             return result(.completed, .turnIdleCompleted, turnEnd)
         }
-        if let approval { return result(.waiting, .needsApproval, approval.signal) }
+        let latestScoped = scopedApprovals.values.max { $0.order < $1.order }
+        let approval = if let unscopedApproval, unscopedApproval.order > (latestScoped?.order ?? -1) {
+            unscopedApproval
+        } else { latestScoped }
+        if let approval { return result(.waiting, .needsApproval, approval.evidence) }
         let eligibleTool = pending.last {
             guard let age = $0.call.ageMilliseconds else { return false }
             return !$0.call.ageOverflowed && age <= thresholds.pendingToolLifetimeMilliseconds

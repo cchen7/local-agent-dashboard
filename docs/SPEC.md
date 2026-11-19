@@ -717,6 +717,8 @@ Evaluate current activity only: a historical end/error event must not override l
 resumed activity. A normal assistant turn end is not an explicit session end.
 Silence alone does not prove an approval request; the badge and hover evidence must
 say "possibly needs approval" unless the source has an explicit approval signal.
+Track concurrent explicit approvals by call ID. A tool result clears only its
+matching scoped approval; an unscoped request is tracked separately.
 An unanswered tool older than 10 minutes, with no newer activity or other signal,
 becomes `unknown`. At exactly 15 s the silence-based approval inference does not apply.
 
