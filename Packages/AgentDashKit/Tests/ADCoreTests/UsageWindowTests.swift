@@ -18,7 +18,7 @@ private struct UsageWindowTests {
     func rolling(_ sample: RollingCase) throws {
         let extreme: [Int64] = sample.bucket == nil ? [] : [.max]
         for now in [-1, 0, 1_800_000_123_456] + extreme {
-            let window = try UsageWindow.make(sample.period, now: now)
+            let window = try UsageWindow.make(sample.period, now: now, timeZone: .gmt)
             #expect(try window.range == UsageRange(lowerBound: now - sample.duration, upperBound: now))
             #expect(try window.previous == UsageRange(lowerBound: now - 2 * sample.duration,
                                                   upperBound: now - sample.duration))
@@ -64,7 +64,7 @@ private struct UsageWindowTests {
 
     @Test("Ranges preserve exact milliseconds and exclude the upper endpoint")
     func halfOpenRange() throws {
-        let window = try UsageWindow.make(.hour, now: 3_600_123)
+        let window = try UsageWindow.make(.hour, now: 3_600_123, timeZone: .gmt)
         let timestamps: [Int64] = [122, 123, 124, 3_600_122, 3_600_123]
         let included = timestamps.filter { window.range.lowerBound <= $0 && $0 < window.range.upperBound }
         #expect(included == [123, 124, 3_600_122])
@@ -88,7 +88,7 @@ private struct UsageWindowTests {
     func emptyAll() throws {
         for now: Int64 in [.min, -1, 0, 1_800_000_123_456, .max] {
             for first in [nil, Optional(now)] {
-                let window = try UsageWindow.make(.all, now: now, firstTimestamp: first)
+                let window = try UsageWindow.make(.all, now: now, firstTimestamp: first, timeZone: .gmt)
                 #expect(window.range.lowerBound == now)
                 #expect(window.range.upperBound == now)
                 #expect(window.previous == nil)
@@ -99,15 +99,15 @@ private struct UsageWindowTests {
 
     @Test("All uses the exact first timestamp, with no invented preceding history")
     func allHistory() throws {
-        let window = try UsageWindow.make(.all, now: 12_345_678, firstTimestamp: 123)
+        let window = try UsageWindow.make(.all, now: 12_345_678, firstTimestamp: 123, timeZone: .gmt)
         #expect(try window.range == UsageRange(lowerBound: 123, upperBound: 12_345_678))
         #expect(window.previous == nil)
         #expect(window.bucket == .fixed(milliseconds: 60_000))
         #expect(throws: UsageWindow.Failure.invalidRange) {
-            try UsageWindow.make(.all, now: 10, firstTimestamp: 11)
+            try UsageWindow.make(.all, now: 10, firstTimestamp: 11, timeZone: .gmt)
         }
         #expect(throws: UsageWindow.Failure.arithmeticOverflow) {
-            try UsageWindow.make(.all, now: .max, firstTimestamp: .min)
+            try UsageWindow.make(.all, now: .max, firstTimestamp: .min, timeZone: .gmt)
         }
     }
 
@@ -115,7 +115,7 @@ private struct UsageWindowTests {
     func customRange() throws {
         for bounds: (Int64, Int64) in [(-123_457, 12_345_678), (123, 10_123), (-10_123, -123)] {
             let range = try UsageRange(lowerBound: bounds.0, upperBound: bounds.1)
-            let window = try UsageWindow.make(.custom, now: .min, firstTimestamp: .max, custom: range)
+            let window = try UsageWindow.make(.custom, now: .min, firstTimestamp: .max, custom: range, timeZone: .gmt)
             #expect(window.range == range)
             #expect(try window.previous == UsageRange(lowerBound: bounds.0 - (bounds.1 - bounds.0),
                                                   upperBound: bounds.0))
@@ -125,11 +125,11 @@ private struct UsageWindowTests {
     @Test("Custom requires a nonempty range, even when passed an empty All range")
     func missingOrEmptyCustom() throws {
         #expect(throws: UsageWindow.Failure.missingCustomRange) {
-            try UsageWindow.make(.custom, now: 0)
+            try UsageWindow.make(.custom, now: 0, timeZone: .gmt)
         }
-        let empty = try UsageWindow.make(.all, now: 0).range
+        let empty = try UsageWindow.make(.all, now: 0, timeZone: .gmt).range
         #expect(throws: UsageWindow.Failure.invalidRange) {
-            try UsageWindow.make(.custom, now: 0, custom: empty)
+            try UsageWindow.make(.custom, now: 0, custom: empty, timeZone: .gmt)
         }
     }
 
@@ -137,10 +137,10 @@ private struct UsageWindowTests {
     func alignedBucketLimit() throws {
         let exact = try UsageRange(lowerBound: 0, upperBound: 500 * 60_000)
         let shifted = try UsageRange(lowerBound: 1, upperBound: 500 * 60_000 + 1)
-        #expect(try UsageWindow.make(.custom, now: 0, custom: exact).bucket == .fixed(milliseconds: 60_000))
-        #expect(try UsageWindow.make(.custom, now: 0, custom: shifted).bucket == .fixed(milliseconds: 120_000))
+        #expect(try UsageWindow.make(.custom, now: 0, custom: exact, timeZone: .gmt).bucket == .fixed(milliseconds: 60_000))
+        #expect(try UsageWindow.make(.custom, now: 0, custom: shifted, timeZone: .gmt).bucket == .fixed(milliseconds: 120_000))
         let negative = try UsageRange(lowerBound: -500 * 60_000, upperBound: 0)
-        #expect(try UsageWindow.make(.custom, now: 0, custom: negative).bucket == .fixed(milliseconds: 60_000))
+        #expect(try UsageWindow.make(.custom, now: 0, custom: negative, timeZone: .gmt).bucket == .fixed(milliseconds: 60_000))
     }
 
     @Test("Automatic axes stay deterministic, minute-multiple and within 500 points")
@@ -149,7 +149,7 @@ private struct UsageWindowTests {
                              86_400_123, 1_000_000 * 60_000, Int64.max - 1_000_000]
         for lower: Int64 in [-120_001, -1, 0, 1, 59_999] {
             for span in spans {
-                let window = try UsageWindow.make(.all, now: lower + span, firstTimestamp: lower)
+                let window = try UsageWindow.make(.all, now: lower + span, firstTimestamp: lower, timeZone: .gmt)
                 guard case .fixed(let width) = window.bucket else {
                     Issue.record("All should use a fixed bucket")
                     continue
@@ -161,15 +161,15 @@ private struct UsageWindowTests {
                 #expect(last / width - first / width + 1 <= 500)
                 #expect(first <= lower)
                 #expect(lower - first < width)
-                #expect(try UsageWindow.make(.all, now: lower + span, firstTimestamp: lower) == window)
+                #expect(try UsageWindow.make(.all, now: lower + span, firstTimestamp: lower, timeZone: .gmt) == window)
             }
         }
     }
 
     @Test("UTC bucket origins remain stable as a window advances")
     func stableAlignment() throws {
-        let first = try UsageWindow.make(.all, now: 20_000_123, firstTimestamp: 123)
-        let next = try UsageWindow.make(.all, now: 20_000_124, firstTimestamp: 123)
+        let first = try UsageWindow.make(.all, now: 20_000_123, firstTimestamp: 123, timeZone: .gmt)
+        let next = try UsageWindow.make(.all, now: 20_000_124, firstTimestamp: 123, timeZone: .gmt)
         #expect(first.bucket == next.bucket)
         #expect(try first.bucketRange(containing: 19_999_999).lowerBound == 19_980_000)
         #expect(try next.bucketRange(containing: 19_999_999).lowerBound == 19_980_000)
@@ -199,12 +199,12 @@ private struct UsageWindowTests {
     func windowOverflow(_ sample: RollingCase) throws {
         for now in [Int64.min, Int64.min + sample.duration] {
             #expect(throws: UsageWindow.Failure.arithmeticOverflow) {
-                try UsageWindow.make(sample.period, now: now)
+                try UsageWindow.make(sample.period, now: now, timeZone: .gmt)
             }
         }
         let range = try UsageRange(lowerBound: .min, upperBound: Int64.min + 1)
         #expect(throws: UsageWindow.Failure.arithmeticOverflow) {
-            try UsageWindow.make(.custom, now: 0, custom: range)
+            try UsageWindow.make(.custom, now: 0, custom: range, timeZone: .gmt)
         }
     }
 
@@ -217,7 +217,7 @@ private struct UsageWindowTests {
         #expect(try window.previous == UsageRange(lowerBound: timestamp("2026-11-17T16:00:00Z"),
                                               upperBound: timestamp("2026-11-18T07:12:34Z") + 567))
         #expect(window.bucket == .fixed(milliseconds: 300_000))
-        #expect(try window.range != UsageWindow.make(.day, now: now).range)
+        #expect(try window.range != UsageWindow.make(.day, now: now, timeZone: .gmt).range)
     }
 
     @Test("Today at local midnight has empty current and comparison ranges")

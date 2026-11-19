@@ -65,10 +65,11 @@ public struct UsageWindow: Equatable, Sendable {
     /// Make a rolling 1/24/168/720/2160-hour window, All history, or an exact Custom range.
     /// All runs from firstTimestamp (or now if absent) to now and has no comparison.
     /// Custom requires a nonempty range and ignores now. Extra arguments for other periods
-    /// are ignored. 30D/90D use display-local days for chart buckets only.
+    /// are ignored. Supply the display time zone explicitly: 30D/90D use it for
+    /// daily chart buckets; fixed-width periods ignore it.
     /// All/Custom select at most 500 intersecting, epoch-aligned buckets.
     public static func make(_ period: UsagePeriod, now: Int64, firstTimestamp: Int64? = nil,
-                            custom: UsageRange? = nil, timeZone: TimeZone = .gmt) throws -> UsageWindow {
+                            custom: UsageRange? = nil, timeZone: TimeZone) throws -> UsageWindow {
         switch period {
         case .hour:
             return try rolling(now: now, duration: 3_600_000, bucket: .fixed(milliseconds: minute))

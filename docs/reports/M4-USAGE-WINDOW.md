@@ -39,7 +39,7 @@ public struct UsageWindow: Equatable, Sendable {
         now: Int64,
         firstTimestamp: Int64? = nil,
         custom: UsageRange? = nil,
-        timeZone: TimeZone = .gmt
+        timeZone: TimeZone
     ) throws -> UsageWindow
 
     public static func today(now: Int64, timeZone: TimeZone) throws -> UsageWindow
@@ -52,9 +52,9 @@ public struct UsageWindow: Equatable, Sendable {
 Coordinator integration note: **`bucketStart` throws**. Its result is mathematical
 floor division anchored at Unix epoch zero. A nonpositive width or an origin below
 `Int64.min` is an error; it never traps, truncates negative timestamps toward zero,
-or saturates to an unaligned boundary. For daily bars, pass the display zone to
-`make` and use `bucketRange(containing:)` for aggregation and hover lookup; the
-full bucket must be intersected with the half-open report range.
+or saturates to an unaligned boundary. The caller must pass the display zone
+to `make`. For daily bars, use `bucketRange(containing:)` for aggregation and
+hover lookup; intersect the full bucket with the half-open report range.
 
 ## Behavior and proposed integration decisions
 
@@ -151,3 +151,5 @@ no store/chart/menu integration claim.
 Review follow-up: 64 package tests passed, including 38 ADCore functions. Both
 daily periods are covered on either side of Shanghai midnight and on 23-hour
 and 25-hour Los Angeles days, with exact rolling ranges unchanged.
+The same suite passed after removing the default. A separate Swift type check
+verified that omitting the zone now fails with a missing `timeZone` argument.
