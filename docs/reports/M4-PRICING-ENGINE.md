@@ -102,10 +102,16 @@ case invalidTokenCounts, tokenCountOverflow, unrepresentableCost
   envelope; do not clamp or return an unpriced result on arithmetic failure.
 - Local execution exposed Foundation silently truncating some oversized JSON
   Decimal literals and multiplication coefficients despite a `.noError` result.
-  A numeric-literal precision preflight (excluding leading/trailing zeroes and
-  quoted strings) rejects more than 38 significant digits as `invalidJSON`.
+  The preflight requires UTF-8 and checks exactly the bytes passed to the typed
+  decoder. It rejects duplicate decoded names in each JSON object (including
+  escaped names), and rejects more than 38 significant digits (excluding
+  leading/trailing zeroes and quoted strings) as `invalidJSON`.
   A bounded integer-coefficient check prevents multiply truncation while allowing
   exact trailing-zero cancellation; calculation error codes still guard arithmetic.
+
+Review follow-up: 57 package tests passed, including 15 pricing tests. The new
+tests reject UTF-16 and UTF-32 in both endian forms, conflicting rates in either
+order, and duplicates represented by JSON escapes in tiers and aliases.
 
 No source-format changes or confirmed product decisions are made. These choices
 are proposed here for coordinator review, following `DEVELOPMENT_PLAN.md` rather

@@ -250,6 +250,44 @@ struct ADPricingTests {
         }
     }
 
+    @Test("Pricing JSON is UTF-8; both other endian forms fail before Decimal decoding")
+    func inputEncoding() throws {
+        let excessive = "0." + String(repeating: "9", count: 40)
+        let invalid = document(models: model(prices: price(input: excessive)))
+        #expect(throws: PricingError.invalidJSON) { try PriceTable.decode(invalid) }
+        for data in [document(), invalid] {
+            let source = String(decoding: data, as: UTF8.self)
+            for (encoding, bom): (String.Encoding, [UInt8]) in [
+                (.utf16LittleEndian, [0xFF, 0xFE]), (.utf16BigEndian, [0xFE, 0xFF]),
+                (.utf32LittleEndian, [0xFF, 0xFE, 0x00, 0x00]), (.utf32BigEndian, [0x00, 0x00, 0xFE, 0xFF])
+            ] {
+                let encoded = try #require(source.data(using: encoding))
+                for bytes in [encoded, Data(bom) + encoded] {
+                    #expect(throws: PricingError.invalidJSON) { try PriceTable.decode(bytes) }
+                }
+            }
+        }
+        #expect(try PriceTable.decode(document()).models.count == 1)
+    }
+
+    @Test("Conflicting prices and aliases cannot hide behind duplicate member names")
+    func duplicateMembers() {
+        for (first, second) in [(1, 9), (9, 1)] {
+            let row = price(input: String(first), cache: ",\"input\":\(second)")
+            #expect(throws: PricingError.invalidJSON) {
+                try PriceTable.decode(document(models: model(prices: row)))
+            }
+        }
+        let escapedTier = price(tiers: #", "tiers":[{"whenPromptTokensAbove":1,"in\u0070ut":1,"input":9,"output":1}]"#)
+        let aliases = #"{"old":"synthetic-alpha","ol\u0064":"synthetic-beta"}"#
+        #expect(throws: PricingError.invalidJSON) {
+            try PriceTable.decode(document(models: model(prices: escapedTier)))
+        }
+        #expect(throws: PricingError.invalidJSON) {
+            try PriceTable.decode(document(models: model() + "," + model("synthetic-beta"), aliases: aliases))
+        }
+    }
+
     @Test("Validation rejects semantic conflicts with content-free typed errors")
     func validation() throws {
         let bad: [(Data, PricingError)] = [

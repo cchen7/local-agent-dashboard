@@ -15,9 +15,10 @@ public struct PriceTable: Sendable {
 
     /// Decode and validate atomically. Decoder diagnostics never cross this boundary.
     public static func decode(_ data: Data) throws(PricingError) -> Self {
-        try validateNumericPrecision(data)
+        let decoder = JSONDecoder()
+        try preflightJSON(data, decoder: decoder)
         let raw: Document
-        do { raw = try JSONDecoder().decode(Document.self, from: data) }
+        do { raw = try decoder.decode(Document.self, from: data) }
         catch { throw .invalidJSON }
         return try Self(raw)
     }
@@ -137,22 +138,43 @@ public struct PriceTable: Sendable {
     private static func hasWildcard(_ value: String) -> Bool { value.contains("*") || value.contains("?") }
 }
 
-/// JSONDecoder can silently truncate Decimal literals. Enforce the documented
-/// 38-significant-digit envelope on unquoted numbers before decoding; this is
-/// only a precision preflight, and JSONDecoder still validates the JSON grammar.
-private func validateNumericPrecision(_ data: Data) throws(PricingError) {
+/// Reject ambiguity that can disappear during typed decoding: duplicate member
+/// names and Decimal literals outside the supported precision. Both passes use
+/// the same UTF-8 bytes; JSONDecoder still validates the document grammar.
+private func preflightJSON(_ data: Data, decoder: JSONDecoder) throws(PricingError) {
     let bytes = Array(data)
-    var index = 0, quoted = false
+    // UTF-16/32 without a BOM can also pass a UTF-8 validity check because JSON
+    // punctuation becomes ASCII interleaved with NUL. Raw NUL is never valid JSON.
+    guard !bytes.contains(0), String(bytes: bytes, encoding: .utf8) != nil else { throw .invalidJSON }
+    var objects: [Set<String>?] = [] // One entry per container; arrays have no member names.
+    var index = 0
     while index < bytes.count {
-        let byte = bytes[index]
-        if quoted {
-            if byte == 92 { index += 2; continue } // Escaped quote/backslash or other JSON escape.
-            if byte == 34 { quoted = false }
+        switch bytes[index] {
+        case 123, 91: // '{' or '['
+            objects.append(bytes[index] == 123 ? [] : nil)
             index += 1
-        } else if byte == 34 {
-            quoted = true
+        case 125, 93: // '}' or ']'
+            guard !objects.isEmpty else { throw .invalidJSON }
+            objects.removeLast()
             index += 1
-        } else if byte == 45 || (48...57).contains(byte) {
+        case 34: // A string; in valid JSON, only member names are followed by ':'.
+            let start = index
+            index += 1
+            while index < bytes.count && bytes[index] != 34 {
+                index += bytes[index] == 92 ? 2 : 1 // Skip an escape and its next byte.
+            }
+            guard index < bytes.count else { throw .invalidJSON }
+            index += 1
+            let end = index
+            while index < bytes.count && [9, 10, 13, 32].contains(bytes[index]) { index += 1 }
+            if index < bytes.count, bytes[index] == 58, !objects.isEmpty, objects[objects.count - 1] != nil {
+                let key: String
+                // Compare decoded names so e.g. "input" and "in\\u0070ut" collide.
+                do { key = try decoder.decode(String.self, from: Data(bytes[start..<end])) }
+                catch { throw .invalidJSON }
+                guard objects[objects.count - 1]?.insert(key).inserted == true else { throw .invalidJSON }
+            }
+        case 45, 48...57:
             let start = index
             while index < bytes.count {
                 let byte = bytes[index]
@@ -162,7 +184,8 @@ private func validateNumericPrecision(_ data: Data) throws(PricingError) {
             let digits = bytes[start..<index].prefix { $0 != 69 && $0 != 101 }.filter { (48...57).contains($0) }
             if let first = digits.firstIndex(where: { $0 != 48 }), let last = digits.lastIndex(where: { $0 != 48 }),
                last - first + 1 > 38 { throw .invalidJSON }
-        } else { index += 1 }
+        default: index += 1
+        }
     }
 }
 

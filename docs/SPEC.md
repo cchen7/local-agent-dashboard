@@ -572,6 +572,9 @@ Target: **≤ 2 s** from an agent writing a file to the UI updating (NFR-2).
 
 ### 8.5 Price table interface (static file, updated periodically by an agent)
 
+Price tables are UTF-8 JSON. Validation rejects duplicate decoded object member
+names before decoding prices or aliases.
+
 **Load order:**
 
 1. External file `~/.config/agent-dashboard/pricing.json` (preferred). Read through a read-only sandbox exception (§12.1) and watched with FSEvents; edits apply immediately.
