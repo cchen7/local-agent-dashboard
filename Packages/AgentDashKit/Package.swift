@@ -25,6 +25,7 @@ let package = Package(
         .target(name: "ADPricing", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADZstdTests", dependencies: ["ADZstd"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADCoreTests", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
+        .testTarget(name: "ADInsightsTests", dependencies: ["ADInsights", "ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADStoreTests", dependencies: ["ADStore", "ADCore", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")])
     ],
     swiftLanguageModes: [.v6]
