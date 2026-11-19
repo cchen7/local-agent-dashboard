@@ -10,6 +10,11 @@ import tempfile
 import unittest
 from unittest import mock
 
+try:
+    from compression import zstd
+except ImportError:
+    zstd = None  # Plain JSON/JSONL capture must also work on older Python.
+
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 import fixture_capture as capture
@@ -222,7 +227,7 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.assertEqual(marker.read_text(), "PRESERVE")
 
-    def test_malformed_partial_duplicate_nonfinite_or_unsupported_input_leaves_no_marker(self):
+    def test_malformed_partial_duplicate_or_nonfinite_input_leaves_no_marker(self):
         for raw in ('{"text":\n', '{"text":"synthetic"}', '{"id":1,"id":2}\n',
                     '{"input_tokens":NaN}\n', '[]\n', ''):
             with self.subTest(raw=raw):
@@ -230,11 +235,85 @@ class CaptureTests(unittest.TestCase):
                 with self.assertRaises(capture.CaptureError):
                     self.run_capture()
                 self.assert_no_output()
-        self.input = self.source / "synthetic.jsonl.zst"
+    def test_unsupported_compressed_suffix_leaves_no_marker(self):
+        self.input = self.source / "synthetic.json.zst"
         self.input.write_bytes(b"not compressed real data")
         with self.assertRaises(capture.CaptureError):
             self.run_capture()
         self.assert_no_output()
+
+    @unittest.skipIf(zstd is None, "compression.zstd unavailable")
+    def test_zstd_capture_matches_plain_across_frames(self):
+        records = [{"type": "session_meta", "payload": {"cwd": "/Users/private/work"}},
+                   {"type": "event_msg", "payload": {"type": "token_count", "output_tokens": 9,
+                                                      "message": "SECRET_SYNTHETIC_中文"}}]
+        self.write(records)
+        self.run_capture()
+        compressed = self.source / "synthetic.jsonl.zst"
+        raw = self.input.read_bytes()
+        middle = len(raw) // 2
+        data = zstd.compress(raw[:middle]) + zstd.compress(raw[middle:])
+        compressed.write_bytes(data)
+        before = capture.source_signature(compressed)
+        other = self.destination / "from-zstd.jsonl"
+        capture.capture(compressed, other, self.source)
+        self.assertEqual(self.output.read_bytes(), other.read_bytes())
+        self.assertEqual(self.output.with_suffix(".jsonl.sanitized").read_bytes(),
+                         other.with_suffix(".jsonl.sanitized").read_bytes())
+        self.assertEqual(compressed.read_bytes(), data)
+        self.assertEqual(capture.source_signature(compressed), before)
+        self.assertEqual(len(list(self.destination.iterdir())), 4)
+
+    @unittest.skipIf(zstd is None, "compression.zstd unavailable")
+    def test_bad_zstd_or_decoded_jsonl_never_publishes(self):
+        self.input = self.source / "synthetic.jsonl.zst"
+        frame = zstd.compress(b'{"text":"SYNTHETIC_SECRET"}\n')
+        inputs = (b"not zstd", frame[:-1], frame + b"trailing junk", b"",
+                  zstd.compress(b'{"text":"missing final newline"}'),
+                  zstd.compress(b'{"text":"bad UTF-8 \xff"}\n'))
+        for index, data in enumerate(inputs):
+            with self.subTest(index=index):
+                self.input.write_bytes(data)
+                with self.assertRaises(capture.CaptureError) as error:
+                    self.run_capture()
+                self.assertNotIn("SYNTHETIC_SECRET", str(error.exception))
+                self.assert_no_output()
+
+    @unittest.skipIf(zstd is None, "compression.zstd unavailable")
+    def test_zstd_rejects_oversize_input_and_oversize_expansion(self):
+        self.input = self.source / "synthetic.jsonl.zst"
+        frame = zstd.compress(b'{"text":"' + b"x" * 1024 + b'"}\n')
+        self.input.write_bytes(frame)
+        for limit, error in ((len(frame) - 1, "input exceeds"), (len(frame), "decoded input exceeds")):
+            with self.subTest(limit=limit), mock.patch.object(capture, "MAX_BYTES", limit):
+                with self.assertRaisesRegex(capture.CaptureError, error):
+                    self.run_capture()
+                self.assert_no_output()
+
+    @unittest.skipIf(zstd is None, "compression.zstd unavailable")
+    def test_zstd_rejects_oversize_decoder_window_independently_of_output(self):
+        self.input = self.source / "synthetic.jsonl.zst"
+        options = {zstd.CompressionParameter.window_log: 12, zstd.CompressionParameter.content_size_flag: 0}
+        raw = b'{"text":"' + b"x" * 8192 + b'"}\n'
+        compressor = zstd.ZstdCompressor(options=options)
+        self.input.write_bytes(compressor.compress(raw, zstd.ZstdCompressor.FLUSH_FRAME))
+        with mock.patch.object(capture, "MAX_ZSTD_WINDOW_LOG", 10):
+            with self.assertRaisesRegex(capture.CaptureError, "unsupported zstd input"):
+                self.run_capture()
+            self.assert_no_output()
+        self.assertEqual(len(self.run_capture()[0]["text"]), 8192)
+
+    def test_zstd_requires_plain_jsonl_output_and_optional_stdlib_decoder(self):
+        compressed = self.source / "synthetic.jsonl.zst"
+        compressed.write_bytes(b"synthetic")
+        with self.assertRaisesRegex(capture.CaptureError, "output extension"):
+            capture.capture(compressed, self.destination / "fixture.jsonl.zst", self.source)
+        with mock.patch.object(capture, "zstd", None, create=True):
+            with self.assertRaisesRegex(capture.CaptureError, "compression.zstd"):
+                capture.capture(compressed, self.output, self.source)
+            self.assert_no_output()
+            self.write([{"type": "session_meta"}])
+            self.assertEqual(self.run_capture(), [{"type": "session_meta"}])
 
     def test_validation_failure_and_source_change_do_not_publish(self):
         self.write([{"text": "synthetic"}])

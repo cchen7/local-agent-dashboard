@@ -83,9 +83,8 @@ There is no entitlement-plist-only mode that can masquerade as an artifact check
 
 ## Fixture capture
 
-No real capture is authorized in M0-TOOLING. Review the sanitizer first. Later,
-use one explicit stable UTF-8 JSON/JSONL file per invocation and a newly named
-output in an existing, separate directory:
+Use one explicit stable UTF-8 JSON/JSONL or `.jsonl.zst` file per invocation and a
+newly named output in an existing, separate directory:
 
 ```sh
 Tools/fixture-capture \
@@ -106,8 +105,15 @@ all declared source boundaries. Existing
 output or marker paths, symlink entries (even dangling), same-file aliases and
 hardlinks are refused. Nothing is overwritten; source directories are never
 created or changed. The tool does not discover sources, recurse directories,
-copy SQLite, decompress zstd, interpret YAML or capture arbitrary text files.
-Compressed/other formats need a separately reviewed path in their adapter task.
+copy SQLite, interpret YAML or capture arbitrary text files.
+
+For `.jsonl.zst` input, give `--output` a `.jsonl` extension. Compressed capture
+uses the local [Python 3.14+ `compression.zstd` module](https://docs.python.org/3.14/library/compression.zstd.html).
+The decoder reads concatenated frames in memory from the bounded input buffer;
+its window, compressed input and decoded output each have a 64 MiB limit. No raw
+JSONL file is written. Invalid or truncated zstd data fails before publication.
+Plain JSON/JSONL still works without the optional module. This is a developer
+tool, separate from the native App decoder.
 
 JSONL must have complete newline-terminated object records. Blank lines are
 discarded. JSON may contain an object or array. Invalid UTF-8/JSON, duplicate keys,
@@ -177,7 +183,7 @@ unknown key additions, numeric metadata and timestamps before committing a fixtu
 | `forbid-apis.sh` | Sources inspected, no match | Forbidden API / uninspectable syntax | Missing sources / unreadable tree or prerequisite / usage |
 | `check-dependencies.sh` | Exact approved pin and consistent locks | Unapproved/inconsistent/malformed declarations or lock | Missing package/lock, symlink/read prerequisite or usage |
 | `check-entitlements.sh` | Actual signature, entitlements and runtime flags pass | Invalid/unsigned artifact or policy/inspection failure | Missing `.app`, codesign or usage |
-| `fixture-capture` | New validated fixture and marker | Invalid/unsafe input/output, validation or publication failure | Missing Python or usage |
+| `fixture-capture` | New validated fixture and marker | Invalid/unsafe input/output, validation or publication failure | Missing Python, zstd module for compressed input, or usage |
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tools/tests -v
@@ -190,7 +196,7 @@ Hardened Runtime, needs no keychain identity, and never launches the synthetic a
 It reports a skip when macOS/clang/codesign is absent; such a skip is not artifact
 verification. No package resolution, global installation or global caches are used.
 
-Latest review verification: **40 tests passed, zero skipped**, including all four
+M0 review verification: **40 tests passed, zero skipped**, including all four
 independent protected roots and symlink aliases, Swift declaration/call separation,
 `sys` + backslash-newline + `tem`, and C comment/splicing order. The following
 read-only integration checks also passed against the coordinator-authorized
