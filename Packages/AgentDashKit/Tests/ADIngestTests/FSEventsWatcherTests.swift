@@ -26,7 +26,7 @@ struct FSEventsWatcherTests {
         let valid = "/synthetic/root/目录/a.jsonl"
         #expect(signals([(valid, fileModified), (valid, fileModified),
                          ("/synthetic/root/b.json", fileModified)]) ==
-                [.fileChanged(relativePath: "目录/a.jsonl"), .fileChanged(relativePath: "b.json")])
+                [.fileChanged(.init(relativePath: "目录/a.jsonl")), .fileChanged(.init(relativePath: "b.json"))])
         for flag in [kFSEventStreamEventFlagNone, kFSEventStreamEventFlagItemCreated,
                      fileModified | kFSEventStreamEventFlagItemIsDir,
                      fileModified | kFSEventStreamEventFlagItemIsSymlink, fileModified | Int(0x80000000)] {
@@ -38,6 +38,25 @@ struct FSEventsWatcherTests {
             #expect(signals([(path, fileModified)]) == [.rescanRequired])
         }
         #expect(signals([]).isEmpty)
+    }
+
+    @Test("Canonically equivalent filenames stay distinct debounce keys by UTF-8 bytes")
+    func byteDistinctFilenames() {
+        let composed = "caf\u{00E9}.jsonl"
+        let decomposed = "cafe\u{0301}.jsonl"
+        #expect(composed == decomposed)
+        let batch = signals([("/synthetic/root/" + composed, fileModified),
+                             ("/synthetic/root/" + decomposed, fileModified),
+                             ("/synthetic/root/" + composed, fileModified)])
+        let files = batch.compactMap { signal -> FSEventsWatcher.FileID? in
+            if case .fileChanged(let file) = signal { return file }
+            return nil
+        }
+        #expect(batch.count == 2)
+        #expect(files.map { Array($0.relativePath.utf8) } == [Array(composed.utf8), Array(decomposed.utf8)])
+        var pending: [FSEventsWatcher.FileID: Int] = [:]
+        for (index, file) in files.enumerated() { pending[file] = index }
+        #expect(pending.count == 2)
     }
 
     @Test("Edits to two files under one root retain distinct relative identities")
@@ -53,7 +72,8 @@ struct FSEventsWatcherTests {
             for (file, name) in zip(files, names) {
                 let baseline = recorder.count
                 try append(Data([2]), to: file)
-                try #require(recorder.wait(after: baseline, matching: .fileChanged(relativePath: name), timeout: 5))
+                try #require(recorder.wait(after: baseline, matching: .fileChanged(.init(relativePath: name)),
+                                           timeout: 5))
             }
         }
     }
@@ -109,7 +129,7 @@ struct FSEventsWatcherTests {
             try #require(recorder.waitForQuiet())
             let baseline = recorder.count
             try append(Data("append\n".utf8), to: file)
-            try #require(recorder.wait(after: baseline, matching: .fileChanged(relativePath: "目录/synthetic.jsonl"),
+            try #require(recorder.wait(after: baseline, matching: .fileChanged(.init(relativePath: "目录/synthetic.jsonl")),
                                        timeout: 5))
             #expect(try Data(contentsOf: file) == Data("seed\nappend\n".utf8))
 

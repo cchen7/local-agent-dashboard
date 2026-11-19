@@ -9,8 +9,11 @@ authorized directory; no adapter or App wiring is included.
 
 ```swift
 public final class FSEventsWatcher: Sendable {
+    public struct FileID: Hashable, Sendable {
+        public let relativePath: String
+    }
     public enum Signal: Equatable, Sendable {
-        case fileChanged(relativePath: String)
+        case fileChanged(FileID)
         case rescanRequired
     }
     public enum Failure: Error, Equatable, Sendable {
@@ -36,7 +39,7 @@ queue, and `FSEventStreamStart`. Native latency is a batching setting, not a
 delivery deadline. Start watching before the initial scan to avoid a scan/watch
 gap; initial scan coordination remains the caller's responsibility.
 
-Regular-file events emit one `fileChanged(relativePath:)` per distinct file in
+Regular-file events emit one `fileChanged(FileID)` per distinct file in
 the native batch. If any event cannot be safely attributed to a file (including
 directory or unknown events, loss/coalescing, and root or volume changes), the
 batch emits only `rescanRequired`. Empty batches emit nothing.
@@ -45,6 +48,8 @@ batch emits only `rescanRequired`. Empty batches emit nothing.
 
 Match a file path against the canonical root at a component boundary, reject
 empty, dot and traversal components, and copy only the relative identifier.
+Keep `FileID` as the debounce key; it compares and hashes UTF-8 bytes, so two
+different spellings that Swift would normalize for equality remain distinct.
 Keep identifiers inside ingest and out of logs. They are scheduling hints, so
 subsequent reads still use existing authorization and read-only open checks.
 The callback discards native absolute paths and event IDs and emits no logs.
@@ -142,3 +147,7 @@ Review follow-up: 53 package tests passed with native FSEvents service access,
 including 11 watcher tests. Two files under one synthetic root delivered their
 own relative identifiers; the nested Unicode append also delivered its exact
 relative identifier. The default execution sandbox still blocks stream startup.
+
+Second review follow-up: 54 package tests passed, including 12 watcher tests.
+A synthetic callback with precomposed and decomposed filenames retained both
+debounce keys; the byte-identical repeat was coalesced.

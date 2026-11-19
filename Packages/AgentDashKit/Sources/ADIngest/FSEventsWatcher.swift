@@ -7,10 +7,26 @@ import Foundation
 /// Own one watcher per root. This primitive does not discover sources, obtain
 /// permission, read files, schedule work, or follow a renamed root.
 public final class FSEventsWatcher: Sendable {
+    /// Root-relative scheduling key. Equality preserves the filesystem's byte
+    /// spelling even when Swift considers two Unicode strings equivalent.
+    public struct FileID: Hashable, Sendable {
+        public let relativePath: String
+
+        init(relativePath: String) { self.relativePath = relativePath }
+
+        public static func == (lhs: FileID, rhs: FileID) -> Bool {
+            lhs.relativePath.utf8.elementsEqual(rhs.relativePath.utf8)
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            for byte in relativePath.utf8 { hasher.combine(byte) }
+        }
+    }
+
     /// Advisory hints for the ingest coordinator. Keep file identifiers private.
     public enum Signal: Equatable, Sendable {
         /// A file event under this root. Not authorization to open the path.
-        case fileChanged(relativePath: String)
+        case fileChanged(FileID)
         /// Loss, coalescing or a change that cannot be attributed to one file.
         /// The coordinator must revalidate access and rescan.
         case rescanRequired
@@ -59,7 +75,7 @@ public final class FSEventsWatcher: Sendable {
         let file = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)
         let prefix = rootPath == "/" ? rootPath.utf8 : (rootPath + "/").utf8
         var result: [Signal] = []
-        var seen = Set<String>()
+        var seen = Set<FileID>()
         for (index, flag) in flags.enumerated() {
             // Any lost/coalesced/root/directory/unknown event takes precedence
             // over precise hints in this callback.
@@ -72,8 +88,8 @@ public final class FSEventsWatcher: Sendable {
             guard !components.isEmpty, components.allSatisfy({
                 !$0.isEmpty && !$0.contains(0) && !$0.elementsEqual([0x2E]) && !$0.elementsEqual([0x2E, 0x2E])
             }) else { return [.rescanRequired] }
-            let identifier = String(decoding: relative, as: UTF8.self)
-            if seen.insert(identifier).inserted { result.append(.fileChanged(relativePath: identifier)) }
+            let identifier = FileID(relativePath: String(decoding: relative, as: UTF8.self))
+            if seen.insert(identifier).inserted { result.append(.fileChanged(identifier)) }
         }
         return result
     }
