@@ -5,11 +5,12 @@ public enum AgentKind: String, Codable, CaseIterable, Sendable {
     case claudeCode = "claude_code", codex, copilot, grokBuild = "grok_build"
 }
 
-/// A host-path mapping. Longest-prefix application belongs to ingestion (M2).
+/// An in-environment → host-path rule for display and future copy-resume use.
+/// `PathMapper` applies it without authorizing or opening a source path.
 public struct PathMapping: Codable, Equatable, Sendable {
     public var from: String
     public var to: String
-    /// Create a normalized value without performing file access.
+    /// Preserve the configured strings without normalization or file access.
     public init(from: String, to: String) { self.from = from; self.to = to }
 }
 
