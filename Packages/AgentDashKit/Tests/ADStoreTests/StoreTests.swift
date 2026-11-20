@@ -44,6 +44,52 @@ func freshAndReopened() throws {
     }
 }
 
+@Test("NFR-3: reused event and token statements rebind after transaction rollback")
+func cachedWritesKeepSessionBindingsAfterRollback() throws {
+    try withStore { store, _ in
+        let first = try seed(store)
+        let secondKey = SessionKey(agent: .codex, nativeID: "synthetic-second")
+        try store.write([.session(.init(key: secondKey, sourceID: first.sourceID, environment: "Test"))])
+
+        let firstEvent = EventRecord(session: first.key, sequence: 0, timestamp: 100, kind: .assistant,
+                                     text: "first synthetic message", dedupeKey: "synthetic:first:event")
+        let firstUsage = TokenEvent(session: first.key, timestamp: 100, model: "synthetic",
+                                    counts: .init(inputFresh: 7, cacheRead: 2, cacheWrite: 1, output: 9, reasoning: 1),
+                                    dedupeKey: "synthetic:first:tokens")
+        try store.write([.event(firstEvent), .tokens(firstUsage)])
+
+        let discarded = EventRecord(session: secondKey, sequence: 1, timestamp: 200, kind: .assistant,
+                                     text: "discarded synthetic message", dedupeKey: "synthetic:second:attempt")
+        let invalid = TokenEvent(session: secondKey, timestamp: 200, model: "synthetic", counts: .init(inputFresh: -1),
+                                 dedupeKey: "synthetic:second:invalid")
+        #expect(throws: StoreError.invalidTokenCounts) {
+            try store.write([.event(discarded), .tokens(invalid)])
+        }
+        #expect(try store.events(in: secondKey).isEmpty)
+
+        let secondEvent = EventRecord(session: secondKey, sequence: 2, timestamp: 300, kind: .user,
+                                      text: "second synthetic message", dedupeKey: "synthetic:second:event")
+        let secondUsage = TokenEvent(session: secondKey, timestamp: 300, model: "synthetic",
+                                     counts: .init(inputFresh: 1, cacheRead: 2, output: 8),
+                                     dedupeKey: "synthetic:second:tokens")
+        try store.write([.event(secondEvent), .tokens(secondUsage)])
+        #expect(try store.events(in: first.key) == [firstEvent])
+        #expect(try store.events(in: secondKey) == [secondEvent])
+        let usage = try store.databasePool.read { db -> [String: TokenCounts] in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT s.native_id,t.input_fresh,t.cache_read,t.cache_write,t.cache_write_1h,t.output,t.reasoning
+                FROM token_events t JOIN sessions s ON s.id=t.session_id
+                """)
+            return Dictionary(uniqueKeysWithValues: rows.map { row in
+                (row["native_id"] as String, TokenCounts(inputFresh: row["input_fresh"], cacheRead: row["cache_read"],
+                    cacheWrite: row["cache_write"], cacheWrite1h: row["cache_write_1h"],
+                    output: row["output"], reasoning: row["reasoning"]))
+            })
+        }
+        #expect(usage == [first.key.nativeID: firstUsage.counts, secondKey.nativeID: secondUsage.counts])
+    }
+}
+
 @Test("ADP-3: source/file/checkpoint and normalized writes are idempotent and preserve row identity")
 func idempotentWrites() throws {
     try withStore { store, _ in

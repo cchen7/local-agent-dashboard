@@ -30,11 +30,14 @@ final class AgentDashTokenizer: FTS5WrapperTokenizer {
         var bridge = Bridge(text: pText, byteCount: nText, context: context, callback: tokenCallback)
         return withUnsafeMutablePointer(to: &bridge) { pointer in
             wrappedTokenizer.tokenize(context: UnsafeMutableRawPointer(pointer), tokenization: tokenization,
-                                      pText: pText, nText: nText) { raw, flags, _, _, start, end in
+                                      pText: pText, nText: nText) { raw, flags, token, length, start, end in
                 guard let raw else { return 1 }
                 let bridge = raw.assumingMemoryBound(to: Bridge.self).pointee
                 guard start >= 0, end >= start, end <= bridge.byteCount else { return 1 }
                 let bytes = UnsafeRawBufferPointer(start: bridge.text.advanced(by: Int(start)), count: Int(end - start))
+                if let token, AgentDashTokenizer.canForwardASCII(bytes, token: token, length: length) {
+                    return bridge.callback(bridge.context, flags, token, length, start, end)
+                }
                 let original = String(decoding: bytes, as: UTF8.self)
                 for group in SearchTokenization.groups(in: original) {
                     for (index, term) in group.terms.enumerated() {
@@ -49,6 +52,24 @@ final class AgentDashTokenizer: FTS5WrapperTokenizer {
                 return 0
             }
         }
+    }
+
+    /// The pure splitter emits exactly one folded token for an ASCII word
+    /// with no separators or internal capitals. Check SQLite's folded bytes
+    /// too, so both search terms and original byte offsets remain identical.
+    private static func canForwardASCII(_ original: UnsafeRawBufferPointer,
+                                        token: UnsafePointer<CChar>, length: CInt) -> Bool {
+        guard length > 0, Int(length) == original.count else { return false }
+        let folded = UnsafeRawBufferPointer(start: token, count: Int(length))
+        for index in original.indices {
+            let byte = original[index]
+            if (97...122).contains(byte) || (48...57).contains(byte) {
+                guard folded[index] == byte else { return false }
+            } else if index == 0, (65...90).contains(byte) {
+                guard folded[index] == byte + 32 else { return false }
+            } else { return false }
+        }
+        return true
     }
 
     private struct Bridge {

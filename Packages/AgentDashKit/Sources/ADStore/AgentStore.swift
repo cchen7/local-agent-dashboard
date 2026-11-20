@@ -161,12 +161,12 @@ public final class AgentStore: Sendable {
     }
 
     private static func save(_ value: EventRecord, db: Database) throws {
-        try db.execute(sql: """
+        try db.cachedStatement(sql: """
             INSERT INTO events(session_id,seq,ts,kind,tool_name,text,meta_json,dedupe_key) VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(dedupe_key) DO UPDATE SET seq=excluded.seq,ts=excluded.ts,
             kind=excluded.kind,tool_name=excluded.tool_name,text=excluded.text,meta_json=excluded.meta_json
             WHERE events.session_id=excluded.session_id
-            """, arguments: [try sessionID(value.session, db: db), value.sequence, value.timestamp, value.kind.rawValue,
+            """).execute(arguments: [try sessionID(value.session, db: db), value.sequence, value.timestamp, value.kind.rawValue,
                               value.toolName, value.text, value.metadataJSON, value.dedupeKey])
     }
 
@@ -174,14 +174,14 @@ public final class AgentStore: Sendable {
         let c = value.counts
         guard [c.inputFresh,c.cacheRead,c.cacheWrite,c.cacheWrite1h,c.output,c.reasoning].allSatisfy({ $0 >= 0 }),
               c.reasoning <= c.output else { throw StoreError.invalidTokenCounts }
-        try db.execute(sql: """
+        try db.cachedStatement(sql: """
             INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,precision,dedupe_key)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
             agent=excluded.agent,model=excluded.model,ts=excluded.ts,input_fresh=excluded.input_fresh,
             cache_read=excluded.cache_read,cache_write=excluded.cache_write,cache_write_1h=excluded.cache_write_1h,
             output=excluded.output,reasoning=excluded.reasoning,precision=excluded.precision
             WHERE token_events.session_id=excluded.session_id
-            """, arguments: [try sessionID(value.session, db: db), value.session.agent.rawValue, value.model, value.timestamp,
+            """).execute(arguments: [try sessionID(value.session, db: db), value.session.agent.rawValue, value.model, value.timestamp,
                               c.inputFresh, c.cacheRead, c.cacheWrite, c.cacheWrite1h, c.output, c.reasoning, value.precision.rawValue, value.dedupeKey])
     }
 

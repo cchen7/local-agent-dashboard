@@ -47,3 +47,19 @@ func tokenPositions() throws {
         #expect(tokens.map { $0.flags.contains(.colocated) } == [false, false, false, false, false, false, true, true, true])
     }
 }
+
+@Test("NFR-3: ASCII forwarding preserves mixed-token MATCH and highlight offsets")
+func asciiTokenForwardingPreservesSearch() throws {
+    var config = Configuration()
+    config.prepareDatabase { db in db.add(tokenizer: AgentDashTokenizer.self) }
+    let queue = try DatabaseQueue(configuration: config)
+    try queue.write { db in
+        try db.execute(sql: "CREATE VIRTUAL TABLE sample USING fts5(text, tokenize='agentdash')")
+        try db.execute(sql: "INSERT INTO sample(text) VALUES (?)",
+                       arguments: ["Login build42 parseHTTPResponse 修复登录 Café"])
+        let highlighted = try String.fetchOne(db, sql: """
+            SELECT highlight(sample,0,'[',']') FROM sample WHERE sample MATCH ?
+            """, arguments: ["login OR build42 OR http OR 登录 OR cafe"])
+        #expect(highlighted == "[Login] [build42] [parseHTTPResponse] 修复[登录] [Café]")
+    }
+}
