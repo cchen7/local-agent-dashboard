@@ -130,18 +130,23 @@ public final class AgentStore: Sendable {
         }
     }
 
-    /// Normalized transcript in file order. Paging/search APIs are added with M1/M3.
+    /// Full normalized transcript. Use transcriptPage for interactive reads.
     public func events(in session: SessionKey) throws -> [EventRecord] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT e.* FROM events e JOIN sessions s ON s.id=e.session_id
                 WHERE s.agent=? AND s.native_id=? ORDER BY e.seq,e.id
                 """, arguments: [session.agent.rawValue, session.nativeID]).map { row in
-                guard let kind = EventKind(rawValue: row["kind"]) else { throw StoreError.invalidStoredValue }
-                return EventRecord(session: session, sequence: row["seq"], timestamp: row["ts"], kind: kind,
-                                   toolName: row["tool_name"], text: row["text"], metadataJSON: row["meta_json"], dedupeKey: row["dedupe_key"])
+                try Self.readTranscriptEvent(row, in: session)
             }
         }
+    }
+
+    static func readTranscriptEvent(_ row: Row, in session: SessionKey) throws -> EventRecord {
+        guard let kind = EventKind(rawValue: row["kind"]) else { throw StoreError.invalidStoredValue }
+        return EventRecord(session: session, sequence: row["seq"], timestamp: row["ts"], kind: kind,
+                           toolName: row["tool_name"], text: row["text"], metadataJSON: row["meta_json"],
+                           dedupeKey: row["dedupe_key"])
     }
 
     private static func sessionID(_ key: SessionKey, db: Database) throws -> Int64 {
