@@ -93,3 +93,9 @@ SPEC window sizes include native chrome. SwiftUI content minima alone produced a
 converts the 960×600 outer minimum to content constraints without a fixed toolbar
 height. Its state belongs to window content; unchanged native values are not
 reassigned. All six size/appearance combinations were executed and visually checked.
+
+## DEV-028 — No session export (owner confirmed 2026-11-20)
+
+The owner removed Markdown/JSON session export from the product scope. Full
+transcripts remain viewable in the app, and Copy Resume Command and Show in
+Finder remain available. No entitlement change is needed.

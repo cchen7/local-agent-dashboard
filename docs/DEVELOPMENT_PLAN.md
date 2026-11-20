@@ -48,7 +48,7 @@ The coordinator owns `FORMATS.md` until the EXP-1 handover is complete.
 6. M3: search/query syntax, deterministic insights, Projects and status inference.
 7. M4: pricing engine/table/tools, token aggregation, charts and menu bar; fill real
    prices only from official vendor pages. Do not use the SPEC's zero-price example.
-8. M5: retention/archive, privacy/export, responsiveness, performance and release.
+8. M5: retention/archive, masking and exclusions, responsiveness, performance and release.
 
 Do not pre-create every future branch from today's empty skeleton. Create each
 wave from the accepted `main` after its contracts and prerequisites are available.
