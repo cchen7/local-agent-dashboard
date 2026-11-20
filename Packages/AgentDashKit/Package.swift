@@ -25,6 +25,7 @@ let package = Package(
         .target(name: "ADPrivacy", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADPricing", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADPricingTests", dependencies: ["ADPricing", "ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
+        .testTarget(name: "ADPrivacyTests", dependencies: ["ADPrivacy"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADZstdTests", dependencies: ["ADZstd"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADIngestTests", dependencies: ["ADIngest"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADCoreTests", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
