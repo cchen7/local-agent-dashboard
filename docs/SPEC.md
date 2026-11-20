@@ -940,6 +940,20 @@ Mask common secret formats at display time (e.g. `sk-…`, `ghp_…`, `github_pa
 
 Settings accepts globs (e.g. `~/work/client-a/**`). Matching sessions are not indexed; already-indexed data is removed immediately.
 
+Rules start with an absolute path or `~/`, expanded against the explicitly
+provided host home. `*` and `?` match within a component; `?` consumes one
+Unicode scalar. A standalone `**` matches zero or more complete components.
+Other characters are literal. Matching is case-sensitive and preserves
+Unicode spelling. Rules reject dot components, repeated interior separators
+and NUL, and ignore trailing separators. Validate all rules before saving
+(at most 64 rules, each at most 4,096 UTF-8 bytes).
+
+For recorded workspace paths, collapse redundant separators and remove `.`
+components without accessing the filesystem. With active rules, a relative path,
+an implementation-defined `//` prefix, NUL or a `..` component is indeterminate.
+Defer indexing when the workspace is indeterminate; only a confirmed match
+triggers removal. With no exclusion rules, no path is excluded.
+
 ### 12.4 Proving zero network
 
 - CI: entitlement check (§14.4).
