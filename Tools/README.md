@@ -27,8 +27,10 @@ configuration without writing anything. Generation checks free space first.
 The command prints the path of a fresh, owner-only temporary directory.
 There is no input log or user-specified output path. When the App-owned index
 exists, only its registered source roots are read, in read-only mode, to
-refuse a temporary destination that overlaps one. The tool never opens
-agent files or registers the output in Settings. The manifest is emitted
+refuse a temporary destination that overlaps one. The check compares directory
+identities, including macOS Data volume aliases, and stops before creating
+anything if it cannot verify a boundary. The tool never opens agent files or
+registers the output in Settings. The manifest is emitted
 only after the corpus is complete; do not use partial output or commit large
 corpora.
 

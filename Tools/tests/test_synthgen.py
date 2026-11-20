@@ -5,6 +5,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import synthgen
@@ -100,6 +102,49 @@ class SyntheticCorpusTests(unittest.TestCase):
             self.assertEqual(index.read_bytes(), before)
             self.assertEqual(set(parent.iterdir()), {index, protected})
             self.assertEqual(list(protected.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "needs a macOS firmlink")
+    def test_refuses_real_firmlink_alias_before_mkdir(self):
+        parent = Path("/private/tmp")
+        aliases = [Path("/System/Volumes/Data/private/tmp"), Path("/System/Volumes/Data")]
+        if not aliases[0].is_dir() or not parent.samefile(aliases[0]):
+            self.skipTest("temporary directory has no Data volume alias")
+        for root in aliases:
+            with self.subTest(root=root), patch.object(Path, "mkdir") as mkdir:
+                # The real directory is only stat'ed. Never try to create a
+                # corpus here, even if the overlap check regresses.
+                with self.assertRaises(synthgen.CorpusError):
+                    synthgen.new_output(parent, [root], 100)
+                mkdir.assert_not_called()
+
+    def test_refuses_aliased_ancestor_and_unresolvable_source(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            source = root / "source"
+            parent = source / "staging"
+            parent.mkdir(parents=True)
+            alias = root / "alias"
+            alias.symlink_to(source, target_is_directory=True)
+            dangling = root / "dangling"
+            dangling.symlink_to(root / "absent", target_is_directory=True)
+            for registered in [alias, dangling / "child"]:
+                with self.assertRaises(synthgen.CorpusError):
+                    synthgen.new_output(parent, [registered], 100)
+                self.assertEqual(list(parent.iterdir()), [])
+
+    def test_avoids_creating_parent_of_missing_source_via_alias(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            parent = root / "staging"
+            parent.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(parent, target_is_directory=True)
+            reserved, safe = UUID(int=1), UUID(int=2)
+            registered = alias / ("agentdash-synth-" + reserved.hex) / "missing"
+            with patch.object(synthgen.uuid, "uuid4", side_effect=[reserved, safe]):
+                output = synthgen.new_output(parent, [registered], 100)
+            self.assertEqual(output.name, "agentdash-synth-" + safe.hex)
+            self.assertFalse(registered.parent.exists())
 
 
 if __name__ == "__main__":

@@ -279,27 +279,72 @@ def check_source_path(value):
     return True
 
 
-def components(path):
-    return tuple(unicodedata.normalize("NFC", part).casefold() for part in path.resolve().parts)
+def normalized_name(name):
+    return unicodedata.normalize("NFC", name).casefold()
 
 
-def is_inside(child, parent):
-    return child[:len(parent)] == parent
+def directory_id(path):
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise CorpusError("not a directory in a source or output path")
+    return info.st_dev, info.st_ino
+
+
+def source_boundary(root):
+    """Identity of the deepest existing directory and the missing suffix."""
+    missing = []
+    while True:
+        try:
+            resolved = root.resolve(strict=True)
+        except FileNotFoundError:
+            if not root.name or root.name == "..":
+                raise CorpusError("could not verify a registered source path")
+            try:
+                root.lstat()
+            except FileNotFoundError:
+                missing.append(normalized_name(root.name))
+                root = root.parent
+                continue
+            # A dangling symlink does exist but its destination is unknown.
+            raise CorpusError("could not verify a registered source path")
+        return directory_id(resolved), tuple(reversed(missing))
+
+
+def ancestor_ids(parent):
+    identity = directory_id(parent)
+    paths = [parent]
+    if sys.platform == "darwin":
+        # A firmlink is not a symlink. The Data-volume spelling can expose
+        # additional ancestors (notably the Data mount itself). Only walk it
+        # when the kernel confirms it names the same directory.
+        data_path = Path("/System/Volumes/Data") / parent.relative_to("/")
+        try:
+            if directory_id(data_path) == identity:
+                paths.append(data_path)
+        except FileNotFoundError:
+            pass
+    return identity, {directory_id(path) for p in paths for path in (p, *p.parents)}
 
 
 def new_output(parent, sources, raw_bytes):
-    spelled = tuple(unicodedata.normalize("NFC", part).casefold() for part in parent.absolute().parts)
-    parent = parent.resolve(strict=True)
-    normalized = components(parent)
-    boundaries = [components(root) for root in sources]
-    if PROTECTED.intersection((*spelled, *normalized)) or any(is_inside(normalized, root) for root in boundaries):
+    spelled = parent.absolute()
+    try:
+        parent = spelled.resolve(strict=True)
+        parent_id, parents = ancestor_ids(parent)
+        boundaries = [source_boundary(root) for root in sources]
+    except (OSError, RuntimeError) as error:
+        raise CorpusError("could not verify source and temporary directory boundaries") from error
+    if (PROTECTED.intersection(map(normalized_name, (*spelled.parts, *parent.parts)))
+            or any(not missing and identity in parents for identity, missing in boundaries)):
         raise CorpusError("temporary output would touch an existing source")
+    # A missing registered root may be the proposed child or below it,
+    # including via another spelling of the existing output parent.
+    reserved = {missing[0] for identity, missing in boundaries if identity == parent_id and missing}
     if shutil.disk_usage(parent).free < raw_bytes + 1_000_000:
         raise CorpusError("not enough temporary space for the raw corpus")
     while True:
         output = parent / ("agentdash-synth-" + uuid.uuid4().hex)
-        name = components(output)
-        if any(is_inside(root, name) for root in boundaries):
+        if normalized_name(output.name) in reserved:
             continue
         try:
             output.mkdir(mode=0o700)
