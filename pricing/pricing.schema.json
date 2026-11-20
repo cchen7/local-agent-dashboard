@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Dashboard price table, version 1",
+  "description": "USD per million tokens. ADPricing validates dates, decimal precision, model conflicts, aliases, and tier ordering.",
+  "type": "object",
+  "required": ["schemaVersion", "currency", "unit", "updatedAt", "models"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "currency": { "const": "USD" },
+    "unit": { "const": "per_million_tokens" },
+    "updatedAt": { "$ref": "#/$defs/date" },
+    "displayCurrencies": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/displayCurrency" }
+    },
+    "aliases": {
+      "type": ["object", "null"],
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "models": { "type": "array", "items": { "$ref": "#/$defs/model" } }
+  },
+  "$defs": {
+    "date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "format": "date" },
+    "rate": { "type": "number", "minimum": 0 },
+    "cacheRate": { "anyOf": [{ "$ref": "#/$defs/rate" }, { "type": "null" }] },
+    "rates": {
+      "type": "object",
+      "required": ["input", "output"],
+      "properties": {
+        "input": { "$ref": "#/$defs/rate" },
+        "output": { "$ref": "#/$defs/rate" },
+        "cacheRead": { "$ref": "#/$defs/cacheRate" },
+        "cacheWrite5m": { "$ref": "#/$defs/cacheRate" },
+        "cacheWrite1h": { "$ref": "#/$defs/cacheRate" }
+      }
+    },
+    "tier": {
+      "allOf": [{ "$ref": "#/$defs/rates" }],
+      "required": ["whenPromptTokensAbove"],
+      "properties": {
+        "whenPromptTokensAbove": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
+      }
+    },
+    "entry": {
+      "allOf": [{ "$ref": "#/$defs/rates" }],
+      "required": ["effectiveFrom", "source", "checkedAt"],
+      "properties": {
+        "effectiveFrom": { "$ref": "#/$defs/date" },
+        "source": { "type": "string", "minLength": 1, "description": "Official vendor price source." },
+        "checkedAt": { "$ref": "#/$defs/date" },
+        "tiers": { "type": ["array", "null"], "items": { "$ref": "#/$defs/tier" } }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "vendor", "displayName", "prices"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "vendor": { "type": "string", "minLength": 1 },
+        "displayName": { "type": "string", "minLength": 1 },
+        "match": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
+        "prices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/entry" } }
+      }
+    },
+    "displayCurrency": {
+      "type": "object",
+      "required": ["code", "ratePerUSD", "asOf"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "ratePerUSD": { "type": "number", "exclusiveMinimum": 0 },
+        "asOf": { "$ref": "#/$defs/date" }
+      }
+    }
+  }
+}
