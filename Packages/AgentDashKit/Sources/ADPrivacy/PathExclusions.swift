@@ -8,6 +8,14 @@ public struct PathExclusions: Sendable {
         case tooManyRules
     }
 
+    public enum Decision: Equatable, Sendable {
+        case excluded
+        case notExcluded
+        /// Withhold from indexing until there is an unambiguous workspace.
+        /// This alone does not establish a match for removing existing data.
+        case indeterminate
+    }
+
     private enum Component: Sendable {
         case literal([UInt32])
         case wildcard([UInt32])
@@ -51,9 +59,21 @@ public struct PathExclusions: Sendable {
         }
     }
 
-    public func matches(_ path: String) -> Bool {
-        guard !rules.isEmpty, let path = Self.components(path.unicodeScalars.map(\.value)[...]) else { return false }
-        return rules.contains { Self.matches($0, path: path) }
+    /// Recorded paths can come from another host. Normalize only spellings
+    /// whose interpretation does not require consulting its filesystem.
+    public func decision(for path: String) -> Decision {
+        guard !rules.isEmpty else { return .notExcluded }
+        let scalars = path.unicodeScalars.map(\.value)
+        guard scalars.first == Self.slash, !scalars.contains(0) else { return .indeterminate }
+        // POSIX reserves exactly two leading separators for host-specific
+        // interpretation. A parent component can cross a symlink.
+        if scalars.starts(with: [Self.slash, Self.slash]), scalars.dropFirst(2).first != Self.slash {
+            return .indeterminate
+        }
+        let parts = scalars.split(separator: Self.slash).filter { !$0.elementsEqual([0x2E]) }
+        guard !parts.contains(where: { $0.elementsEqual([0x2E, 0x2E]) }) else { return .indeterminate }
+        let components = parts.map(Array.init)
+        return rules.contains { Self.matches($0, path: components) } ? .excluded : .notExcluded
     }
 
     private static func components(_ absolute: ArraySlice<UInt32>) -> [[UInt32]]? {

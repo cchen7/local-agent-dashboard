@@ -4,34 +4,42 @@ import Testing
 @Test("SEC-7 / §12.3: recursive exclusions include the directory and descendants but not sibling names")
 func exclusionIncludesDirectoryAndDescendants() throws {
     let rules = try PathExclusions(["~/work/client-a/**"], hostHome: "/Users/synthetic")
-    #expect(rules.matches("/Users/synthetic/work/client-a"))
-    #expect(rules.matches("/Users/synthetic/work/client-a/"))
-    #expect(rules.matches("/Users/synthetic/work/client-a/深层/repo"))
-    #expect(!rules.matches("/Users/synthetic/work/client-ab"))
-    #expect(!rules.matches("/home/synthetic/work/client-a/repo"))
+    #expect(rules.decision(for: "/Users/synthetic/work/client-a") == .excluded)
+    #expect(rules.decision(for: "/Users/synthetic/work/client-a/") == .excluded)
+    #expect(rules.decision(for: "/Users/synthetic/work/client-a/深层/repo") == .excluded)
+    #expect(rules.decision(for: "/Users/synthetic/work/client-ab") == .notExcluded)
+    #expect(rules.decision(for: "/home/synthetic/work/client-a/repo") == .notExcluded)
 }
 
 @Test("SEC-7 / §12.3: single-component wildcards cannot cross directory separators")
 func exclusionWildcardsStayWithinComponent() throws {
     let rules = try PathExclusions(["/work/客户-?/app-*", "/work/**/private/**/src"])
-    #expect(rules.matches("/work/客户-甲/app-iOS"))
-    #expect(!rules.matches("/work/客户-甲乙/app-iOS"))
-    #expect(!rules.matches("/work/客户-甲/tmp/app-iOS"))
-    #expect(!rules.matches("/Work/客户-甲/app-iOS"))
-    #expect(rules.matches("/work/private/src"))
-    #expect(rules.matches("/work/team/private/a/b/src"))
-    #expect(!rules.matches("/work/a/public/src"))
-    #expect(!rules.matches("/work/a/private/src/extra"))
+    #expect(rules.decision(for: "/work/客户-甲/app-iOS") == .excluded)
+    #expect(rules.decision(for: "/work/客户-甲乙/app-iOS") == .notExcluded)
+    #expect(rules.decision(for: "/work/客户-甲/tmp/app-iOS") == .notExcluded)
+    #expect(rules.decision(for: "/Work/客户-甲/app-iOS") == .notExcluded)
+    #expect(rules.decision(for: "/work/private/src") == .excluded)
+    #expect(rules.decision(for: "/work/team/private/a/b/src") == .excluded)
+    #expect(rules.decision(for: "/work/a/public/src") == .notExcluded)
+    #expect(rules.decision(for: "/work/a/private/src/extra") == .notExcluded)
+}
+
+@Test("SEC-7 / §12.3: alternate POSIX spellings cannot bypass a directory exclusion")
+func exclusionMatchesEquivalentSpellings() throws {
+    let rules = try PathExclusions(["/work/client-a/**"])
+    #expect(rules.decision(for: "/work//client-a/./repo") == .excluded)
+    #expect(rules.decision(for: "/work/./client-a//repo/") == .excluded)
+    #expect(rules.decision(for: "/work//client-ab/./repo") == .notExcluded)
 }
 
 @Test("SEC-7 / §12.3: comparison preserves Unicode spelling and treats the expanded home path literally")
 func exclusionUsesExactSpelling() throws {
     let rules = try PathExclusions(["~/café/**", "/work/client[1]"], hostHome: "/Users/a?b*")
-    #expect(rules.matches("/Users/a?b*/café/repo"))
-    #expect(!rules.matches("/Users/axbzz/café/repo"))
-    #expect(!rules.matches("/Users/a?b*/cafe\u{301}/repo"))
-    #expect(rules.matches("/work/client[1]"))
-    #expect(!rules.matches("/work/client1"))
+    #expect(rules.decision(for: "/Users/a?b*/café/repo") == .excluded)
+    #expect(rules.decision(for: "/Users/axbzz/café/repo") == .notExcluded)
+    #expect(rules.decision(for: "/Users/a?b*/cafe\u{301}/repo") == .notExcluded)
+    #expect(rules.decision(for: "/work/client[1]") == .excluded)
+    #expect(rules.decision(for: "/work/client1") == .notExcluded)
 }
 
 @Test("SEC-7 / §12.3: invalid rules fail as a group without returning private paths")
@@ -55,13 +63,19 @@ func exclusionRejectsInvalidRules() throws {
     }
 }
 
-@Test("SEC-7 / §12.3: only valid absolute session paths participate")
-func exclusionDoesNotNormalizeUntrustedPaths() throws {
-    let all = try PathExclusions(["/**"])
-    #expect(all.matches("/"))
-    #expect(all.matches("/work/repo"))
-    for bad in ["", "relative", "~/work/repo", "//work/repo", "/work//repo", "/work/../repo", "/work/./repo", "/bad\u{0}path"] {
-        #expect(!all.matches(bad))
+@Test("SEC-7 / §12.3: ambiguous paths are distinct from definite non-matches")
+func exclusionDistinguishesIndeterminatePaths() throws {
+    let rules = try PathExclusions(["/work/client-a/**"])
+    #expect(rules.decision(for: "/work/client-ab") == .notExcluded)
+    #expect(rules.decision(for: "//work/client-a") == .indeterminate)
+    #expect(rules.decision(for: "///work/client-a") == .excluded)
+    for path in ["", "relative", "~/work/repo", "/work/link/../client-a", "/work/client-a/../other", "/bad\u{0}path"] {
+        #expect(rules.decision(for: path) == .indeterminate)
     }
-    #expect(try !PathExclusions([]).matches("/work/repo"))
+
+    let all = try PathExclusions(["/**"])
+    #expect(all.decision(for: "/") == .excluded)
+    #expect(all.decision(for: "/./") == .excluded)
+    #expect(all.decision(for: "/work/link/../client-a") == .indeterminate)
+    #expect(try PathExclusions([]).decision(for: "relative") == .notExcluded)
 }
