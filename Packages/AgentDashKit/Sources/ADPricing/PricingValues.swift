@@ -55,6 +55,8 @@ public struct PriceTier: Equatable, Sendable {
 
 public struct EffectivePrice: Equatable, Sendable {
     public let effectiveFrom: UTCDate
+    /// First UTC date this entry no longer applies, if the vendor set a cutoff.
+    public let effectiveUntil: UTCDate?
     public let rates: PriceRates
     public let tiers: [PriceTier]
     public let source: String

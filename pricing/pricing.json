@@ -8,7 +8,8 @@
   "aliases": {
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",
     "claude-opus-4-5": "claude-opus-4-5-20251101",
-    "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
+    "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+    "gpt-5.6": "gpt-5.6-sol"
   },
   "models": [
     {
@@ -178,11 +179,28 @@
       "displayName": "GPT-5.6 Sol",
       "prices": [
         {
-          "effectiveFrom": "2026-11-20",
+          "effectiveFrom": "2026-07-09",
+          "input": 5.0,
+          "output": 30.0,
+          "cacheRead": 0.5,
+          "source": "https://openai.com/index/gpt-5-6/#availability-and-pricing",
+          "checkedAt": "2026-11-20",
+          "tiers": [
+            {
+              "whenPromptTokensAbove": 272000,
+              "input": 10.0,
+              "output": 45.0,
+              "cacheRead": 1.0
+            }
+          ]
+        },
+        {
+          "effectiveFrom": "2026-08-21",
+          "effectiveUntil": "2026-12-01",
           "input": 4.0,
           "output": 20.0,
           "cacheRead": 0.4,
-          "source": "https://developers.openai.com/api/docs/pricing#standard-pricing-data",
+          "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol#pricing",
           "checkedAt": "2026-11-20",
           "tiers": [
             {
@@ -619,13 +637,13 @@
       "displayName": "Claude Fable 5.1",
       "prices": [
         {
-          "effectiveFrom": "2026-11-20",
+          "effectiveFrom": "2026-09-01",
           "input": 10,
           "output": 50,
           "cacheRead": 0.25,
           "cacheWrite5m": 12.5,
           "cacheWrite1h": 20,
-          "source": "https://platform.claude.com/docs/en/about-claude/pricing#model-pricing",
+          "source": "https://platform.claude.com/docs/en/release-notes/overview#september-1-2026",
           "checkedAt": "2026-11-20"
         }
       ]
@@ -1026,6 +1044,29 @@
               "whenPromptTokensAbove": 199999,
               "input": 2.5,
               "output": 5.0,
+              "cacheRead": 0.4
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "grok-build-0.1",
+      "vendor": "xai",
+      "displayName": "Grok Build 0.1",
+      "prices": [
+        {
+          "effectiveFrom": "2026-11-20",
+          "input": 1.0,
+          "output": 2.0,
+          "cacheRead": 0.2,
+          "source": "https://docs.x.ai/developers/models/grok-build-0.1.md#pricing",
+          "checkedAt": "2026-11-20",
+          "tiers": [
+            {
+              "whenPromptTokensAbove": 199999,
+              "input": 2.0,
+              "output": 4.0,
               "cacheRead": 0.4
             }
           ]

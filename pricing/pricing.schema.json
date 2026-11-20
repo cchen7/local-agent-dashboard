@@ -47,6 +47,10 @@
       "required": ["effectiveFrom", "source", "checkedAt"],
       "properties": {
         "effectiveFrom": { "$ref": "#/$defs/date" },
+        "effectiveUntil": {
+          "anyOf": [{ "$ref": "#/$defs/date" }, { "type": "null" }],
+          "description": "First UTC date this rate is no longer valid. Must be strictly after effectiveFrom."
+        },
         "source": { "type": "string", "minLength": 1, "description": "Official vendor price source." },
         "checkedAt": { "$ref": "#/$defs/date" },
         "tiers": { "type": ["array", "null"], "items": { "$ref": "#/$defs/tier" } }

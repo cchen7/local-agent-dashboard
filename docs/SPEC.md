@@ -636,6 +636,7 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 - Prices are always `currency` (USD) per million tokens. `input`, `output`, `source`, `checkedAt` are required; the rest is optional.
 - `match` holds glob patterns applied to the normalized model ID (lower-case, provider prefixes such as `anthropic/`, `openai/`, `xai/` removed). When several entries match, the most specific wins (most non-wildcard characters); ties go to the earlier entry. `aliases` are applied before `match`.
 - `prices` are chosen by `effectiveFrom`: the latest entry not later than the call's date (UTC). **Updates only append new entries; existing entries are never edited**, so historical costs never change.
+- A time-limited price can specify `effectiveUntil` (exclusive UTC date, strictly after `effectiveFrom`). If the selected entry has expired and no newer entry applies, mark usage unpriced. Do not fall back to an older rate.
 - Within a model, `effectiveFrom` values are unique; `tiers` are sorted by threshold ascending.
 
 **`UPDATE_PLAYBOOK.md` must describe these steps** (for the agent that updates prices):

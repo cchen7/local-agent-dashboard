@@ -53,6 +53,8 @@ public struct PriceTable: Sendable {
             var prices = [EffectivePrice]()
             for entry in model.prices {
                 let date = try UTCDate(entry.effectiveFrom)
+                let end = try entry.effectiveUntil.map(UTCDate.init)
+                if let end, end <= date { throw .invalidDate }
                 guard dates.insert(date).inserted else { throw .duplicateEffectiveDate }
                 guard !Self.blank(entry.source) else { throw .invalidPrice }
                 try entry.rates.validate()
@@ -65,7 +67,7 @@ public struct PriceTable: Sendable {
                     previous = tier.whenPromptTokensAbove
                     tiers.append(.init(whenPromptTokensAbove: tier.whenPromptTokensAbove, rates: tier.rates))
                 }
-                prices.append(.init(effectiveFrom: date, rates: entry.rates, tiers: tiers,
+                prices.append(.init(effectiveFrom: date, effectiveUntil: end, rates: entry.rates, tiers: tiers,
                                     source: entry.source, checkedAt: try UTCDate(entry.checkedAt)))
             }
             decodedModels.append(.init(id: model.id, vendor: model.vendor, displayName: model.displayName,
@@ -114,12 +116,13 @@ public struct PriceTable: Sendable {
         return .init(model: models[matcher.modelIndex], kind: matcher.isGlob ? .glob : .exact)
     }
 
-    /// Timestamp is UTC epoch milliseconds. Dates before the first entry have no price.
+    /// Timestamp is UTC epoch milliseconds. An expired entry never revives older rates.
     public func price(model: String, at timestamp: Int64) -> PriceSelection? {
         guard let match = match(model: model) else { return nil }
         // Integer floor division also handles pre-epoch milliseconds and Int64 extrema.
         let day = timestamp / 86_400_000 - (timestamp % 86_400_000 < 0 ? 1 : 0)
-        guard let price = match.model.prices.last(where: { $0.effectiveFrom.epochDay <= day }) else { return nil }
+        guard let price = match.model.prices.last(where: { $0.effectiveFrom.epochDay <= day }),
+              price.effectiveUntil.map({ day < $0.epochDay }) ?? true else { return nil }
         return .init(match: match, price: price)
     }
 
@@ -237,6 +240,7 @@ private struct RawModel: Decodable {
 
 private struct RawPrice: Decodable {
     let effectiveFrom, source, checkedAt: String
+    let effectiveUntil: String?
     let input, output: Decimal
     let cacheRead, cacheWrite5m, cacheWrite1h: Decimal?
     let tiers: [RawTier]?

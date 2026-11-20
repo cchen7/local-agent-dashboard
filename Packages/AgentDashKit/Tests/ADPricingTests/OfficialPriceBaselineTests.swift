@@ -52,3 +52,41 @@ func officialPriceBaselineHistoryAndGaps() throws {
     #expect(unknown.status == .unpriced(.noMatchingModel))
     #expect(unsupportedTTL.status == .approximate([.missingCacheWrite5mPrice]))
 }
+
+@Test("FR-COST: Grok Build 0.1 uses its own rates and switches tiers at 200,000 prompt tokens")
+func officialPriceBaselineGrokBuild() throws {
+    let table = try baselineTable()
+    let short = try baselineQuote(table, "grok-build-0.1", counts: .init(inputFresh: 199_899, cacheRead: 100, output: 10))
+    let long = try baselineQuote(table, "grok-build-0.1", counts: .init(inputFresh: 199_900, cacheRead: 100, output: 10))
+    #expect(short.status == .priced && short.costMicroUSD == 199_939 && short.appliedTierThreshold == nil)
+    #expect(long.status == .priced && long.costMicroUSD == 399_880 && long.appliedTierThreshold == 199_999)
+    let earlier = try baselineQuote(table, "grok-build-0.1", on: "2026-11-19", counts: .init(inputFresh: 100))
+    #expect(earlier.status == .unpriced(.noEffectivePrice))
+}
+
+@Test("FR-COST: GPT-5.6 alias follows its dated standard rates but never extends the promotion")
+func officialPriceBaselineSolPromotion() throws {
+    let table = try baselineTable()
+    let counts = TokenCounts(inputFresh: 1_000, cacheRead: 100, output: 10)
+    #expect(table.match(model: "gpt-5.6")?.model.id == "gpt-5.6-sol")
+    let initial = try baselineQuote(table, "gpt-5.6", on: "2026-08-20", counts: counts)
+    let firstPromo = try baselineQuote(table, "gpt-5.6", on: "2026-08-21", counts: counts)
+    let lastPromo = try baselineQuote(table, "gpt-5.6-sol", on: "2026-11-30", counts: counts)
+    let afterPromo = try baselineQuote(table, "gpt-5.6", on: "2026-12-01", counts: counts)
+    #expect(initial.status == .priced && initial.costMicroUSD == 5_350)
+    #expect(firstPromo.status == .priced && firstPromo.costMicroUSD == 4_240)
+    #expect(lastPromo.status == .priced && lastPromo.costMicroUSD == 4_240)
+    #expect(afterPromo.status == .unpriced(.noEffectivePrice) && afterPromo.unpricedTokens == 1_110)
+}
+
+@Test("FR-COST: Fable 5.1 includes the rates published on its September launch")
+func officialPriceBaselineFableHistory() throws {
+    let table = try baselineTable()
+    let counts = TokenCounts(inputFresh: 1_000, cacheRead: 200, cacheWrite: 40, cacheWrite1h: 25, output: 20)
+    let before = try baselineQuote(table, "claude-fable-5-1", on: "2026-08-31", counts: counts)
+    let launch = try baselineQuote(table, "claude-fable-5-1", on: "2026-09-01", counts: counts)
+    let later = try baselineQuote(table, "claude-fable-5-1", on: "2026-11-19", counts: counts)
+    #expect(before.status == .unpriced(.noEffectivePrice))
+    #expect(launch.status == .priced && launch.costMicroUSD == 12_050)
+    #expect(later == launch)
+}
