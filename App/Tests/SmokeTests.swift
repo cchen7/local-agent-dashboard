@@ -29,6 +29,23 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    func testLaunchAtLoginShowsPendingApprovalAndAllowsCancellation() throws {
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["General"].click()
+        let toggle = element("launchAtLoginToggle")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertTrue(toggle.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        toggle.click()
+        let pending = element("loginItemApprovalRequired")
+        XCTAssertTrue(pending.waitForExistence(timeout: 5))
+        XCTAssertTrue(toggle.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        toggle.click()
+        XCTAssertTrue(pending.waitForNonExistence(timeout: 5))
+    }
+
     func testNativeWindowGeometry() throws {
         for appearance in ["dark", "light"] {
             for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {

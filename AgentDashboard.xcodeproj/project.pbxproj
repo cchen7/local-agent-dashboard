@@ -4,6 +4,12 @@
 	classes = {};
 	objectVersion = 56;
 	objects = {
+		AD4300000000000000000001 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LaunchAtLogin.swift"; sourceTree = "<group>";
+		};
+		AD4300000000000000000002 = {
+			isa = PBXBuildFile; fileRef = AD4300000000000000000001;
+		};
 		F559CE7892B061A053E0DA39 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentDashboardApp.swift"; sourceTree = "<group>";
 		};
@@ -74,6 +80,7 @@
 				323361D59B06F84B9DA7AC45,
 				48B9829DDB297129458B3902,
 				03AF56BE2C9FDF9DEFBDE818,
+				AD4300000000000000000001,
 				7BF0346EAFE21A43227B2108,
 				CCB32DA757F8CB91EA8A9F9D,
 				C5E55183ECB076EB335DF6EE,
@@ -112,6 +119,7 @@
 				2B591F16733271636F8467C5,
 				C497F0C95670E0D8F1966C44,
 				D2740EFD5804A93FE8C32426,
+				AD4300000000000000000002,
 				DB58144FCB6BA78D6866E33F,
 			); runOnlyForDeploymentPostprocessing = 0;
 		};

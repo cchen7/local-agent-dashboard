@@ -863,6 +863,12 @@ Per prototype `31:847`:
 | Pricing | Active file (external / bundled), `updatedAt`, number of model entries, validation errors; unpriced models with token volume (one-click copy, to hand to an agent); display currency |
 | About | Version; statement that the app has no network permission, listing the entitlements actually present in the signature |
 
+Launch at login is off until the user requests it in General. Use
+`SMAppService.mainApp` and show the observed macOS registration status,
+including any required approval in System Settings. Disabling it unregisters
+future sign-in launches without quitting the app. The App ships no helper
+and requests no new entitlement for this feature.
+
 ### 11.7 First-run onboarding
 
 Three steps: ① privacy promise (zero network, read-only, data stays on this Mac) → ② detected agent directories with file counts; add other directories (containers, VMs, other `CODEX_HOME`s) with environment labels → ③ start indexing with progress; recent sessions appear first and the user can enter the main window immediately.
