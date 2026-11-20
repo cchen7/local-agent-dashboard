@@ -113,6 +113,23 @@ struct ADPricingTests {
         #expect(old.price(model: "synthetic-alpha", at: Int64.min) == nil)
     }
 
+    @Test("An expiring price stops at UTC midnight until a newer dated entry applies")
+    func priceExpiration() throws {
+        let promo = price("2026-01-15", input: "1", tiers: #","effectiveUntil":"2026-02-01""#)
+        let next = price("2026-02-02", input: "3")
+        let table = try PriceTable.decode(document(models: model(prices: [price(), promo, next].joined(separator: ","))))
+        let end: Int64 = 1_769_904_000_000 // 2026-02-01T00:00:00Z
+        #expect(table.price(model: "synthetic-alpha", at: end - 1)?.price.rates.input == 1)
+        #expect(table.price(model: "synthetic-alpha", at: end) == nil)
+        #expect(table.price(model: "synthetic-alpha", at: end + 86_400_000)?.price.rates.input == 3)
+        for invalid in ["2026-01-14", "2026-01-15", "2026-02-30"] {
+            let entry = price("2026-01-15", tiers: ",\"effectiveUntil\":\"\(invalid)\"")
+            #expect(throws: PricingError.invalidDate) {
+                try PriceTable.decode(document(models: model(prices: entry)))
+            }
+        }
+    }
+
     @Test("All cache components count once; reasoning is already inside output")
     func goldenCost() throws {
         let table = try PriceTable.decode(document())
