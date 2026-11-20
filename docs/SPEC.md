@@ -1035,7 +1035,11 @@ One change per commit; reference requirement IDs, e.g. `feat(ADP-CX): count toke
 
 ### 15.3 Performance tests
 
-`synthgen` generates 4 agents, 2,000 sessions, 1M events, 5 GB of raw logs. Measure every item in §13.
+`Tools/synthgen` provides a small smoke corpus and a benchmark profile:
+4 agents, 2,000 sessions, 1,000,000 raw JSONL records and 5,000,000,000 raw
+bytes. Records include headers and usage; bytes exclude the manifest.
+Use temporary generated files for §13 and report the formats the App
+actually imports. Synthetic Grok samples do not replace real format capture.
 
 ### 15.4 UI smoke test (XCUITest)
 

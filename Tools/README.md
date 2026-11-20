@@ -6,6 +6,47 @@ These are local developer commands, never app code. They use an existing Python
 disable bytecode caches. Run from any directory; the default repository is the
 worktree containing these scripts.
 
+## Synthetic performance corpus
+
+Requirement anchors: SPEC §15.3, NFR-3 and NFR-8.
+
+```sh
+corpus=$(Tools/synthgen)
+cat "$corpus/manifest.json"
+Tools/synthgen --profile benchmark --plan
+Tools/synthgen --profile benchmark
+```
+
+The default smoke profile writes 8 sessions, 288 JSONL records and
+1,000,000 raw bytes. The explicit benchmark profile writes 2,000 sessions,
+1,000,000 JSONL records and exactly 5,000,000,000 raw bytes. Counts include
+session/usage records, not just displayed messages. Raw bytes include the
+Grok sidecars and exclude the manifest. Use `--plan` to check the full
+configuration without writing anything. Generation checks free space first.
+
+The command prints the path of a fresh, owner-only temporary directory.
+There is no input log or user-specified output path. When the App-owned index
+exists, only its registered source roots are read, in read-only mode, to
+refuse a temporary destination that overlaps one. The tool never opens
+agent files or registers the output in Settings. The manifest is emitted
+only after the corpus is complete; do not use partial output or commit large
+corpora.
+
+The same profile and seed (default 27) produce identical relative paths,
+contents, and manifest in different temporary directories. The manifest
+gives per-agent session, record, byte and expected token-component totals.
+Reasoning tokens are already part of output. Long bytes are allocated to
+synthetic tool output so import tests exercise truncation. Claude usage
+includes repeated response IDs, Codex includes both per-call and cumulative
+counts, and Copilot uses per-call records. The Grok workload is a
+spec-shaped sample with [ACP v1 plan and tool
+updates](https://agentclientprotocol.com/protocol/v2/migration), not a
+fixture captured from a real Grok installation or proof of its adapter.
+
+Generating the corpus is not an ingestion benchmark. Measure elapsed import
+time and database bytes separately, and report which sources the App
+actually imported.
+
 ## Guardrails
 
 ```sh
