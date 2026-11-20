@@ -1,6 +1,91 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Launch at login": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Launch at login"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录时启动"
+          }
+        }
+      }
+    },
+    "Agent Dashboard will open when you sign in.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agent Dashboard will open when you sign in."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录后会自动打开 Agent Dashboard。"
+          }
+        }
+      }
+    },
+    "To finish enabling launch at login, approve Agent Dashboard in System Settings → General → Login Items & Extensions.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To finish enabling launch at login, approve Agent Dashboard in System Settings → General → Login Items & Extensions."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在「系统设置 → 通用 → 登录项与扩展」批准 Agent Dashboard，以启用登录时启动。"
+          }
+        }
+      }
+    },
+    "macOS could not find a login service for this build.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS could not find a login service for this build."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS 找不到此版本的登录项。"
+          }
+        }
+      }
+    },
+    "Could not change launch at login.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not change launch at login."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法更改登录时启动设置。"
+          }
+        }
+      }
+    },
     "About": {
       "extractionState": "manual",
       "localizations": {

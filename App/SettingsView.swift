@@ -10,6 +10,7 @@ struct SettingsView: View {
                 Text("Zero network. Read-only sources. Everything stays on this Mac.")
                     .accessibilityIdentifier("settingsPrivacyPromise")
                 Text("This foundation build does not index sessions yet.").foregroundStyle(.secondary)
+                LaunchAtLoginControls()
             }
             .padding()
             .tabItem { Label("General", systemImage: "gearshape") }
