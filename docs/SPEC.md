@@ -49,6 +49,7 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 - Any AI feature (summaries, Q&A, semantic or vector search).
 - Telemetry (OpenTelemetry etc.): not received, not parsed. Only the session files agents keep on disk are read.
 - Modifying, deleting or moving any agent file; launching or resuming agents (only "Copy Resume Command").
+- Saving or sharing session transcripts from the dashboard.
 - Cloud sessions (Copilot cloud agent, Codex cloud, anything running remotely).
 - Reconciling with real bills: cost is an estimate from API list prices; subscription spend differs.
 - Gemini CLI / Antigravity and Cursor (the user does not use them).
@@ -781,7 +782,6 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
   - **Copy Resume Command** (primary; replaces the prototype's old "Open in Terminal"): copies the command from §5 / Appendix C.
   - **Show in Finder** (reveals the session's record file).
   - MAY: "Open folder in Terminal" using only `NSWorkspace.shared.open(_:withApplicationAt:configuration:)`, no Apple Events. If the sandbox does not allow it, skip it and record the decision in `docs/DECISIONS.md`.
-- Export (toolbar share button): export the session as Markdown or JSON through `NSSavePanel`.
 
 ### 11.3 Projects page (answers "which directory, and what is going on there")
 
@@ -908,7 +908,7 @@ All user-facing strings go through a String Catalog (`Localizable.xcstrings`). S
 
 ```xml
 <key>com.apple.security.app-sandbox</key><true/>
-<key>com.apple.security.files.user-selected.read-write</key><true/>   <!-- extra folders, export -->
+<key>com.apple.security.files.user-selected.read-write</key><true/>   <!-- extra folders; access remains read-only in code -->
 <key>com.apple.security.files.bookmarks.app-scope</key><true/>
 <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
 <array>
@@ -1062,7 +1062,7 @@ Launch → onboarding → sessions appear → search a Chinese word → open a s
 | M2 Copilot + Grok Build + Sources settings | Two adapters, source management, path mappings, environment rules, health panel, onboarding | Golden tests pass; custom-directory sources work |
 | M3 Search and insights | Tokenizer, query syntax, snippets, match navigation, Overview tab, Projects page, status inference | NFR-4 met; Chinese search tests pass |
 | M4 Token Usage, cost, menu bar | All periods, readouts, chart, table, metric switch, limits; price-table interface and `Tools/pricing`, cost calculation and recomputation; first real `pricing.json` filled from official vendor pages; menu bar panel | NFR-5 and NFR-10 met; matches Figma |
-| M5 Polish and release | Responsive rules, archive and retention, masking, export, launch at login, performance tuning, signing and notarization | Every box in §15.5 checked |
+| M5 Polish and release | Responsive rules, archive and retention, masking and exclusions, launch at login, performance tuning, signing and notarization | Every box in §15.5 checked |
 
 ---
 
@@ -1100,7 +1100,7 @@ Figma sync status (2026-11-17): items 1, 2, 4, 5, 6, 7 and 9 are in the prototyp
 2. Sidebar gets a "Projects" entry and the Projects page (§11.3). The session list can group by project.
 3. Session detail gets an "Overview" tab: main topics, latest progress, files and commands (§10).
 4. Live activity bar drops the process ID and shows "last event N s ago"; the status badge shows its evidence on hover.
-5. "Open in Terminal" becomes "Copy Resume Command"; "Reveal Transcript" becomes "Show in Finder".
+5. "Open in Terminal" becomes "Copy Resume Command"; "Reveal Transcript" becomes "Show in Finder". Omit the transcript share control.
 6. Detail header shows the full path and environment; archived sessions are marked; the meta grid's Tokens cell becomes "Tokens · Cost".
 7. Token page: periods add 90D, All and Custom; subtitle states the exact range; 30D and longer use bars.
 8. Token page: readouts are Peak throughput / Total (cache included) / Estimated cost / Limit headroom; metric switch (Tokens / Output only / Cost) and project filter; detail table adds cache hit rate and cost columns and can group by agent / project / model.
