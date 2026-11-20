@@ -778,6 +778,7 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 - Two tabs: **Overview** | **Transcript**.
   - Overview: main-topic chips, latest progress (§10.3), touched files (top 10, with +/-), commands run (top 10), mini token chart for this session.
   - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to full input/output; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
+    Read bounded pages in file order, with the event row ID breaking sequence ties. Seek straight to a selected match without reading intervening pages. Pages are scoped to one session; restart paging when the file order changes.
 - Bottom buttons:
   - **Copy Resume Command** (primary; replaces the prototype's old "Open in Terminal"): copies the command from §5 / Appendix C.
   - **Show in Finder** (reveals the session's record file).
