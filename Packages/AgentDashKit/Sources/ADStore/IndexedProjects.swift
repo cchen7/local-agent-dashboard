@@ -76,56 +76,68 @@ public extension AgentStore {
     }
 
     private static func projectCatalog(_ db: Database, hostHome: String?) throws -> [IndexedProject] {
+        let catalog = try Row.fetchAll(db, sql: """
+            SELECT id,display_name,root_path,repo_url FROM projects
+            """).map(CatalogProject.init)
+        let catalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
+        let rootClaims = Dictionary(grouping: catalog.compactMap { project -> (Data, CatalogProject)? in
+            guard let root = project.normalizedRoot else { return nil }
+            return (Data(root.utf8), project)
+        }, by: { $0.0 }).compactMapValues { claims in claims.count == 1 ? claims.first?.1 : nil }
+
         let rows = try Row.fetchCursor(db, sql: """
             SELECT s.id,s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.started_at,
-                   coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,s.source_id,
+                   coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,s.source_id,s.project_id,
                    source.label AS source_label,source.environment AS source_environment,
-                   source.access_kind AS source_access,source.path_mappings_json,
-                   project.id AS catalog_id,project.display_name,project.root_path,project.repo_url
+                   source.agent AS source_agent,source.root_path AS source_root,source.path_mappings_json
             FROM sessions AS s JOIN sources AS source ON source.id=s.source_id
-            LEFT JOIN projects AS project ON project.id=s.project_id
+            LEFT JOIN source_files AS file ON file.id=s.file_id
+            WHERE file.role IS NULL OR file.role<>?
             ORDER BY activity DESC,s.id DESC
-            """)
+            """, arguments: [SourceFile.Role.promptHistory.rawValue])
         let decoder = JSONDecoder()
-        var mappingsBySource: [Int64: [PathMapping]] = [:]
+        let normalizedHome = hostHome.flatMap(WorkspacePath.init)?.normalized
+        var sources: [Int64: WorkspaceSource] = [:]
         var groups: [IndexedProject.ID: ProjectGroup] = [:]
         var order: [IndexedProject.ID] = []
         try rows.forEach { row in
             let session = try IndexedSession(row)
             let sourceID: Int64 = row["source_id"]
-            let rowID: Int64 = row["id"]
-            if mappingsBySource[sourceID] == nil {
-                let serialized: String = row["path_mappings_json"]
-                mappingsBySource[sourceID] = (try? decoder.decode([PathMapping].self, from: Data(serialized.utf8))) ?? []
+            let source: WorkspaceSource
+            if let cached = sources[sourceID] {
+                source = cached
+            } else {
+                source = .init(row, hostHome: normalizedHome, decoder: decoder)
+                sources[sourceID] = source
             }
             let recorded = session.workspace.flatMap(WorkspacePath.init)
-            let mapped = session.workspace.flatMap {
-                try? PathMapper.mappedPath($0, using: mappingsBySource[sourceID] ?? [], hostHome: hostHome)
+            let mapped = recorded?.normalized.flatMap {
+                try? PathMapper.mappedPath($0, using: source.mappings, hostHome: normalizedHome)
             }.flatMap(WorkspacePath.init)
             let workspace = mapped ?? recorded
-            let catalogID: Int64? = row["catalog_id"]
+            let isHost = mapped != nil || (recorded?.normalized != nil &&
+                source.localDefaultAgent == session.id.agent && session.environment == "Local")
+            let explicitCatalog = (row["project_id"] as Int64?).flatMap { catalogByID[$0] }
+            let attributed = explicitCatalog ?? (isHost ? workspace.flatMap { rootClaims[Data($0.root.utf8)] } : nil)
             let id: IndexedProject.ID
             let name: String
             let path: String?
             let repository: String?
             let location: String?
-            if let catalogID {
-                id = .init(key: .catalog(catalogID))
-                name = row["display_name"]
-                path = (row["root_path"] as String?) ?? workspace?.root
-                repository = row["repo_url"]
+            if let attributed {
+                id = .init(key: .catalog(attributed.id))
+                name = attributed.name
+                path = attributed.normalizedRoot ?? attributed.path ?? workspace?.root
+                repository = attributed.repoURL
                 location = nil
             } else if let workspace {
-                let isLocalDefault = (row["source_access"] as String) == "default_location" &&
-                    (row["source_environment"] as String) == "Local" && session.environment == "Local"
                 let bytes = Data(workspace.root.utf8)
-                if mapped != nil || isLocalDefault {
+                if isHost {
                     id = .init(key: .host(bytes))
                     location = nil
                 } else {
                     id = .init(key: .environment(source: sourceID, name: Data(session.environment.utf8), path: bytes))
-                    let label: String = row["source_label"]
-                    location = label == session.environment ? label : "\(label) · \(session.environment)"
+                    location = source.label == session.environment ? source.label : "\(source.label) · \(session.environment)"
                 }
                 name = workspace.name
                 path = workspace.root
@@ -136,7 +148,7 @@ public extension AgentStore {
             if groups[id] == nil { order.append(id) }
             let member = IndexedProjectSession(session: session, worktree: workspace?.worktree ?? recorded?.worktree)
             groups[id, default: .init(name: name, path: path, repository: repository, location: location)]
-                .append(member, rowID: rowID)
+                .append(member, rowID: row["id"])
         }
         return order.compactMap { id in groups[id]?.project(id) }
     }
@@ -174,22 +186,72 @@ public extension AgentStore {
     }
 }
 
+private struct CatalogProject {
+    let id: Int64
+    let name: String
+    let path: String?
+    let normalizedRoot: String?
+    let repoURL: String?
+
+    init(_ row: Row) {
+        id = row["id"]
+        name = row["display_name"]
+        path = row["root_path"]
+        normalizedRoot = path.flatMap(WorkspacePath.init)?.normalized
+        repoURL = row["repo_url"]
+    }
+}
+
+private struct WorkspaceSource {
+    let label: String
+    let mappings: [PathMapping]
+    let localDefaultAgent: AgentKind?
+
+    init(_ row: Row, hostHome: String?, decoder: JSONDecoder) {
+        label = row["source_label"]
+        let serialized: String = row["path_mappings_json"]
+        mappings = (try? decoder.decode([PathMapping].self, from: Data(serialized.utf8))) ?? []
+        // A re-grant changes how a source is accessed, not its provenance.
+        if let home = hostHome, let agent = AgentKind(rawValue: row["source_agent"]),
+           (row["source_environment"] as String) == "Local",
+           let sourceRoot = WorkspacePath(row["source_root"])?.normalized {
+            let expected = (home == "/" ? home : home + "/") + agent.defaultSourceDirectoryName
+            localDefaultAgent = sourceRoot.utf8.elementsEqual(expected.utf8) ? agent : nil
+        } else {
+            localDefaultAgent = nil
+        }
+    }
+}
+
 private struct WorkspacePath {
+    /// Nil for ambiguous absolute spellings. Keep them literal and isolated.
+    let normalized: String?
     let root: String
     let name: String
     let worktree: String?
 
     init?(_ path: String) {
-        guard (try? PathMapper.map(path, using: [])) != nil else { return nil }
-        let components = path.utf8.split(separator: 0x2F)
-        let marker = components.indices.first {
-            $0 > 0 && $0 + 2 < components.count &&
-                components[$0].elementsEqual(".claude".utf8) && components[$0 + 1].elementsEqual("worktrees".utf8)
+        let bytes = path.utf8
+        guard bytes.first == 0x2F, !bytes.contains(0) else { return nil }
+        let components = bytes.split(separator: 0x2F)
+        let hasAuthority = bytes.starts(with: [0x2F, 0x2F]) && !bytes.starts(with: [0x2F, 0x2F, 0x2F])
+        if hasAuthority || components.contains(where: { $0.elementsEqual("..".utf8) }) {
+            normalized = nil
+            root = path
+            name = components.last.map { String(decoding: $0, as: UTF8.self) } ?? path
+            worktree = nil
+            return
         }
-        let rootComponents = components.prefix(marker ?? components.count)
-        root = "/" + rootComponents.map { String(decoding: $0, as: UTF8.self) }.joined(separator: "/")
-        name = rootComponents.last.map { String(decoding: $0, as: UTF8.self) } ?? "/"
-        worktree = marker.map { String(decoding: components[$0 + 2], as: UTF8.self) }
+        let cleaned = components.filter { !$0.elementsEqual(".".utf8) }
+            .map { String(decoding: $0, as: UTF8.self) }
+        normalized = "/" + cleaned.joined(separator: "/")
+        let marker = cleaned.indices.first {
+            $0 > 0 && $0 + 2 < cleaned.count && cleaned[$0] == ".claude" && cleaned[$0 + 1] == "worktrees"
+        }
+        let rootComponents = cleaned.prefix(marker ?? cleaned.count)
+        root = "/" + rootComponents.joined(separator: "/")
+        name = rootComponents.last ?? "/"
+        worktree = marker.map { cleaned[$0 + 2] }
     }
 }
 

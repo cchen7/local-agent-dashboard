@@ -133,13 +133,16 @@ Finder remain available. No entitlement change is needed.
 ## DEV-040 — Browse projects from the local index
 
 Observe the Projects catalog only when the page is open. An indexed project
-ID wins when provided. Otherwise use the recorded absolute workspace,
-collapse Claude worktrees to their repository root, and match path bytes
-without reading the filesystem. Default local paths and explicitly mapped
-host paths may group together. Unmapped named environments stay scoped by
-source and environment, even if a path has the same spelling. The timeline
-uses indexed event times and fetches text only for the bounded recent set.
-Mask complete activity text before shortening it for display.
+ID wins when provided. An otherwise unattributed local or explicitly mapped
+host workspace can join a catalog project only at its unique recorded host
+root. An unmapped environment stays scoped by source and environment.
+Recognize default local sources by registered root and environment, independently
+of how access was granted. Normalize unambiguous absolute path spellings by byte
+and collapse Claude worktrees to their repository root. Keep parent traversal
+and exactly two leading separators literal and scoped; do not read the filesystem.
+Prompt-history buckets stay searchable but are not navigable project sessions.
+The timeline uses indexed event times and fetches text only for the bounded
+recent set. Mask complete activity text before shortening it for display.
 
 ## DEV-036 — Observe indexed sessions and one transcript page
 

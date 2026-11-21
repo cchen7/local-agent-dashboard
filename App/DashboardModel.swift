@@ -89,7 +89,7 @@ final class DashboardModel {
                     $0.agent == source.agent && $0.rootURL.standardizedFileURL == source.rootURL.standardizedFileURL
                 }) { try store.upsertSource(source) }
                 if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
-                    try Self.seedProjects(store, in: directory)
+                    try Self.seedProjects(store)
                 } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
                 }
@@ -219,11 +219,12 @@ final class DashboardModel {
         try store.write(records)
     }
 
-    nonisolated private static func seedProjects(_ store: AgentStore, in directory: URL) throws {
+    nonisolated private static func seedProjects(_ store: AgentStore) throws {
+        let home = URL(fileURLWithPath: "/synthetic")
         let codex = try store.upsertSource(.init(agent: .codex, label: "Synthetic Codex",
-                                                rootURL: directory.appendingPathComponent("unused-codex")))
+            rootURL: home.appendingPathComponent(AgentKind.codex.defaultSourceDirectoryName)))
         let claude = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude",
-                                                rootURL: directory.appendingPathComponent("unused-claude")))
+            rootURL: home.appendingPathComponent(AgentKind.claudeCode.defaultSourceDirectoryName)))
         let client = "/synthetic/work/client"
         let primary = SessionKey(agent: .codex, nativeID: "preview-project-client")
         let peer = SessionKey(agent: .claudeCode, nativeID: "preview-project-worktree")

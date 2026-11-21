@@ -799,7 +799,7 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
   - Token chart for this project (reuse the Token Usage components with a project filter).
   - Buttons: Show in Finder, Open Latest Session.
 - Project identity: if a repository URL is known, the normalized URL is the key (worktrees of the same repository group together, with the worktree name as a tag); otherwise `cwd`. Claude worktree paths look like `<repo>/.claude/worktrees/<name>` and belong to the main repository.
-  Resolve workspace groups from the owned index; do not probe the filesystem for repository identity. An explicit path mapping can join an environment to the same host project; otherwise keep unmapped environments separate from local paths. The recent timeline uses the normalized event time across the selected project, with a stable tie break.
+  Resolve workspace groups from the owned index. For a registered default local root and local environment, re-granting access does not change project identity. Normalize unambiguous path spellings before applying mappings. An explicit mapping can join the same host project, including a unique catalog root; keep unmapped environments separate and do not infer which catalog project an ambiguous root belongs to. Prompt-history buckets remain searchable and do not count as project sessions or latest-session targets. The recent timeline uses normalized event time and a stable tie break.
 
 ### 11.4 Token Usage page
 
