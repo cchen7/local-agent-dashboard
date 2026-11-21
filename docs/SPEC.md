@@ -209,7 +209,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | ADP-4 | **Parser versions:** each adapter has `parserVersion`. When it changes, files that still exist are re-parsed automatically. |
 | ADP-5 | **Time:** store UTC epoch milliseconds as integers. Records without a timestamp inherit the previous record's. Transcript order follows file order (`seq`); statistics use timestamps. |
 | ADP-6 | **Performance:** skip large useless records with a substring check before JSON decoding (e.g. Claude `file-history-snapshot`). Decode only the fields you need; ignore the rest. |
-| ADP-7 | **Truncation:** searchable text keeps at most 2 KB per tool output; the archive keeps up to 64 KB compressed (configurable); anything beyond is read from the original file on demand while it still exists. |
+| ADP-7 | **Truncation:** searchable text keeps at most 2 KB per tool output across all text blocks. An oversized line with a successfully recovered result does not count as unknown. The archive keeps up to 64 KB compressed (configurable); anything beyond is read from the original file on demand while it still exists. |
 
 ### 5.4 Adapter: Claude Code (ADP-CC)
 

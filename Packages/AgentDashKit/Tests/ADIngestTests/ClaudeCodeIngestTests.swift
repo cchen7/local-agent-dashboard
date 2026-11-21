@@ -130,6 +130,7 @@ func claudeOversizedToolResult(nested: Bool) throws {
     let imported = try box.importPath(box.main, role: .session)
     #expect(imported.completeLines == 3)
     #expect(imported.checkpoint.size > 1_048_576)
+    #expect(imported.checkpoint.unknownRecords == 0)
     let rows = try box.store.events(in: box.key)
     #expect(rows.map(\.kind) == [.toolCall, .toolResult, .user])
     let tool = try #require(rows.first { $0.kind == .toolResult })
@@ -140,6 +141,66 @@ func claudeOversizedToolResult(nested: Bool) throws {
     #expect(tool.dedupeKey == "claude:event:oversize-result:0")
     #expect(tool.timestamp == 1234)
     #expect(rows.last?.text == "next synthetic line")
+}
+
+@Test("ADP-7: oversized arrays share one preview budget and ignore unrelated long fields",
+      arguments: [false, true])
+func claudeOversizedTextBlocks(extraOutput: Bool) throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    let first = "first text block"
+    let second = "second text block " + String(repeating: "z", count: 12_000)
+    var blocks: [[String: Any]] = [["type": "text", "text": first],
+                                  ["type": "text", "text": second]]
+    blocks += Array(repeating: ["type": "text", "text": String(repeating: "y", count: 12_000)], count: 98)
+    var tool: [String: Any] = ["type": "tool_result", "tool_use_id": "tool-multi", "is_error": true,
+                               "content": blocks]
+    if extraOutput { tool["stdout"] = String(repeating: "ignored", count: 200_000) }
+    var result: [String: Any] = ["type": "user", "uuid": "multi-result", "sessionId": mainID, "timestamp": 42,
+                                  "message": ["content": [tool]]]
+    if extraOutput { result["cachedStdout"] = String(repeating: "ignored", count: 200_000) }
+    let next: [String: Any] = ["type": "user", "uuid": "multi-next", "sessionId": mainID,
+                              "message": ["content": "next after multi-block result"]]
+    try box.write([result, next], to: box.main)
+
+    let imported = try box.importPath(box.main, role: .session)
+    #expect(imported.completeLines == 2)
+    #expect(imported.checkpoint.unknownRecords == 0)
+    let rows = try box.store.events(in: box.key)
+    #expect(rows.map(\.kind) == [.toolResult, .user])
+    let output = try #require(rows.first { $0.kind == .toolResult })
+    #expect(output.text == String((first + "\n" + second).prefix(2048)))
+    #expect(output.text?.utf8.count == 2048)
+    #expect(output.metadataJSON == #"{"is_error":true,"tool_use_id":"tool-multi"}"#)
+    #expect(output.dedupeKey == "claude:event:multi-result:0")
+    #expect(output.timestamp == 42)
+    #expect(rows.last?.text == "next after multi-block result")
+}
+
+@Test("ADP-1: malformed ignored fields in an oversized record still count as unknown",
+      arguments: [false, true])
+func claudeMalformedOversizedToolResult(badUTF8: Bool) throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    let file = box.root.appendingPathComponent(box.main)
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    var bytes = Data(#"{"type":"user","uuid":"malformed-tool","message":{"content":[{"type":"tool_result","tool_use_id":"tool-large","content":""#.utf8)
+    bytes.append(Data(repeating: 0x61, count: 1_100_000))
+    bytes.append(Data(#"","ignored":""#.utf8))
+    if badUTF8 { bytes.append(0xFF) }
+    else { bytes.append(Data(#"\q"#.utf8)) }
+    bytes.append(Data(#""}]}}"#.utf8))
+    bytes.append(0x0A)
+    bytes.append(Data(#"{"type":"user","uuid":"still-readable","message":{"content":"following synthetic message"}}"#.utf8))
+    bytes.append(0x0A)
+    try bytes.write(to: file)
+
+    let outcome = try box.importPath(box.main, role: .session)
+    let rows = try box.store.events(in: box.key)
+    #expect(outcome.completeLines == 2)
+    #expect(outcome.checkpoint.unknownRecords == 1)
+    #expect(rows.map(\.kind) == [.unknown, .user])
+    #expect(rows.last?.text == "following synthetic message")
 }
 
 @Test("ADP-CC: replay repairs rows previously assigned to the copy without re-billing usage")

@@ -154,7 +154,8 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             records.append(event(.unknown, Self.bounded(safePrefix, bytes: 2048), index: 240))
         }
         let state = metadata == prior && context.state != nil ? context.state : encode(metadata)
-        return .init(records: records, timestamp: parsedTime, state: state, isUnknown: unknown)
+        return .init(records: records, timestamp: parsedTime, state: state, isUnknown: unknown,
+                     recoveredOversizedRecord: frame.isTruncated && recoveredToolResult)
     }
 
     private func history(_ frame: JSONLFrame, row: [String: Any]?,

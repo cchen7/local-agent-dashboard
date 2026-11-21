@@ -276,7 +276,8 @@ the same input/cache basis. Prompt history is kept separate from transcripts.
 Tool results can contain a string or an array of text blocks. Field order
 is not assumed: `tool_use_id`, `is_error` and the outer record identity can
 appear after the large body. Oversized records can retain a tool-result
-preview of at most 2 KiB via bounded reads of the same line.
+preview of at most 2 KiB across all text blocks via bounded reads of the
+same line. Unrelated payload fields do not consume this preview budget.
 
 ## Local source availability for M0
 

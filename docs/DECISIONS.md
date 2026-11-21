@@ -116,8 +116,10 @@ only compatible cumulative output into one billable response. A nested
 subagent keeps its own records and resolves its parent when available.
 Thinking stays outside the index. For oversized records, read the remainder
 in bounded chunks from the pinned descriptor and retain only recognized tool
-results with bounded text and their identity. Unclassified partial bodies
-keep an unknown marker without a raw fallback.
+results with their identity and up to 2 KiB shared across each result’s text
+blocks. Discard unrelated payloads as they are read. Successfully recovered
+results do not count as unknown; malformed or unclassified records keep an
+unknown marker without a raw fallback.
 
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 

@@ -108,7 +108,7 @@ public enum JSONLFileImporter {
                 next.sequence = line.sequence
                 next.previousTimestamp = decoded.timestamp ?? next.previousTimestamp
                 next.decoderState = decoded.state
-                if line.isTruncated || decoded.isUnknown {
+                if decoded.isUnknown || (line.isTruncated && !decoded.recoveredOversizedRecord) {
                     let (unknown, overflow) = next.unknownRecords.addingReportingOverflow(1)
                     guard !overflow else { throw JSONLImportFailure.positionOverflow }
                     next.unknownRecords = unknown

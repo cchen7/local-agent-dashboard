@@ -41,12 +41,15 @@ public struct DecodedJSONLFrame: Sendable {
     public let timestamp: Int64?
     public let state: Data?
     public let isUnknown: Bool
+    /// A recognized record was recovered from a frame that exceeded the prefix limit.
+    public let recoveredOversizedRecord: Bool
 
     public init(records: [NormalizedRecord] = [], timestamp: Int64? = nil,
-                state: Data? = nil, isUnknown: Bool = false) {
+                state: Data? = nil, isUnknown: Bool = false, recoveredOversizedRecord: Bool = false) {
         self.records = records
         self.timestamp = timestamp
         self.state = state
         self.isUnknown = isUnknown
+        self.recoveredOversizedRecord = recoveredOversizedRecord
     }
 }
