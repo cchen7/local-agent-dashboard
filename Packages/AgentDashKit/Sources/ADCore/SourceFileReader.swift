@@ -21,6 +21,12 @@ public final class SourceFileReader: Sendable {
         public let modificationTimeNS: Int64
     }
 
+    public struct DirectoryEntry: Equatable, Sendable {
+        public enum Kind: Equatable, Sendable { case file, directory }
+        public let name: String
+        public let kind: Kind
+    }
+
     private static let maximumReadSize = 1_048_576
     private static let directoryFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
     private let descriptor: Int32
@@ -29,33 +35,9 @@ public final class SourceFileReader: Sendable {
     /// Each directory is pinned before opening the next component with openat.
     /// The authorized root itself must be a directory, not a symlink.
     public init(root: URL, relativePath: String) throws {
-        let rootPath = root.path(percentEncoded: false)
-        let localHost = root.host(percentEncoded: false)?.lowercased()
-        guard root.isFileURL, localHost == nil || localHost == "" || localHost == "localhost",
-              rootPath.hasPrefix("/"), !rootPath.utf8.contains(0),
-              !rootPath.utf8.split(separator: 0x2F).contains(where: { $0.elementsEqual([0x2E]) || $0.elementsEqual([0x2E, 0x2E]) }) else {
-            throw Failure.invalidRoot
-        }
-        // Split bytes: a combining scalar after '/' must not hide a separator.
-        let components = relativePath.utf8.split(separator: 0x2F, omittingEmptySubsequences: false)
-            .map { String(decoding: $0, as: UTF8.self) }
-        guard !components.isEmpty,
-              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) }) else {
-            throw Failure.invalidRelativePath
-        }
-
-        // A trailing slash can force symlink traversal before O_NOFOLLOW applies.
-        var rootBytes = Array(rootPath.utf8)
-        while rootBytes.count > 1 && rootBytes.last == 0x2F { rootBytes.removeLast() }
-        var directory = open(String(decoding: rootBytes, as: UTF8.self), Self.directoryFlags)
-        guard directory >= 0 else { throw Failure.openFailed }
+        let components = try Self.components(relativePath)
+        let directory = try Self.openDirectory(root: root, components: Array(components.dropLast()))
         defer { close(directory) }
-        for component in components.dropLast() {
-            let next = openat(directory, component, Self.directoryFlags)
-            guard next >= 0 else { throw Failure.openFailed }
-            close(directory)
-            directory = next
-        }
 
         // Nonblocking open is essential: a FIFO must reach fstat without waiting
         // for a writer. Only a regular-file descriptor is retained or read.
@@ -69,6 +51,79 @@ public final class SourceFileReader: Sendable {
             throw error
         }
         descriptor = file
+    }
+
+    /// List direct regular files/directories by a pinned descriptor. Symlinks,
+    /// devices, FIFOs and entries removed during enumeration are not returned.
+    public static func directoryEntries(root: URL, in relativeDirectory: String? = nil) throws -> [DirectoryEntry] {
+        let components = try relativeDirectory.map(Self.components) ?? []
+        let descriptor = try openDirectory(root: root, components: components)
+        guard let directory = fdopendir(descriptor) else {
+            close(descriptor)
+            throw Failure.openFailed
+        }
+        defer { closedir(directory) }
+        var result: [DirectoryEntry] = []
+        while true {
+            errno = 0
+            guard let entry = readdir(directory) else {
+                if errno == EINTR { continue }
+                if errno != 0 { throw Failure.metadataFailed }
+                break
+            }
+            let length = Int(entry.pointee.d_namlen)
+            let name = withUnsafeBytes(of: &entry.pointee.d_name) { buffer in
+                String(bytes: buffer.prefix(length), encoding: .utf8)
+            }
+            guard let name, !name.isEmpty, name != ".", name != ".." else { continue }
+            var status = stat()
+            var checked: Int32
+            repeat { checked = fstatat(descriptor, name, &status, AT_SYMLINK_NOFOLLOW) }
+            while checked < 0 && errno == EINTR
+            if checked < 0 {
+                if errno == ENOENT { continue }
+                throw Failure.metadataFailed
+            }
+            switch status.st_mode & S_IFMT {
+            case S_IFREG: result.append(.init(name: name, kind: .file))
+            case S_IFDIR: result.append(.init(name: name, kind: .directory))
+            default: break
+            }
+        }
+        return result
+    }
+
+    private static func openDirectory(root: URL, components: [String]) throws -> Int32 {
+        let rootPath = root.path(percentEncoded: false)
+        let localHost = root.host(percentEncoded: false)?.lowercased()
+        guard root.isFileURL, localHost == nil || localHost == "" || localHost == "localhost",
+              rootPath.hasPrefix("/"), !rootPath.utf8.contains(0),
+              !rootPath.utf8.split(separator: 0x2F).contains(where: { $0.elementsEqual([0x2E]) || $0.elementsEqual([0x2E, 0x2E]) }) else {
+            throw Failure.invalidRoot
+        }
+        // A trailing slash can force symlink traversal before O_NOFOLLOW applies.
+        var rootBytes = Array(rootPath.utf8)
+        while rootBytes.count > 1 && rootBytes.last == 0x2F { rootBytes.removeLast() }
+        var directory = open(String(decoding: rootBytes, as: UTF8.self), Self.directoryFlags)
+        guard directory >= 0 else { throw Failure.openFailed }
+        for component in components {
+            let next = openat(directory, component, Self.directoryFlags)
+            close(directory)
+            guard next >= 0 else { throw Failure.openFailed }
+            directory = next
+        }
+        return directory
+    }
+
+    private static func components(_ relativePath: String) throws -> [String] {
+        // Split bytes: a combining scalar after '/' must not hide a separator.
+        let pieces = relativePath.utf8.split(separator: 0x2F, omittingEmptySubsequences: false)
+            .map { String(decoding: $0, as: UTF8.self) }
+        guard !pieces.isEmpty,
+              pieces.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) }) else {
+            throw Failure.invalidRelativePath
+        }
+        return pieces
     }
 
     deinit { close(descriptor) }

@@ -33,6 +33,13 @@ public final class AgentStore: Sendable {
                 ALTER TABLE source_files ADD COLUMN decoder_state BLOB;
                 """)
         }
+        migrator.registerMigration("v3_session_parent_hint") { db in
+            try db.execute(sql: """
+                ALTER TABLE sessions ADD COLUMN parent_native_id TEXT;
+                CREATE INDEX sessions_parent_hint ON sessions(agent, parent_native_id)
+                WHERE parent_native_id IS NOT NULL;
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -184,29 +191,79 @@ public final class AgentStore: Sendable {
     }
 
     private static func save(_ value: SessionRecord, db: Database) throws {
-        try db.execute(sql: """
-            INSERT INTO sessions(agent,native_id,source_id,file_id,environment,cwd,title,started_at,last_event_at,status)
-            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,native_id) DO UPDATE SET
-            source_id=excluded.source_id,file_id=excluded.file_id,environment=excluded.environment,cwd=excluded.cwd,
-            title=excluded.title,started_at=excluded.started_at,last_event_at=excluded.last_event_at,status=excluded.status
-            """, arguments: [value.key.agent.rawValue, value.key.nativeID, value.sourceID, value.fileID,
-                              value.environment, value.cwd, value.title, value.startedAt, value.lastEventAt, value.status.rawValue])
+        try db.cachedStatement(sql: """
+            INSERT INTO sessions(agent,native_id,source_id,file_id,environment,cwd,title,started_at,last_event_at,status,
+                git_branch,cli_version,model_primary,parent_native_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,native_id) DO UPDATE SET
+            source_id=excluded.source_id,file_id=coalesce(excluded.file_id,sessions.file_id),environment=excluded.environment,
+            cwd=coalesce(excluded.cwd,sessions.cwd),title=coalesce(excluded.title,sessions.title),
+            started_at=min(coalesce(excluded.started_at,sessions.started_at),coalesce(sessions.started_at,excluded.started_at)),
+            last_event_at=max(coalesce(excluded.last_event_at,sessions.last_event_at),coalesce(sessions.last_event_at,excluded.last_event_at)),
+            status=CASE WHEN excluded.status='unknown' THEN sessions.status ELSE excluded.status END,
+            git_branch=coalesce(excluded.git_branch,sessions.git_branch),cli_version=coalesce(excluded.cli_version,sessions.cli_version),
+            model_primary=coalesce(excluded.model_primary,sessions.model_primary),
+            parent_native_id=coalesce(excluded.parent_native_id,sessions.parent_native_id)
+            WHERE NOT ?
+            """).execute(arguments: [value.key.agent.rawValue, value.key.nativeID, value.sourceID, value.fileID,
+                                      value.environment, value.cwd, value.title, value.startedAt, value.lastEventAt, value.status.rawValue,
+                                      value.gitBranch, value.cliVersion, value.model, value.parentNativeID, value.referenceOnly == true])
+        // Resolve known children even if the parent is imported after them.
+        if value.key.agent == .claudeCode || value.parentNativeID != nil {
+            try db.cachedStatement(sql: """
+                UPDATE sessions AS child SET parent_session_id=(
+                    SELECT parent.id FROM sessions AS parent
+                    WHERE parent.agent=child.agent AND parent.native_id=child.parent_native_id
+                        AND parent.id<>child.id
+                )
+                WHERE child.agent=? AND child.parent_native_id IS NOT NULL AND child.parent_session_id IS NULL
+                    AND (child.native_id=? OR child.parent_native_id=?)
+                """).execute(arguments: [value.key.agent.rawValue, value.key.nativeID, value.key.nativeID])
+        }
     }
 
     private static func save(_ value: EventRecord, db: Database) throws {
         try db.cachedStatement(sql: """
             INSERT INTO events(session_id,seq,ts,kind,tool_name,text,meta_json,dedupe_key) VALUES(?,?,?,?,?,?,?,?)
-            ON CONFLICT(dedupe_key) DO UPDATE SET seq=excluded.seq,ts=excluded.ts,
+            ON CONFLICT(dedupe_key) DO UPDATE SET session_id=excluded.session_id,seq=excluded.seq,ts=excluded.ts,
             kind=excluded.kind,tool_name=excluded.tool_name,text=excluded.text,meta_json=excluded.meta_json
-            WHERE events.session_id=excluded.session_id
+            WHERE (events.session_id=excluded.session_id AND NOT ?)
+                OR (events.session_id<>excluded.session_id AND ?)
             """).execute(arguments: [try sessionID(value.session, db: db), value.sequence, value.timestamp, value.kind.rawValue,
-                              value.toolName, value.text, value.metadataJSON, value.dedupeKey])
+                              value.toolName, value.text, value.metadataJSON, value.dedupeKey,
+                              value.recordedOwnership == .inherited, value.recordedOwnership != nil])
     }
 
     private static func save(_ value: TokenEvent, db: Database) throws {
         let c = value.counts
         guard [c.inputFresh,c.cacheRead,c.cacheWrite,c.cacheWrite1h,c.output,c.reasoning].allSatisfy({ $0 >= 0 }),
               c.reasoning <= c.output else { throw StoreError.invalidTokenCounts }
+        if value.session.agent == .claudeCode {
+            // Replay can correct an owner recorded before sessionId was used.
+            // Changing ownership alone must not replace compatible usage with
+            // an older copy or introduce a second billable response.
+            let compatible = """
+                token_events.agent=excluded.agent AND token_events.precision=excluded.precision
+                AND (token_events.model=excluded.model OR token_events.model IS NULL OR excluded.model IS NULL)
+                AND token_events.input_fresh=excluded.input_fresh AND token_events.cache_read=excluded.cache_read
+                AND token_events.cache_write=excluded.cache_write AND token_events.cache_write_1h=excluded.cache_write_1h
+                AND token_events.reasoning=excluded.reasoning AND excluded.output>=token_events.output
+                """
+            let canSetOwner = value.recordedOwnership != nil
+            try db.cachedStatement(sql: """
+                INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,
+                    output,reasoning,precision,dedupe_key)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
+                    session_id=CASE WHEN ? THEN excluded.session_id ELSE token_events.session_id END,
+                    output=CASE WHEN \(compatible) THEN excluded.output ELSE token_events.output END,
+                    model=CASE WHEN \(compatible) THEN coalesce(token_events.model,excluded.model) ELSE token_events.model END
+                WHERE (token_events.agent=excluded.agent AND token_events.session_id<>excluded.session_id AND ?)
+                    OR (\(compatible))
+                """).execute(arguments: [try sessionID(value.session, db: db), value.session.agent.rawValue, value.model,
+                                          value.timestamp, c.inputFresh, c.cacheRead, c.cacheWrite, c.cacheWrite1h,
+                                          c.output, c.reasoning, value.precision.rawValue, value.dedupeKey,
+                                          canSetOwner, canSetOwner])
+            return
+        }
         try db.cachedStatement(sql: """
             INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,precision,dedupe_key)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET

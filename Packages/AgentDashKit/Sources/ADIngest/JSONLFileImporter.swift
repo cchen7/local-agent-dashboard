@@ -1,3 +1,4 @@
+import ADAdapters
 import ADCore
 import ADStore
 import Foundation
@@ -5,30 +6,6 @@ import Foundation
 /// ADP-1…5. Categories only; never carry source paths or record bytes.
 public enum JSONLImportFailure: Error, Equatable, Sendable {
     case invalidParserVersion, positionOverflow, sourceChanged, recordLimit, stateLimit
-}
-
-public struct JSONLDecodeContext: Sendable {
-    public let fileID: Int64
-    public let previousTimestamp: Int64?
-    public let state: Data?
-}
-
-/// The adapter owns normalized record identities and tolerant decoding.
-/// A nil timestamp keeps the prior timestamp. Forward the state in the
-/// input context when the resume data remains unchanged.
-public struct DecodedJSONLFrame: Sendable {
-    public let records: [NormalizedRecord]
-    public let timestamp: Int64?
-    public let state: Data?
-    public let isUnknown: Bool
-
-    public init(records: [NormalizedRecord] = [], timestamp: Int64? = nil,
-                state: Data? = nil, isUnknown: Bool = false) {
-        self.records = records
-        self.timestamp = timestamp
-        self.state = state
-        self.isUnknown = isUnknown
-    }
 }
 
 public struct JSONLImportResult: Equatable, Sendable {
@@ -43,6 +20,19 @@ public enum JSONLFileImporter {
     private static let prefixLimit = 1024 * 1024
     private static let batchLimit = 500
     private static let batchInterval: Duration = .milliseconds(200)
+
+    /// Connect a discovered file to its adapter and the transactional store.
+    @discardableResult
+    public static func importFile<A: AgentAdapter>(_ file: SourceFile, from source: Source,
+                                                   authorizedRoot: URL, store: AgentStore, adapter: A)
+    throws -> JSONLImportResult {
+        var versioned = file
+        versioned.parserVersion = A.parserVersion
+        var decoder = try adapter.makeDecoder(for: versioned, in: source)
+        return try importFile(versioned, authorizedRoot: authorizedRoot, store: store) {
+            try decoder.decode($0, context: $1)
+        }
+    }
 
     /// Import one discovered file beneath a root the caller already authorized.
     /// Run off the UI actor. Never pass an unverified watcher hint as a file.
@@ -78,6 +68,7 @@ public enum JSONLFileImporter {
         var framer = JSONLFramer(offset: next.offset, sequence: next.sequence, prefixLimit: prefixLimit)
         let startingOffset = next.offset
         var readOffset = next.offset
+        var lineStart = next.offset
         var lines: Int64 = 0
         var batchLines = 0
         var batch: [NormalizedRecord] = []
@@ -102,8 +93,10 @@ public enum JSONLFileImporter {
             let target = Int(min(Int64(chunkSize), initial.size - readOffset))
             let chunk = try reader.read(upToCount: target, offset: readOffset)
             guard chunk.count == target else { throw JSONLImportFailure.sourceChanged }
-            try framer.push(chunk) { line in
+            try framer.push(chunk) { framed in
                 try Task.checkCancellation()
+                let line = framed.isTruncated ? withOverflow(framed, start: lineStart, reader: reader) : framed
+                lineStart = line.endOffset
                 let decoded = try decode(line, .init(fileID: fileID, previousTimestamp: next.previousTimestamp,
                                                      state: next.decoderState))
                 guard decoded.records.count <= batchLimit else { throw JSONLImportFailure.recordLimit }
@@ -131,6 +124,21 @@ public enum JSONLFileImporter {
         }
         try commit()
         return .init(fileID: fileID, checkpoint: next, completeLines: lines, bytesRead: readOffset - startingOffset)
+    }
+
+    private static func withOverflow(_ frame: JSONLFrame, start: Int64, reader: SourceFileReader) -> JSONLFrame {
+        let overflowStart = start + Int64(frame.bytes.count)
+        let length = frame.endOffset - 1 - overflowStart // excludes LF
+        return .init(bytes: frame.bytes, isTruncated: true, endOffset: frame.endOffset, sequence: frame.sequence) {
+            offset, count in
+            try Task.checkCancellation()
+            guard offset >= 0, count >= 0 else { throw SourceFileReader.Failure.invalidReadRange }
+            guard offset < length else { return Data() }
+            let size = Int(min(Int64(count), Int64(chunkSize), length - offset))
+            let data = try reader.read(upToCount: size, offset: overflowStart + offset)
+            guard data.count == size else { throw JSONLImportFailure.sourceChanged }
+            return data
+        }
     }
 
     private static func resumable(_ checkpoint: Checkpoint, file: SourceFile,

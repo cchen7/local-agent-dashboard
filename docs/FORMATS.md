@@ -253,11 +253,30 @@ after the inventory snapshot and is not included in the tables above. It verifie
 the configured provider/model and a completed agent tool loop, not upstream model
 deployment telemetry. Do not classify the `exec` entrypoint as a separate environment.
 
-## Adapter fixture status
+## Claude Code parser contract
 
-Claude, Codex, Copilot and Grok adapter fixtures have not yet been captured or
-approved. M0-TOOLING must first deliver and validate the sanitizer. EXP-1 does not
-waive capture-before-parser, accounting golden tests, or read-only source access.
+The checked-in Claude Code tests use wholly synthetic project transcripts,
+child transcripts, and prompt history drawn from the contract in SPEC §5.4.
+The public [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+describes resume, and [Agent SDK cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
+describes cumulative output usage and cache token fields. Public
+[history examples](https://github.com/anthropics/claude-code/issues/19995)
+show the prompt, workspace and timestamp fields. Local capture checks stay
+outside the repository; no captured bytes or account details are part of
+these tests. Capture preserves the public `display` field name and masks its
+value just like other prompt text.
+
+For primary transcripts, the filename identifies the file's session and a
+valid record `sessionId` identifies the owner of its events and usage. Copied
+rows cannot replace either session's workspace. A nested subagent's session ID
+can identify its parent, so subagent rows stay in their child session.
+Response fragments can advance a globally deduplicated output count only for
+the same input/cache basis. Prompt history is kept separate from transcripts.
+
+Tool results can contain a string or an array of text blocks. Field order
+is not assumed: `tool_use_id`, `is_error` and the outer record identity can
+appear after the large body. Oversized records can retain a tool-result
+preview of at most 2 KiB via bounded reads of the same line.
 
 ## Local source availability for M0
 

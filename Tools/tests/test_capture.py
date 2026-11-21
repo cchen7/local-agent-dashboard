@@ -97,6 +97,17 @@ class CaptureTests(unittest.TestCase):
         self.assertNotEqual(out["model_provider"], "azure")
         self.assertNotEqual(out["id"], "assistant")
 
+    def test_claude_history_keeps_display_key_but_not_its_value(self):
+        private_prompt = "synthetic history value 中文"
+        self.write([{"display": private_prompt, "project": "/Users/synthetic/project", "timestamp": 1234}])
+        row = self.run_capture()[0]
+        self.assertIn("display", row)
+        self.assertNotEqual(row["display"], private_prompt)
+        self.assertEqual(len(row["display"]), len(private_prompt))
+        self.assertNotIn(private_prompt, self.output.read_text())
+        self.assertTrue(row["project"].startswith("/Users/dev/"))
+        self.assertEqual(row["timestamp"], 1234)
+
     def test_json_nested_unknown_keys_and_embedded_json_never_pass_through(self):
         self.input = self.source / "synthetic.json"
         self.output = self.destination / "fixture.json"

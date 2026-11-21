@@ -106,6 +106,19 @@ replay with the adapter's existing dedupe keys. Older indexed records are
 retained for the archive. This implements the common importer without
 assuming any vendor's record format.
 
+## DEV-039 — Normalize Claude Code files before indexing
+
+Enumerate the authorized root descriptor without following symlinks. Use the
+primary filename for file metadata and a valid recorded session ID for event
+and usage ownership. A resumed copy can establish an original owner without
+claiming its file or overriding an original event's order. Usage still merges
+only compatible cumulative output into one billable response. A nested
+subagent keeps its own records and resolves its parent when available.
+Thinking stays outside the index. For oversized records, read the remainder
+in bounded chunks from the pinned descriptor and retain only recognized tool
+results with bounded text and their identity. Unclassified partial bodies
+keep an unknown marker without a raw fallback.
+
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 
 The owner removed Markdown/JSON session export from the product scope. Full
