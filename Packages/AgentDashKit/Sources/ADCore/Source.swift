@@ -75,16 +75,48 @@ public struct SourceFile: Codable, Equatable, Sendable, Identifiable {
 /// Resume position after the last complete record, never after a partial trailing line.
 /// Timestamp is UTC epoch milliseconds; sequence is file order, independent of timestamp.
 public struct Checkpoint: Codable, Equatable, Sendable {
+    public static let maximumDecoderStateBytes = 65_536
+
+    public var device: Int64?
     public var inode: Int64?
     public var size: Int64
+    public var modificationTimeNS: Int64?
     public var offset: Int64
     public var parserVersion: Int
     public var sequence: Int64
     public var previousTimestamp: Int64?
+    public var decoderState: Data?
+    public var unknownRecords: Int64
+
     /// Create a normalized value without performing file access.
     public init(inode: Int64?, size: Int64, offset: Int64, parserVersion: Int,
-                sequence: Int64, previousTimestamp: Int64?) {
+                sequence: Int64, previousTimestamp: Int64?, device: Int64? = nil,
+                modificationTimeNS: Int64? = nil, decoderState: Data? = nil, unknownRecords: Int64 = 0) {
+        self.device = device
         self.inode = inode; self.size = size; self.offset = offset; self.parserVersion = parserVersion
         self.sequence = sequence; self.previousTimestamp = previousTimestamp
+        self.modificationTimeNS = modificationTimeNS
+        self.decoderState = decoderState
+        self.unknownRecords = unknownRecords
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case device, inode, size, modificationTimeNS, offset, parserVersion, sequence, previousTimestamp
+        case decoderState, unknownRecords
+    }
+
+    /// Old checkpoints still decode; an importer replays once if device information is missing.
+    public init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(inode: fields.decodeIfPresent(Int64.self, forKey: .inode),
+                      size: fields.decode(Int64.self, forKey: .size),
+                      offset: fields.decode(Int64.self, forKey: .offset),
+                      parserVersion: fields.decode(Int.self, forKey: .parserVersion),
+                      sequence: fields.decode(Int64.self, forKey: .sequence),
+                      previousTimestamp: fields.decodeIfPresent(Int64.self, forKey: .previousTimestamp),
+                      device: fields.decodeIfPresent(Int64.self, forKey: .device),
+                      modificationTimeNS: fields.decodeIfPresent(Int64.self, forKey: .modificationTimeNS),
+                      decoderState: fields.decodeIfPresent(Data.self, forKey: .decoderState),
+                      unknownRecords: fields.decodeIfPresent(Int64.self, forKey: .unknownRecords) ?? 0)
     }
 }
