@@ -46,6 +46,7 @@ final class DashboardModel {
     private var searchForText: String?
     private var searchForOffset = 0
     private var lastSearchState: SessionSearchState = .waiting
+    private var lastSearchScope: IndexedSearchScope?
     private var searchHome: String?
 
     var isSearchingSessions: Bool { !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -54,9 +55,10 @@ final class DashboardModel {
         searchForText == sessionSearchText && searchForOffset == sessionSearchOffset ? lastSearchState : .waiting
     }
 
-    var selectedMatchKey: String? {
-        guard isSearchingSessions, case .results(let results) = sessionSearchState else { return nil }
-        return results.hits.first { $0.id == selectedSessionID }?.firstMatchKey
+    var selectedTranscriptSearch: SessionTranscriptSearch? {
+        guard isSearchingSessions, case .results(let results) = sessionSearchState, let scope = lastSearchScope,
+              let hit = results.hits.first(where: { $0.id == selectedSessionID }) else { return nil }
+        return .init(query: sessionSearchText, scope: scope, firstMatchKey: hit.firstMatchKey, count: hit.matchCount)
     }
 
     var selectedSession: SessionListItem? {
@@ -148,6 +150,7 @@ final class DashboardModel {
                 }
                 searchForText = text
                 searchForOffset = offset
+                lastSearchScope = scope
                 lastSearchState = .results(found)
                 selectSearchHit(found)
                 // At most one query runs at a time. While it runs or cools
@@ -200,11 +203,13 @@ final class DashboardModel {
             .event(.init(session: other, sequence: 0, timestamp: now - 3_600_000, kind: .assistant,
                          text: "Documentation preview", dedupeKey: "preview:docs")),
         ]
-        for i in 0..<133 {
+        for i in 0..<400 {
             let text: String
             switch i {
             case 0: text = "API_TOKEN=synthetic-preview-only"
             case 130: text = "修复登录问题 · Synthetic search target"
+            case 260: text = "验证登录配置 · Second synthetic search target"
+            case 395: text = "完成登录修复 · Final synthetic search target"
             default: text = "合成转录 · Synthetic message \(i)"
             }
             records.append(.event(.init(session: primary, sequence: Int64(i), timestamp: now - 60_000 + Int64(i),
@@ -251,6 +256,13 @@ final class DashboardModel {
             if let id = source.id { access[id] = .denied }
         }
     }
+}
+
+struct SessionTranscriptSearch: Equatable, Sendable {
+    let query: String
+    let scope: IndexedSearchScope
+    let firstMatchKey: String
+    let count: Int
 }
 
 enum SessionSearchState: Equatable {

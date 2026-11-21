@@ -40,6 +40,74 @@ func mixedSearchGroupsAndAnchors() throws {
     #expect(restricted.hits.first?.id != second.hits.first?.id)
 }
 
+@Test("FR-SR: navigation keeps query scope, file order, stable ties and bounded pages")
+func navigatesMatchesWithinTheSelectedSession() throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let primary = fixture.session("nav-primary", cwd: "/synthetic/work/client")
+    let other = fixture.session("nav-other", cwd: "/synthetic/work/client")
+    let query = "登录 role:assistant dir:~/work/client -discarded"
+    var records: [NormalizedRecord] = [
+        .session(primary), .session(other),
+        fixture.event(primary.key, "tie-first", 1, "先检查登录", timestamp: 300),
+        fixture.event(primary.key, "tie-second", 1, "检查登录配置", timestamp: 200),
+        fixture.event(primary.key, "discarded", 2, "discarded 登录"),
+        fixture.event(primary.key, "user", 3, "登录", kind: .user),
+        fixture.event(other.key, "other-match", 1, "登录"),
+    ]
+    records += (4...290).map { fixture.event(primary.key, "filler-\($0)", Int64($0), "synthetic filler") }
+    records.append(fixture.event(primary.key, "last", 291, "完成登录修复", timestamp: 100))
+    try fixture.store.write(records)
+
+    func locate(_ key: String? = nil, session: SessionKey? = nil) throws -> IndexedSearchMatchPosition? {
+        try SessionSearch.position(query, in: fixture.store, scope: fixture.scope,
+                                   session: session ?? primary.key, around: key)
+    }
+    let first = try #require(try locate())
+    #expect(first.eventKey == "tie-first")
+    #expect(first.ordinal == 1 && first.count == 3 && first.previousKey == nil)
+    #expect(first.eventKey == (try fixture.run(query)).hits.first { $0.id == primary.key }?.firstMatchKey)
+    let middle = try #require(try locate(first.nextKey))
+    #expect(middle.eventKey == "tie-second" && middle.ordinal == 2)
+    #expect(middle.previousKey == first.eventKey && middle.nextKey == "last")
+    let last = try #require(try locate(middle.nextKey))
+    #expect(last.eventKey == "last" && last.ordinal == 3 && last.nextKey == nil)
+    let page = try #require(try fixture.store.transcriptPage(in: primary.key, request: .around(last.eventKey)))
+    #expect(page.events.last?.dedupeKey == "last" && page.events.count == 128)
+    #expect(!page.events.contains { $0.dedupeKey == first.eventKey })
+    #expect(try locate("other-match") == first)
+    let only = try #require(try locate(last.eventKey, session: other.key))
+    #expect(only.eventKey == "other-match" && only.ordinal == 1 && only.count == 1)
+    #expect(only.previousKey == nil && only.nextKey == nil)
+}
+
+@Test("FR-SR: a live rewrite keeps the preferred hit by key and falls back when it stops matching")
+func matchNavigationRevalidatesItsAnchor() throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let session = fixture.session("nav-live", cwd: "/synthetic/work")
+    let query = "登录"
+    func locate(_ key: String) throws -> IndexedSearchMatchPosition? {
+        try SessionSearch.position(query, in: fixture.store, scope: fixture.scope, session: session.key, around: key)
+    }
+    try fixture.store.write([.session(session),
+        fixture.event(session.key, "first", 1, "登录"),
+        fixture.event(session.key, "current", 2, "登录"),
+        fixture.event(session.key, "last", 3, "登录")])
+    let old = try #require(try locate("current"))
+    #expect(old.ordinal == 2 && old.count == 3)
+
+    try fixture.store.write([fixture.event(session.key, "current", 4, "登录")])
+    let moved = try #require(try locate("current"))
+    #expect(moved.eventKey == "current" && moved.ordinal == 3 && moved.previousKey == "last")
+    try fixture.store.write([fixture.event(session.key, "current", 4, "修复完毕")])
+    let reset = try #require(try locate("current"))
+    #expect(reset.eventKey == "first" && reset.ordinal == 1 && reset.count == 2 && reset.nextKey == "last")
+    try fixture.store.write([fixture.event(session.key, "first", 1, "不匹配"),
+                             fixture.event(session.key, "last", 3, "不匹配")])
+    #expect(try locate("current") == nil)
+}
+
 @Test("FR-SR: the same query sees new sessions and event-only rewrites", .timeLimit(.minutes(1)))
 func unchangedQueryPicksUpEventOnlyCommits() async throws {
     let fixture = try SearchFixture()
@@ -151,6 +219,24 @@ func millionEntrySearchLatency() throws {
         let p95 = samples.sorted()[18]
         print("1M synthetic search / \(label): warm P95 \(p95) ms")
         #expect(p95 < 150)
+
+        let top = try #require(try fixture.run(query).hits.first)
+        let first = try #require(try SessionSearch.position(query, in: fixture.store, scope: fixture.scope,
+                                                            session: top.id, around: top.firstMatchKey))
+        let target = try #require(first.nextKey)
+        #expect(first.count == top.matchCount)
+        var steps: [Double] = []
+        for _ in 0..<20 {
+            let start = ContinuousClock.now
+            let position = try SessionSearch.position(query, in: fixture.store, scope: fixture.scope,
+                                                      session: top.id, around: target)
+            let elapsed = start.duration(to: .now).components
+            steps.append(Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+            #expect(position?.ordinal == 2 && position?.previousKey == first.eventKey)
+        }
+        let stepP95 = steps.sorted()[18]
+        print("1M synthetic match navigation / \(label): warm P95 \(stepP95) ms")
+        #expect(stepP95 < 150)
     }
 }
 
