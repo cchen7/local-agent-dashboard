@@ -231,21 +231,26 @@ final class DashboardModel {
         let panel = Self.sourceFolderPanel()
         guard await panel.begin() == .OK, let url = panel.url else { return .cancelled }
         guard Source.isLocalRoot(url) else { return .inaccessible }
+        let identity = await Task.detached { try? SourceFileReader.directoryIdentity(root: url) }.value
+        guard let identity else { return .inaccessible }
         let bytes: Data
         do {
             bytes = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
                                          includingResourceValuesForKeys: nil, relativeTo: nil)
         } catch { return .inaccessible }
         return await registerCustomSource(.init(agent: agent, label: label, rootURL: url, environment: environment,
-                                                 access: .bookmark(bytes)))
+                                                 access: .bookmark(bytes)), identity: identity)
     }
 
     /// Save metadata to the app's index only. Do not start a scan or verify access here.
-    func registerCustomSource(_ source: Source) async -> SourceAdditionResult {
+    func registerCustomSource(_ source: Source, identity: SourceRootIdentity) async -> SourceAdditionResult {
         guard let store else { return .storageFailed }
         do {
             let (outcome, snapshot) = try await Task.detached {
-                let result = try store.registerCustomSource(source)
+                let existing = try store.sources().first {
+                    $0.agent == source.agent && SourceAccessProbe.directoryIdentity($0) == identity
+                }
+                let result = try store.registerCustomSource(source, identity: identity, existing: existing)
                 return (result, try store.sources())
             }.value
             sources = snapshot

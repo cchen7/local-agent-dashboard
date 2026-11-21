@@ -27,6 +27,35 @@ public final class SourceFileReader: Sendable {
         public let kind: Kind
     }
 
+    /// Read the selected root's identity without listing or reading entries.
+    /// Stable local volume UUIDs survive changes to the path and device number.
+    public static func directoryIdentity(root: URL) throws -> SourceRootIdentity {
+        guard Source.isLocalRoot(root) else { throw Failure.invalidRoot }
+        let descriptor = try openDirectory(root: root.standardizedFileURL, components: [])
+        defer { close(descriptor) }
+        var filesystem = statfs()
+        guard fstatfs(descriptor, &filesystem) == 0,
+              filesystem.f_flags & UInt32(MNT_LOCAL) != 0 else { throw Failure.metadataFailed }
+        // ATTR_VOL_UUID returns one UUID immediately after the UInt32 byte
+        // count. Read it on the same descriptor as the inode and birth time.
+        var attributes = attrlist()
+        attributes.bitmapcount = UInt16(ATTR_BIT_MAP_COUNT)
+        attributes.volattr = UInt32(ATTR_VOL_INFO) | UInt32(ATTR_VOL_UUID)
+        var buffer = [UInt8](repeating: 0, count: MemoryLayout<UInt32>.size + MemoryLayout<uuid_t>.size)
+        let result = buffer.withUnsafeMutableBytes {
+            fgetattrlist(descriptor, &attributes, $0.baseAddress, $0.count, 0)
+        }
+        guard result == 0, buffer.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) == UInt32(buffer.count) else {
+            throw Failure.metadataFailed
+        }
+        let volume = UUID(uuid: buffer.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: uuid_t.self) })
+        guard buffer.dropFirst(4).contains(where: { $0 != 0 }) else { throw Failure.metadataFailed }
+        let value = try status(of: descriptor)
+        return .init(volume: volume, inode: Int64(bitPattern: value.st_ino),
+                     birthSeconds: Int64(value.st_birthtimespec.tv_sec),
+                     birthNanoseconds: Int64(value.st_birthtimespec.tv_nsec))
+    }
+
     private static let maximumReadSize = 1_048_576
     private static let directoryFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
     private let descriptor: Int32

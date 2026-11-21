@@ -46,28 +46,47 @@ public final class AgentStore: Sendable {
                 WHERE parent_native_id IS NOT NULL;
                 """)
         }
+        migrator.registerMigration("source_root_identity") { db in
+            try db.execute(sql: """
+                CREATE TABLE source_root_identities (
+                    source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+                    volume TEXT NOT NULL, inode INTEGER NOT NULL,
+                    birth_seconds INTEGER NOT NULL, birth_nanoseconds INTEGER NOT NULL
+                );
+                CREATE INDEX source_root_identity_lookup ON source_root_identities(volume,inode,birth_seconds,birth_nanoseconds);
+                CREATE TRIGGER source_root_identity_permission_changed
+                AFTER UPDATE OF access_kind,bookmark ON sources
+                WHEN old.access_kind IS NOT new.access_kind OR old.bookmark IS NOT new.bookmark
+                BEGIN
+                    DELETE FROM source_root_identities WHERE source_id=new.id;
+                END;
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 
     /// Upsert by (agent, root path); returns the stable row ID and never replaces children.
     @discardableResult
     public func upsertSource(_ source: Source) throws -> Int64 {
-        try saveSource(source, replaceExisting: true).id
+        try saveSource(source, registration: nil).id
     }
 
-    /// Register a caller-supplied read-only bookmark. No root is opened here.
-    /// The caller obtains the bookmark only after the user picks a directory.
-    public func registerCustomSource(_ source: Source) throws -> CustomSourceRegistration {
+    /// Register a selected local root. The caller supplies its observed identity
+    /// and optionally an older authorized source observed to refer to that root.
+    /// The store performs no filesystem lookup.
+    public func registerCustomSource(_ source: Source, identity: SourceRootIdentity,
+                                     existing: Source? = nil) throws -> CustomSourceRegistration {
         guard Source.isLocalRoot(source.rootURL) else { throw StoreError.invalidLocation }
         guard case .bookmark(let data) = source.access, !data.isEmpty,
               !source.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !source.environment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { throw StoreError.invalidCustomSource }
-        let result = try saveSource(source, replaceExisting: false)
+        let result = try saveSource(source, registration: (identity, existing))
         return result.changed ? .added(result.id) : .alreadyRegistered(result.id)
     }
 
-    private func saveSource(_ source: Source, replaceExisting: Bool) throws -> (id: Int64, changed: Bool) {
+    private func saveSource(_ source: Source, registration: (identity: SourceRootIdentity, existing: Source?)?)
+    throws -> (id: Int64, changed: Bool) {
         guard source.rootURL.isFileURL else { throw StoreError.invalidLocation }
         let root = source.rootURL.standardizedFileURL.path
         let mappings = String(decoding: try JSONEncoder().encode(source.pathMappings), as: UTF8.self)
@@ -78,11 +97,33 @@ public final class AgentStore: Sendable {
         case .defaultLocation: kind = "default_location"; bookmark = nil
         case .bookmark(let data): kind = "bookmark"; bookmark = data
         }
-        let conflict = replaceExisting ? """
+        let conflict = registration == nil ? """
             DO UPDATE SET label=excluded.label, environment=excluded.environment, path_mappings_json=excluded.path_mappings_json,
             env_rules_json=excluded.env_rules_json, access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=excluded.enabled
             """ : "DO NOTHING"
         return try databasePool.write { db in
+            if let registration {
+                let identity = registration.identity
+                if let id = try Int64.fetchOne(db, sql: """
+                    SELECT s.id FROM source_root_identities r JOIN sources s ON s.id=r.source_id
+                    WHERE s.agent=? AND r.volume=? AND r.inode=? AND r.birth_seconds=? AND r.birth_nanoseconds=?
+                    ORDER BY s.id LIMIT 1
+                    """, arguments: [source.agent.rawValue, identity.volume.uuidString, identity.inode,
+                                      identity.birthSeconds, identity.birthNanoseconds]) { return (id, false) }
+                if let existing = registration.existing, existing.agent == source.agent, let id = existing.id {
+                    let (kind, bookmark): (String, Data?)
+                    switch existing.access {
+                    case .defaultLocation: (kind, bookmark) = ("default_location", nil)
+                    case .bookmark(let data): (kind, bookmark) = ("bookmark", data)
+                    }
+                    let valid = try Bool.fetchOne(db, sql: """
+                        SELECT EXISTS(SELECT 1 FROM sources WHERE id=? AND agent=? AND root_path=? AND
+                                      access_kind=? AND bookmark IS ?)
+                        """, arguments: [id, source.agent.rawValue, existing.rootURL.standardizedFileURL.path, kind, bookmark])
+                    guard valid == true else { throw StoreError.invalidCustomSource }
+                    return (id, false)
+                }
+            }
             try db.execute(sql: """
                 INSERT INTO sources(agent,label,root_path,environment,path_mappings_json,env_rules_json,access_kind,bookmark,enabled)
                 VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,root_path) \(conflict)
@@ -92,6 +133,12 @@ public final class AgentStore: Sendable {
             guard let id = try Int64.fetchOne(db, sql: "SELECT id FROM sources WHERE agent=? AND root_path=?",
                                               arguments: [source.agent.rawValue, root]) else {
                 throw StoreError.invalidStoredValue
+            }
+            if changed, let identity = registration?.identity {
+                try db.execute(sql: """
+                    INSERT INTO source_root_identities(source_id,volume,inode,birth_seconds,birth_nanoseconds)
+                    VALUES(?,?,?,?,?)
+                    """, arguments: [id, identity.volume.uuidString, identity.inode, identity.birthSeconds, identity.birthNanoseconds])
             }
             return (id, changed)
         }

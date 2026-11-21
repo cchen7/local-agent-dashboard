@@ -97,10 +97,12 @@ reassigned. All six size/appearance combinations were executed and visually chec
 ## DEV-047 — Register a custom source without replacing an existing one
 
 Sources → Add Source records the agent, label, environment and read-only
-permission after an explicit local folder choice. The app-owned store inserts
-by agent and standardized root and reports an existing row without changing
-its permission, configuration, checkpoint or history. Cancellation does not
-write settings. Registration does not read session files or start indexing.
+permission after an explicit local folder choice. Read directory metadata
+under that authorization. The store atomically checks agent, persistent
+volume UUID, inode and directory creation time, as well as the standardized
+path. An older row can also match by its existing authorized directory
+identity. A match leaves the existing permission, configuration, checkpoint
+and history intact. Registration does not read session files or start indexing.
 
 ## DEV-038 — Commit JSONL batches against the expected checkpoint
 
