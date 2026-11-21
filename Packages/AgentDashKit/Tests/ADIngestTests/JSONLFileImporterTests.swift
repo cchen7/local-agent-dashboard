@@ -132,6 +132,31 @@ func sameSizeModificationForcesReplay() throws {
     #expect(try fixture.store.events(in: fixture.key).map(\.text) == ["two"])
 }
 
+@Test("ADP-2: a second reader cannot commit an older snapshot over a newer checkpoint")
+func olderSourceSnapshotCannotAdoptAConcurrentCheckpoint() throws {
+    let fixture = try ImportFixture()
+    defer { fixture.remove() }
+    let first = Data("{\"text\":\"first\"}\n".utf8)
+    let appended = Data("{\"text\":\"appended\"}\n".utf8)
+    try first.write(to: fixture.input)
+    let secondStore = try AgentStore(databaseURL: fixture.index)
+    let fileID = try fixture.store.upsertFile(fixture.file, checkpoint: nil)
+
+    #expect(throws: StoreError.staleCheckpoint) {
+        try JSONLFileImporter.importFile(fixture.file, authorizedRoot: fixture.root, store: fixture.store,
+                                        snapshot: { reader in
+            let old = try reader.snapshot()
+            try fixture.append(appended)
+            let latest = try JSONLFileImporter.importFile(fixture.file, authorizedRoot: fixture.root,
+                                                           store: secondStore, decode: fixture.decode)
+            #expect(latest.checkpoint.offset == Int64(first.count + appended.count))
+            return old
+        }, decode: fixture.decode)
+    }
+    #expect(try fixture.store.checkpoint(for: fileID)?.offset == Int64(first.count + appended.count))
+    #expect(try fixture.store.events(in: fixture.key).map(\.text) == ["first", "appended"])
+}
+
 @Test("ADP-2: a mutation noticed before commit cannot advance the read position")
 func rejectsMutationDuringRead() throws {
     let fixture = try ImportFixture()
