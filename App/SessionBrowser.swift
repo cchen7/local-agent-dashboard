@@ -1,11 +1,13 @@
 import ADCore
 import ADPrivacy
+import ADSearch
 import ADStore
 import AppKit
 import SwiftUI
 
 struct SessionListCell: View {
     let session: SessionListItem
+    var snippet: [SearchSnippetPart] = []
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
@@ -24,6 +26,10 @@ struct SessionListCell: View {
                     Text(verbatim: [project, session.branch].compactMap { $0 }.joined(separator: " · "))
                         .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
+                if !snippet.isEmpty {
+                    Text(highlightedSnippet(snippet))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
                 HStack(spacing: 8) {
                     SessionStatusPill(status: session.status)
                     if session.archived {
@@ -38,14 +44,35 @@ struct SessionListCell: View {
     }
 }
 
+private func highlightedSnippet(_ parts: [SearchSnippetPart]) -> AttributedString {
+    var result = AttributedString()
+    for part in parts {
+        var text = AttributedString(part.text)
+        if part.highlighted {
+            text.backgroundColor = Color(nsColor: .systemOrange).opacity(0.22)
+            text.inlinePresentationIntent = .stronglyEmphasized
+        }
+        result.append(text)
+    }
+    return result
+}
+
 struct SessionTranscript: View {
     let session: SessionListItem
     let store: AgentStore
-    @State private var request: TranscriptPageRequest = .first
+    let openingMatch: String?
+    @State private var request: TranscriptPageRequest
     @State private var loading = true
     @State private var failed = false
     @State private var page: TranscriptPage?
     @State private var viewRevision = 0
+
+    init(session: SessionListItem, store: AgentStore, openingMatch: String? = nil) {
+        self.session = session
+        self.store = store
+        self.openingMatch = openingMatch
+        _request = State(initialValue: openingMatch.map(TranscriptPageRequest.around) ?? .first)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -87,12 +114,26 @@ struct SessionTranscript: View {
             } else if loading {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let page, !page.events.isEmpty {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(page.events, id: \.dedupeKey) { event in TranscriptEventRow(event: event) }
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(page.events, id: \.dedupeKey) { event in
+                                let matched = event.dedupeKey == openingMatch
+                                TranscriptEventRow(event: event)
+                                    .padding(matched ? 5 : 0)
+                                    .background(matched ? Color.accentColor.opacity(0.15) : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 6))
+                                    .id(event.dedupeKey)
+                            }
+                        }
+                        .padding(.horizontal, 18).padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.horizontal, 18).padding(.vertical, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .task(id: viewRevision) {
+                        guard case .around(let key) = request else { return }
+                        await Task.yield()
+                        if !Task.isCancelled { scroll.scrollTo(key, anchor: .top) }
+                    }
                 }
                 .id(viewRevision)
                 .accessibilityIdentifier("session.transcript.messages")
@@ -127,6 +168,12 @@ struct SessionTranscript: View {
         do {
             for try await snapshot in try store.transcriptPageUpdates(in: session.id, request: requested) {
                 guard !Task.isCancelled, request == requested else { return }
+                if snapshot == nil, case .around = requested {
+                    loading = true
+                    page = nil
+                    request = .first
+                    return
+                }
                 page = snapshot
                 loading = false
                 failed = false

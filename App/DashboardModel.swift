@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import ADCore
 import ADPrivacy
+import ADSearch
 import ADStore
 
 enum DashboardPage: String, CaseIterable, Identifiable {
@@ -37,6 +38,26 @@ final class DashboardModel {
     private(set) var sessionIndexFailed = false
     private var loaded = false
     private(set) var store: AgentStore?
+    var sessionSearchText = "" {
+        didSet { if sessionSearchText != oldValue { sessionSearchOffset = 0 } }
+    }
+    static let sessionSearchPageSize = 50
+    private(set) var sessionSearchOffset = 0
+    private var searchForText: String?
+    private var searchForOffset = 0
+    private var lastSearchState: SessionSearchState = .waiting
+    private var searchHome: String?
+
+    var isSearchingSessions: Bool { !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    var sessionSearchState: SessionSearchState {
+        searchForText == sessionSearchText && searchForOffset == sessionSearchOffset ? lastSearchState : .waiting
+    }
+
+    var selectedMatchKey: String? {
+        guard isSearchingSessions, case .results(let results) = sessionSearchState else { return nil }
+        return results.hits.first { $0.id == selectedSessionID }?.firstMatchKey
+    }
 
     var selectedSession: SessionListItem? {
         sessions.first { $0.id == selectedSessionID }
@@ -67,10 +88,12 @@ final class DashboardModel {
                 if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
                 }
-                return (store, try store.sources())
+                let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
+                return (store, try store.sources(), home)
             }.value
             store = result.0
             sources = result.1
+            searchHome = result.2
         } catch { storageFailed = true }
     }
 
@@ -81,7 +104,9 @@ final class DashboardModel {
                 let displayed = await Task.detached { rows.map(SessionListItem.init) }.value
                 guard !Task.isCancelled else { return }
                 sessions = displayed
-                if !displayed.contains(where: { $0.id == selectedSessionID }) {
+                if isSearchingSessions, case .results(let results) = sessionSearchState {
+                    selectSearchHit(results)
+                } else if !isSearchingSessions && !displayed.contains(where: { $0.id == selectedSessionID }) {
                     selectedSessionID = displayed.first?.id
                 }
                 sessionIndexLoaded = true
@@ -90,6 +115,72 @@ final class DashboardModel {
         } catch {
             guard !Task.isCancelled else { return }
             sessionIndexFailed = true
+        }
+    }
+
+    func observeSessionSearch(_ text: String, offset: Int) async {
+        guard let store, searchIsCurrent(text, offset: offset) else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            if !sessions.contains(where: { $0.id == selectedSessionID }) { selectedSessionID = sessions.first?.id }
+            searchForText = nil
+            lastSearchState = .waiting
+            return
+        }
+        do {
+            if text != searchForText { try await Task.sleep(for: .milliseconds(150)) }
+            for try await _ in store.searchIndexChanges() {
+                guard searchIsCurrent(text, offset: offset) else { return }
+                let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
+                                               timeZone: .current, hostHome: searchHome)
+                let limit = Self.sessionSearchPageSize
+                let work = Task.detached(priority: .userInitiated) {
+                    try SessionSearch.run(text, in: store, scope: scope, limit: limit, offset: offset)
+                }
+                let found = try await withTaskCancellationHandler {
+                    try await work.value
+                } onCancel: {
+                    work.cancel()
+                }
+                guard searchIsCurrent(text, offset: offset) else { return }
+                if offset > 0 && found.hits.isEmpty {
+                    sessionSearchOffset = 0
+                    return
+                }
+                searchForText = text
+                searchForOffset = offset
+                lastSearchState = .results(found)
+                selectSearchHit(found)
+                // At most one query runs at a time. While it runs or cools
+                // down, the stream retains one wakeup for all pending writes.
+                try await Task.sleep(for: .milliseconds(150))
+            }
+        } catch {
+            guard searchIsCurrent(text, offset: offset) else { return }
+            searchForText = text
+            searchForOffset = offset
+            lastSearchState = error is SearchQuery.Failure || (error as? IndexedSearchFailure) == .invalidFilter
+                ? .invalid : .failed
+        }
+    }
+
+    private func searchIsCurrent(_ text: String, offset: Int) -> Bool {
+        !Task.isCancelled && text == sessionSearchText && offset == sessionSearchOffset
+    }
+
+    func pageSessionSearch(forward: Bool) {
+        guard case .results(let results) = sessionSearchState else { return }
+        let size = Self.sessionSearchPageSize
+        if forward {
+            guard results.sessionCount - sessionSearchOffset > size else { return }
+            sessionSearchOffset += size
+        } else {
+            sessionSearchOffset = max(0, sessionSearchOffset - size)
+        }
+    }
+
+    private func selectSearchHit(_ results: SessionSearchResults) {
+        if !results.hits.contains(where: { $0.id == selectedSessionID }) {
+            selectedSessionID = results.hits.first?.id
         }
     }
 
@@ -110,7 +201,12 @@ final class DashboardModel {
                          text: "Documentation preview", dedupeKey: "preview:docs")),
         ]
         for i in 0..<133 {
-            let text = i == 0 ? "API_TOKEN=synthetic-preview-only" : "合成转录 · Synthetic message \(i)"
+            let text: String
+            switch i {
+            case 0: text = "API_TOKEN=synthetic-preview-only"
+            case 130: text = "修复登录问题 · Synthetic search target"
+            default: text = "合成转录 · Synthetic message \(i)"
+            }
             records.append(.event(.init(session: primary, sequence: Int64(i), timestamp: now - 60_000 + Int64(i),
                                        kind: i.isMultiple(of: 2) ? .user : .assistant,
                                        text: text, dedupeKey: "preview:import:\(i)")))
@@ -155,6 +251,13 @@ final class DashboardModel {
             if let id = source.id { access[id] = .denied }
         }
     }
+}
+
+enum SessionSearchState: Equatable {
+    case waiting
+    case results(SessionSearchResults)
+    case invalid
+    case failed
 }
 
 /// Only display-projected metadata reaches the list or its accessibility labels.

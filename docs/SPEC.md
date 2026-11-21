@@ -126,7 +126,7 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 | `ADAdapters` | Discovery rules and parsers per agent; emit normalized records | ADCore |
 | `ADStore` | Database, migrations, writes, queries, rollups, archive | ADCore, GRDB |
 | `ADIngest` | Source lifecycle, FSEvents, tailer, checkpoints, scheduling | ADCore, ADAdapters, ADStore |
-| `ADSearch` | Query syntax, FTS query building, ranking, snippets | ADCore, ADStore |
+| `ADSearch` | Grouped search and masked, highlighted snippets | ADCore, ADStore, ADPrivacy |
 | `ADInsights` | Titles, keywords, latest progress, status inference | ADCore, ADStore |
 | `ADPrivacy` | Secret-masking rules, excluded paths | ADCore |
 | `ADPricing` | Price table loading and validation, model matching, cost calculation (shared by the app and `Tools/pricing`) | ADCore |
@@ -656,7 +656,9 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 ### 9.1 Behavior (FR-SR)
 
 - Toolbar search field; searches as you type (150 ms debounce); Return pins the query.
+- While a search is open, committed changes to indexed events and search metadata refresh the current result page. Coalesce bursts of changes; restart at the first page if the current result page disappears.
 - Results are grouped by session: "12 matches in 6 sessions". Each session shows its best snippet with highlighted terms.
+- Compute exact totals before limiting the displayed groups. Mask the complete snippet candidate before highlighting or taking an excerpt.
 - Opening a session scrolls the transcript to the first match; "3 of 12" with up/down arrows jumps between matches (already in the prototype).
 - Sort: relevance (default) / most recent / token volume.
 - A query can be saved as a "Smart Group" in the sidebar.
