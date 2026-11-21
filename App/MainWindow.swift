@@ -56,6 +56,10 @@ struct MainWindow: View {
             }
         }
         .task(id: model.store != nil) { await model.observeSessionIndex() }
+        .environment(\.sessionOverviewOptions,
+                     .init(enabled: !model.isSearchingSessions, searchTopic: { term in
+                        model.searchFromTopic(term)
+                     }))
         .overlay(alignment: .bottom) {
             if model.storageFailed {
                 Label("Storage could not be opened. Quit and try again.", systemImage: "exclamationmark.triangle")

@@ -1,9 +1,18 @@
+import Foundation
+
 /// FR-SR: a pure, bounded syntax tree for SPEC §9 / Appendix B.
 /// Groups are OR alternatives; positive and negative terms within a group are
 /// AND constraints. Filters apply globally, in input order (including repeats).
 /// Empty/filter-only queries have no groups. A negative-only query has one group;
 /// when OR is present, every group must contain at least one positive term.
 public struct SearchQuery: Equatable, Sendable {
+    /// Treat a displayed term as literal input, even if it includes query syntax.
+    public static func quotedLiteral(_ term: String) -> String {
+        let quoted = term.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(quoted)\""
+    }
+
     public struct Term: Equatable, Sendable {
         public let text: String
         public let isPhrase: Bool
