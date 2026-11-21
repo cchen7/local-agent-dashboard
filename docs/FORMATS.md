@@ -273,6 +273,11 @@ can identify its parent, so subagent rows stay in their child session.
 Response fragments can advance a globally deduplicated output count only for
 the same input/cache basis. Prompt history is kept separate from transcripts.
 
+Normalized text blocks share the physical record's sequence and key stem
+(`claude:event:<record identity>:`); the final numeric component orders the
+blocks. The Overview rejoins text from that record before masking and
+excerpting it. Distinct records can share the sequence after replay.
+
 Tool results can contain a string or an array of text blocks. Field order
 is not assumed: `tool_use_id`, `is_error` and the outer record identity can
 appear after the large body. Oversized records can retain a tool-result

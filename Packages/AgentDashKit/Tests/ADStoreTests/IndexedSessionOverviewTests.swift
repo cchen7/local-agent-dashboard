@@ -68,10 +68,89 @@ func sessionOverviewBoundsActionsAndText() async throws {
     let result = try #require(value ?? nil)
     #expect(result.summary == "agent metadata summary")
     #expect(result.lastPrompt == nil)
-    #expect(result.topics == ["rotation", "lookup"])
+    #expect(result.topics.isEmpty)
     #expect(result.files.count == 10 && result.files.first?.path == "src/1.swift")
     #expect(result.commands.count == 10 && result.commands.first?.text == "synthetic 12")
-    #expect(result.recentActions.map(\.time) == [121, 120, 111, 110, 101])
+    #expect(result.recentActions.map(\.time) == [999, 121, 120, 111, 110])
+}
+
+@Test("SPEC §10.3: live tool calls survive partial structured attribution, with only exact duplicates removed",
+      .timeLimit(.minutes(1)))
+func sessionOverviewMergesLiveToolActions() async throws {
+    let box = try OverviewFixture()
+    defer { box.remove() }
+    try box.store.write([box.session(box.key)])
+    try await box.store.databasePool.write { db in
+        let target = try #require(try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE native_id='overview'"))
+        try db.execute(sql: """
+            INSERT INTO file_touches(session_id,path,op,count,last_ts) VALUES(?,'/synthetic/change','edit',1,50);
+            INSERT INTO commands(session_id,ts,command) VALUES(?,55,'synthetic original')
+            """, arguments: [target, target])
+    }
+    var snapshots = box.store.sessionOverviewUpdates(in: box.key).makeAsyncIterator()
+    let initial = try await snapshots.next()
+    let before = try #require(initial ?? nil)
+    try #require(before.recentActions.map(\.time) == [55, 50])
+    try box.store.write([
+        box.event(box.key, "duplicate-command", .toolCall, 1, 55, "synthetic original", tool: "Bash"),
+        box.event(box.key, "same-time-repeat", .toolCall, 2, 55, "synthetic original", tool: "Bash"),
+        box.event(box.key, "same-time-result", .toolResult, 3, 55, "synthetic original", tool: "Bash"),
+        box.event(box.key, "duplicate-edit", .toolCall, 4, 50, "/synthetic/change", tool: "Edit"),
+        box.event(box.key, "later", .toolCall, 5, 200, "synthetic later", tool: "Bash"),
+    ])
+    let update = try await snapshots.next()
+    let latest = try #require(update ?? nil)
+    #expect(latest.recentActions == [
+        .tool(kind: .toolCall, name: "Bash", text: "synthetic later", timestamp: 200),
+        before.recentActions[0],
+        .tool(kind: .toolResult, name: "Bash", text: "synthetic original", timestamp: 55),
+        .tool(kind: .toolCall, name: "Bash", text: "synthetic original", timestamp: 55),
+        before.recentActions[1],
+    ])
+}
+
+@Test("SPEC §10.2: summary and path-only topics are absent unless literal search can retrieve this session",
+      .timeLimit(.minutes(1)))
+func sessionOverviewOnlyShowsRetrievableTopics() async throws {
+    let box = try OverviewFixture()
+    defer { box.remove() }
+    try box.store.write([
+        box.session(box.key), box.session(box.other),
+        box.event(box.key, "indexed-topic", .user, 1, 10, "syntheticeventtopic"),
+        box.event(box.other, "external-topic", .assistant, 1, 10, "syntheticsummarytopic"),
+        box.event(box.key, "history-topic", .promptHistory, 2, 11, "syntheticfiletopic"),
+    ])
+    try await box.store.databasePool.write { db in
+        let id = try #require(try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE native_id='overview'"))
+        try db.execute(sql: "UPDATE sessions SET latest_summary='syntheticsummarytopic' WHERE id=?", arguments: [id])
+        try db.execute(sql: """
+            INSERT INTO file_touches(session_id,path,op,count,last_ts)
+            VALUES(?,'/synthetic/syntheticfiletopic.swift','read',1,10)
+            """, arguments: [id])
+        try db.execute(sql: """
+            INSERT INTO session_keywords(session_id,term,weight) VALUES
+              (?,'syntheticsummarytopic',9),(?,'syntheticfiletopic',8),(?,'syntheticeventtopic',7)
+            """, arguments: [id, id, id])
+    }
+    var values = box.store.sessionOverviewUpdates(in: box.key).makeAsyncIterator()
+    let snapshot = try await values.next()
+    let overview = try #require(snapshot ?? nil)
+    #expect(overview.summary == "syntheticsummarytopic")
+    #expect(overview.files.first?.path == "/synthetic/syntheticfiletopic.swift")
+    #expect(overview.topics == ["syntheticeventtopic"])
+    let scope = IndexedSearchScope(now: 100, timeZone: .gmt)
+    func sessions(_ term: String) throws -> [SessionKey] {
+        try box.store.searchIndex(SearchQuery.parse(SearchQuery.quotedLiteral(term)), scope: scope).groups.map(\.session)
+    }
+    #expect(try sessions("syntheticsummarytopic") == [box.other])
+    #expect(try sessions("syntheticfiletopic").isEmpty)
+    #expect(try sessions("syntheticeventtopic") == [box.key])
+
+    try box.store.write([box.event(box.key, "later-topic", .toolCall, 3, 12, "syntheticfiletopic")])
+    let update = try await values.next()
+    let updated = try #require(update ?? nil)
+    #expect(updated.topics == ["syntheticfiletopic", "syntheticeventtopic"])
+    #expect(try sessions("syntheticfiletopic") == [box.key])
 }
 
 private struct OverviewFixture {

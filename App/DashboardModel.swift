@@ -185,9 +185,7 @@ final class DashboardModel {
     }
 
     func searchFromTopic(_ term: String) {
-        let quoted = term.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        sessionSearchText = "\"\(quoted)\""
+        sessionSearchText = SearchQuery.quotedLiteral(term)
     }
 
     nonisolated private static func seedSessions(_ store: AgentStore, in directory: URL) throws {

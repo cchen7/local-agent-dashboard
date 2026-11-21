@@ -63,11 +63,7 @@ public extension AgentStore {
             """, arguments: [session.agent.rawValue, session.nativeID]) else { return nil }
         let id: Int64 = header["id"]
         func latestText(_ kind: EventKind) throws -> String? {
-            try String.fetchOne(db, sql: """
-                SELECT CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END
-                FROM events WHERE session_id=? AND kind=? AND text IS NOT NULL AND text<>''
-                ORDER BY seq DESC,id DESC LIMIT 1
-                """, arguments: [id, kind.rawValue])
+            try Self.overviewMessage(in: id, agent: session.agent, kind: kind, db: db)
         }
         let summary: String? = header["summary"]
         let files = try overviewFiles(in: id, order: "count DESC,last_ts DESC,path,op", limit: 10, db: db)
@@ -81,30 +77,99 @@ public extension AgentStore {
             }
         let recentFiles = try overviewFiles(in: id, order: "last_ts DESC,path,op", limit: 5, db: db)
         let structured = recentFiles.map(IndexedOverviewAction.file) + commands.prefix(5).map(IndexedOverviewAction.command)
-        let actions: [IndexedOverviewAction]
-        if structured.isEmpty {
-            actions = try Row.fetchAll(db, sql: """
-                SELECT kind,ts,CASE WHEN length(CAST(tool_name AS BLOB))<=16384 THEN tool_name END AS tool_name,
-                       CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
-                FROM events WHERE session_id=? AND kind IN ('tool_call','tool_result')
-                ORDER BY seq DESC,id DESC LIMIT 5
-                """, arguments: [id]).map { row in
-                    guard let kind = EventKind(rawValue: row["kind"]) else { throw StoreError.invalidStoredValue }
-                    return .tool(kind: kind, name: row["tool_name"], text: row["preview"], timestamp: row["ts"])
-                }
-        } else {
-            actions = structured.enumerated().sorted {
-                $0.element.time == $1.element.time ? $0.offset < $1.offset : $0.element.time > $1.element.time
-            }.prefix(5).map(\.element)
-        }
-        let topics = try String.fetchAll(db, sql: """
+        let actions = try overviewActions(in: id, structured: structured, db: db)
+        let candidates = try String.fetchAll(db, sql: """
             SELECT term FROM session_keywords WHERE session_id=? AND length(CAST(term AS BLOB))<=512
             ORDER BY weight DESC,term LIMIT 20
             """, arguments: [id])
+        let topics = try overviewSearchableTopics(candidates, in: id, db: db)
 
         return try .init(summary: summary.flatMap { $0.isEmpty ? nil : $0 } ?? latestText(.summary),
                          lastPrompt: latestText(.user), lastReply: latestText(.assistant),
                          topics: topics, recentActions: actions, files: files, commands: commands)
+    }
+
+    private static func overviewActions(in id: Int64, structured: [IndexedOverviewAction], db: Database)
+    throws -> [IndexedOverviewAction] {
+        // Each candidate structured row can replace at most one call. After
+        // those matches there are still enough rows to choose the newest five.
+        let rows = try Row.fetchCursor(db, sql: """
+            SELECT kind,ts,CASE WHEN length(CAST(tool_name AS BLOB))<=16384 THEN tool_name END AS tool_name,
+                   CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
+            FROM events WHERE session_id=? AND kind IN ('tool_call','tool_result')
+            ORDER BY ts DESC,seq DESC,id DESC LIMIT ?
+            """, arguments: [id, 5 + structured.count])
+        var unpaired = structured
+        var tools: [IndexedOverviewAction] = []
+        while tools.count < 5, let row = try rows.next() {
+            guard let kind = EventKind(rawValue: row["kind"]) else { throw StoreError.invalidStoredValue }
+            let name: String? = row["tool_name"]
+            let text: String? = row["preview"]
+            let time: Int64 = row["ts"]
+            if kind == .toolCall, time > 0, let name, let text,
+               let match = unpaired.firstIndex(where: { $0.time == time && represents($0, tool: name, text: text) }) {
+                unpaired.remove(at: match)
+            } else {
+                tools.append(.tool(kind: kind, name: name, text: text, timestamp: time))
+            }
+        }
+        return (structured + tools).enumerated().sorted {
+            $0.element.time == $1.element.time ? $0.offset < $1.offset : $0.element.time > $1.element.time
+        }.prefix(5).map(\.element)
+    }
+
+    private static func represents(_ action: IndexedOverviewAction, tool: String, text: String) -> Bool {
+        let name = tool.lowercased()
+        switch action {
+        case .file(let row):
+            let operation = name == "multiedit" ? "edit" : name
+            return ["read", "edit", "write", "delete"].contains(operation) &&
+                operation == row.operation && row.path.utf8.elementsEqual(text.utf8)
+        case .command(let row):
+            return ["bash", "exec_command", "shell", "run_command"].contains(name) &&
+                row.text.utf8.elementsEqual(text.utf8)
+        case .tool:
+            return false
+        }
+    }
+
+    private static func overviewMessage(in id: Int64, agent: AgentKind, kind: EventKind, db: Database) throws -> String? {
+        guard let latest = try Row.fetchOne(db, sql: """
+            SELECT seq,dedupe_key,CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
+            FROM events WHERE session_id=? AND kind=? AND text IS NOT NULL AND text<>''
+            ORDER BY seq DESC,id DESC LIMIT 1
+            """, arguments: [id, kind.rawValue]) else { return nil }
+        let body: String? = latest["preview"]
+        guard body != nil, agent == .claudeCode, kind == .user || kind == .assistant,
+              let record = claudeBlock(latest["dedupe_key"]) else { return body }
+
+        // Match the complete physical record key, not just sequence:
+        // copied/replayed transcripts can carry other records at the same seq.
+        let rows = try Row.fetchCursor(db, sql: """
+            SELECT dedupe_key,CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
+            FROM events WHERE session_id=? AND kind=? AND seq=? AND text IS NOT NULL
+              AND substr(dedupe_key,1,length(?))=? COLLATE BINARY
+              AND instr(substr(dedupe_key,length(?) + 1),':')=0
+            LIMIT 241
+            """, arguments: [id, kind.rawValue, latest["seq"] as Int64, record.prefix, record.prefix, record.prefix])
+        var pieces: [(Int, String)] = []
+        var bytes = 0
+        while let row = try rows.next() {
+            guard let block = claudeBlock(row["dedupe_key"]) else { continue }
+            guard let text: String = row["preview"], pieces.count < 240,
+                  text.utf8.count <= 1_048_576 - bytes else { return nil }
+            bytes += text.utf8.count
+            pieces.append((block.index, text))
+        }
+        // Do not insert delimiters before masking; a credential can straddle blocks.
+        return pieces.sorted { $0.0 < $1.0 }.map { $0.1 }.joined()
+    }
+
+    private static func claudeBlock(_ key: String) -> (prefix: String, index: Int)? {
+        guard key.hasPrefix("claude:event:"), let colon = key.lastIndex(of: ":") else { return nil }
+        let suffix = key[key.index(after: colon)...]
+        guard let index = Int(suffix), (0..<240).contains(index), String(index) == suffix else { return nil }
+        return (String(key[...colon]), index)
     }
 
     private static func overviewFiles(in id: Int64, order: String, limit: Int, db: Database) throws -> [IndexedOverviewFile] {

@@ -127,11 +127,14 @@ and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 ## DEV-046 — Read the Overview from the owned index
 
 A session Overview observes one bounded database snapshot. Prefer the
-recorded summary, prompt, reply, file touches and command results; use
-normalized tool actions when structured actions are absent. Mask complete
-indexed fields before producing excerpts. Omit oversized fields that cannot
-be read within the overview budget. Show available catalog topic terms only
-when supported by the masked display sample. Searching still opens the
+recorded summary, prompt, reply, file touches and command results. Rebuild
+Claude text blocks from the same physical record before masking and making
+an excerpt. Use the newest actions across structured and normalized records.
+Each structured row replaces at most one call by timestamp, exact payload
+and tool kind so repeat calls and tool results survive.
+Omit oversized fields rather than clipping before masking. Catalog topic
+terms must occur in the masked sample and match this session via the same
+literal query the chip starts. Searching still opens the
 transcript, and the Overview does not read working directories or execute
 commands.
 

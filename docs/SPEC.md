@@ -709,10 +709,11 @@ Shown on the session Overview tab and on the project page:
 4. The last 5 actions: files changed (with +/- lines), commands run (with result and duration).
 5. Current branch and last activity time.
 
-The Overview reads a bounded snapshot of one session's index. If the index
-does not yet have structured file or command actions, show recorded tool
-actions. Mask complete fields before shortening them for display. Omit
-oversized fields instead of clipping unmasked text.
+The Overview reads a bounded snapshot of one session's index. Preserve the
+order of text blocks within the latest recorded message. Include recent tool
+actions that have no matching structured record. Mask complete fields before
+shortening them for display. Omit oversized fields instead of clipping
+unmasked text. A topic chip must be able to retrieve its own session.
 
 ### 10.4 Status inference
 
