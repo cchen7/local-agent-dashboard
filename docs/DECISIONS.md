@@ -99,3 +99,13 @@ reassigned. All six size/appearance combinations were executed and visually chec
 The owner removed Markdown/JSON session export from the product scope. Full
 transcripts remain viewable in the app, and Copy Resume Command and Show in
 Finder remain available. No entitlement change is needed.
+
+## DEV-036 — Observe indexed sessions and one transcript page
+
+The Sessions view observes committed metadata and the selected 128-record
+transcript page separately. A moved or deleted paging anchor, or an older/newer
+page emptied by a rewrite, restarts the transcript from the first page. Mask
+display values before formatting; raw transcript data stays in the app's index. An explicit
+reveal applies to one entry and expires after ten seconds, when the entry
+leaves the view, or when the app loses focus. Markdown does not open links or
+load images from transcripts.

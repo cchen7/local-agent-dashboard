@@ -65,6 +65,38 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    func testIndexedSessionsKeepCredentialsMaskedAndPageWithinSelection() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
+        let first = window.staticTexts["API_TOKEN=••••••"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        let raw = window.staticTexts["API_TOKEN=synthetic-preview-only"]
+        XCTAssertFalse(raw.exists)
+        window.buttons["Reveal Credentials Briefly"].click()
+        XCTAssertTrue(raw.waitForExistence(timeout: 3))
+        window.buttons["Hide Credentials"].click()
+        XCTAssertTrue(first.waitForExistence(timeout: 3))
+        window.buttons["Newer Messages"].click()
+        XCTAssertTrue(window.staticTexts["合成转录 · Synthetic message 128"].waitForExistence(timeout: 5))
+        XCTAssertFalse(first.exists)
+        window.staticTexts["Review synthetic documentation"].click()
+        XCTAssertTrue(window.staticTexts["Documentation preview"].waitForExistence(timeout: 5))
+        XCTAssertFalse(window.staticTexts["合成转录 · Synthetic message 128"].exists)
+    }
+
+    func testPopulatedSessionAtAllSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance, populated: true)
+                XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
+                XCTAssertTrue(window.staticTexts["API_TOKEN=••••••"].waitForExistence(timeout: 5))
+                let name = "sessions-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                try awaitVisualReviewIfRequested(caseName: name, frame: window.frame)
+                app.terminate()
+            }
+        }
+    }
+
     func testMenuPanelReopensClosedDashboard() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
         window.buttons[XCUIIdentifierCloseWindow].click()
@@ -93,9 +125,10 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(element("empty.sessions").waitForExistence(timeout: 3))
     }
 
-    private func launch(size: CGSize, appearance: String) throws -> XCUIElement {
+    private func launch(size: CGSize, appearance: String, populated: Bool = false) throws -> XCUIElement {
         app.launchArguments = ["--synthetic", "--window-size", "\(Int(size.width))x\(Int(size.height))", "--appearance", appearance,
                                "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        if populated { app.launchArguments.append("--synthetic-sessions") }
         app.launch()
         app.activate()
         let window = app.windows["dashboardWindow"]

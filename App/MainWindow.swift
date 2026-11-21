@@ -14,23 +14,38 @@ struct MainWindow: View {
                         .accessibilityIdentifier("empty.tokens")
                         .navigationTitle("Token Usage")
                 }
-            } else {
+            } else if model.page == .projects {
                 NavigationSplitView {
                     sidebar
                 } content: {
-                    EmptyPanel(title: model.page == .projects ? "No projects yet" : "No sessions yet",
-                               symbol: model.page == .projects ? "folder" : "bubble.left.and.text.bubble.right",
+                    EmptyPanel(title: "No projects yet", symbol: "folder",
                                message: "Your local library is empty.")
-                        .accessibilityIdentifier(model.page == .projects ? "empty.projects" : "empty.sessions")
+                        .accessibilityIdentifier("empty.projects")
                         .navigationSplitViewColumnWidth(min: 300, ideal: 356, max: 420)
-                        .navigationTitle(Text((model.page ?? .sessions).title))
+                        .navigationTitle("Projects")
                 } detail: {
-                    EmptyPanel(title: "Your private, local dashboard", symbol: "lock.shield",
-                               message: "Zero network. Read-only sources. Everything stays on this Mac.")
-                        .accessibilityIdentifier("empty.detail")
+                    emptyDetail
+                }
+            } else {
+                GeometryReader { geometry in
+                    NavigationSplitView {
+                        sidebar
+                    } content: {
+                        sessionList
+                            .navigationSplitViewColumnWidth(min: 300, ideal: preferredListWidth(geometry.size.width), max: 420)
+                            .navigationTitle("Sessions")
+                    } detail: {
+                        if let session = model.selectedSession, let store = model.store {
+                            SessionTranscript(session: session, store: store)
+                                .id(session.id)
+                        } else {
+                            emptyDetail
+                        }
+                    }
                 }
             }
         }
+        .task(id: model.store != nil) { await model.observeSessionIndex() }
         .overlay(alignment: .bottom) {
             if model.storageFailed {
                 Label("Storage could not be opened. Quit and try again.", systemImage: "exclamationmark.triangle")
@@ -43,6 +58,42 @@ struct MainWindow: View {
                     .accessibilityIdentifier("openSettings")
             }
         }
+    }
+
+    @ViewBuilder private var sessionList: some View {
+        if model.sessionIndexFailed {
+            EmptyPanel(title: "Could not read the session list", symbol: "exclamationmark.triangle",
+                       message: "Open the window again to retry.")
+        } else if !model.sessionIndexLoaded && !model.storageFailed {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.sessions.isEmpty {
+            EmptyPanel(title: "No sessions yet", symbol: "bubble.left.and.text.bubble.right",
+                       message: "Your local library is empty.")
+                .accessibilityIdentifier("empty.sessions")
+        } else {
+            List(selection: $model.selectedSessionID) {
+                ForEach(model.sessions) { session in
+                    SessionListCell(session: session).tag(session.id)
+                }
+            }
+            .accessibilityIdentifier("sessions.list")
+        }
+    }
+
+    @ViewBuilder private var emptyDetail: some View {
+        if model.sessions.isEmpty || model.page == .projects {
+            EmptyPanel(title: "Your private, local dashboard", symbol: "lock.shield",
+                       message: "Zero network. Read-only sources. Everything stays on this Mac.")
+                .accessibilityIdentifier("empty.detail")
+        } else {
+            EmptyPanel(title: "Select a session", symbol: "bubble.left.and.text.bubble.right",
+                       message: "Choose an indexed session to read its transcript.")
+        }
+    }
+
+    private func preferredListWidth(_ windowWidth: CGFloat) -> CGFloat {
+        if windowWidth <= 1120 { return 300 + 56 * min(1, max(0, (windowWidth - 960) / 160)) }
+        return 356 + 64 * min(1, max(0, (windowWidth - 1120) / 320))
     }
 
     private var sidebar: some View {
