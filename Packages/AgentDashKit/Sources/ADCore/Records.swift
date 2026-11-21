@@ -120,4 +120,6 @@ public enum NormalizedRecord: Equatable, Sendable {
     case session(SessionRecord)
     case event(EventRecord)
     case tokens(TokenEvent)
+    /// Reconcile an empty legacy marker in the app-owned index during replay.
+    case removeEmptyPlaceholder(session: SessionKey, fileID: Int64, sequence: Int64, dedupeKey: String)
 }

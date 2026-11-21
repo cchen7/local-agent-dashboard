@@ -22,14 +22,28 @@ public struct JSONLFrame: Sendable {
 }
 
 public struct JSONLDecodeContext: Sendable {
+    /// Previously committed bytes of the same source, now replayed with a newer parser.
+    public struct ReplayedPrefix: Sendable {
+        public let parserVersion: Int
+        public let endOffset: Int64
+
+        public init(parserVersion: Int, endOffset: Int64) {
+            self.parserVersion = parserVersion
+            self.endOffset = endOffset
+        }
+    }
+
     public let fileID: Int64
     public let previousTimestamp: Int64?
     public let state: Data?
 
-    public init(fileID: Int64, previousTimestamp: Int64?, state: Data?) {
+    public let replayedPrefix: ReplayedPrefix?
+
+    public init(fileID: Int64, previousTimestamp: Int64?, state: Data?, replayedPrefix: ReplayedPrefix? = nil) {
         self.fileID = fileID
         self.previousTimestamp = previousTimestamp
         self.state = state
+        self.replayedPrefix = replayedPrefix
     }
 }
 
@@ -41,12 +55,15 @@ public struct DecodedJSONLFrame: Sendable {
     public let timestamp: Int64?
     public let state: Data?
     public let isUnknown: Bool
+    /// A recognized record was recovered from a frame that exceeded the prefix limit.
+    public let recoveredOversizedRecord: Bool
 
     public init(records: [NormalizedRecord] = [], timestamp: Int64? = nil,
-                state: Data? = nil, isUnknown: Bool = false) {
+                state: Data? = nil, isUnknown: Bool = false, recoveredOversizedRecord: Bool = false) {
         self.records = records
         self.timestamp = timestamp
         self.state = state
         self.isUnknown = isUnknown
+        self.recoveredOversizedRecord = recoveredOversizedRecord
     }
 }

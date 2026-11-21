@@ -11,6 +11,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         var model: String?
         var started: Int64?
         var last: Int64?
+        var legacyV2EndOffset: Int64?
     }
 
     private let file: SourceFile
@@ -29,7 +30,16 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
     }
 
     public mutating func decode(_ frame: JSONLFrame, context: JSONLDecodeContext) throws -> DecodedJSONLFrame {
-        if Self.isEarlySnapshot(frame.bytes) { return .init(state: context.state) }
+        let prior = load(context.state)
+        var metadata = prior
+        let legacyEnd = context.replayedPrefix.flatMap { $0.parserVersion == 2 ? $0.endOffset : nil }
+            ?? prior.legacyV2EndOffset
+        // Carry the old committed boundary through batch commits and a restart.
+        // On rewrite, ingestion starts without the old decoder state or prefix.
+        metadata.legacyV2EndOffset = legacyEnd.flatMap { frame.endOffset < $0 ? $0 : nil }
+        if Self.isEarlySnapshot(frame.bytes) {
+            return .init(state: encodedState(metadata, prior: prior, preserving: context.state))
+        }
         let object = frame.isTruncated ? nil : (try? JSONSerialization.jsonObject(with: frame.bytes)) as? [String: Any]
         if case .history = input { return history(frame, row: object, context: context) }
 
@@ -47,10 +57,8 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         let parsedTime = timestamp(row["timestamp"])
         let time = parsedTime ?? context.previousTimestamp
         if type == "file-history-snapshot" || type == "queue-operation" || type == "attachment" {
-            return .init(timestamp: parsedTime, state: context.state)
+            return .init(timestamp: parsedTime, state: encodedState(metadata, prior: prior, preserving: context.state))
         }
-        let prior = load(context.state)
-        var metadata = prior
         let message = row["message"] as? [String: Any] ?? [:]
         // A subagent's sessionId identifies its parent; only a primary
         // transcript can inherit rows from another primary session.
@@ -69,7 +77,8 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             metadata.last = max(metadata.last ?? time, time)
         }
 
-        let eventID = Self.id(row["uuid"]) ?? "file:\(file.sourceID):\(file.relativePath):\(frame.sequence)"
+        func fileEventID() -> String { "file:\(file.sourceID):\(file.relativePath):\(frame.sequence)" }
+        let eventID = Self.id(row["uuid"]) ?? fileEventID()
         var records: [NormalizedRecord] = [
             .session(.init(key: key, sourceID: file.sourceID, fileID: context.fileID, environment: environment,
                            cwd: metadata.cwd, startedAt: metadata.started, lastEventAt: metadata.last,
@@ -153,8 +162,16 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                 !prefix.contains("\"thinking\"") && !prefix.contains("\"redacted_thinking\"") ? prefix : ""
             records.append(event(.unknown, Self.bounded(safePrefix, bytes: 2048), index: 240))
         }
-        let state = metadata == prior && context.state != nil ? context.state : encode(metadata)
-        return .init(records: records, timestamp: parsedTime, state: state, isUnknown: unknown)
+        if frame.isTruncated, recoveredToolResult, let legacyEnd, frame.endOffset <= legacyEnd,
+           try ClaudeV2OversizedJSON.lostRecord(from: frame) {
+            // v2 could not read the recorded owner or UUID in this case. It
+            // indexed an empty marker under this physical file's session.
+            records.append(.removeEmptyPlaceholder(session: key, fileID: context.fileID, sequence: frame.sequence,
+                                                   dedupeKey: "claude:event:\(fileEventID()):240"))
+        }
+        let state = encodedState(metadata, prior: prior, preserving: context.state)
+        return .init(records: records, timestamp: parsedTime, state: state, isUnknown: unknown,
+                     recoveredOversizedRecord: frame.isTruncated && recoveredToolResult)
     }
 
     private func history(_ frame: JSONLFrame, row: [String: Any]?,
@@ -178,6 +195,10 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         guard let state else { return Metadata() }
         if let cachedMetadata, cachedMetadata.0 == state { return cachedMetadata.1 }
         return (try? JSONDecoder().decode(Metadata.self, from: state)) ?? Metadata()
+    }
+
+    private mutating func encodedState(_ metadata: Metadata, prior: Metadata, preserving state: Data?) -> Data? {
+        metadata == prior && state != nil ? state : encode(metadata)
     }
 
     private mutating func encode(_ metadata: Metadata) -> Data? {

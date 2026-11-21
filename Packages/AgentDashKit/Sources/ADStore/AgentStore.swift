@@ -161,6 +161,16 @@ public final class AgentStore: Sendable {
             case .session(let session): try save(session, db: db)
             case .event(let event): try save(event, db: db)
             case .tokens(let event): try save(event, db: db)
+            case let .removeEmptyPlaceholder(session, fileID, sequence, dedupeKey):
+                try db.cachedStatement(sql: """
+                    DELETE FROM events
+                    WHERE dedupe_key=? AND seq=? AND kind='unknown' AND text=''
+                        AND tool_name IS NULL AND meta_json IS NULL AND blob_id IS NULL
+                        AND session_id IN (
+                            SELECT id FROM sessions WHERE agent=? AND native_id=? AND file_id=?
+                                AND source_deleted_at IS NULL
+                        )
+                    """).execute(arguments: [dedupeKey, sequence, session.agent.rawValue, session.nativeID, fileID])
             }
         }
     }
