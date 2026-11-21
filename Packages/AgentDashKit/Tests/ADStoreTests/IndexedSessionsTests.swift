@@ -57,6 +57,37 @@ func observedTranscriptTracksWritesAndCursorValidity() async throws {
     }
 }
 
+@Test("NFR-9: a live directional page emptied by a rewrite restarts at a valid page",
+      .timeLimit(.minutes(1)), arguments: [false, true])
+func observedTranscriptRecoversWhenOnlyTheVisibleEventMoves(older: Bool) async throws {
+    let fixture = try BrowserStoreFixture()
+    defer { fixture.remove() }
+    let session = fixture.session("synthetic-moving", startedAt: 10)
+    func event(_ id: String, _ sequence: Int64) -> NormalizedRecord {
+        .event(.init(session: session.key, sequence: sequence, timestamp: 100,
+                     kind: .assistant, text: id, dedupeKey: id))
+    }
+
+    try fixture.store.write([.session(session), event("anchor", 10), event("moving", older ? 5 : 15)])
+    let start = try #require(try fixture.store.transcriptPage(in: session.key,
+        request: older ? .last : .first, limit: 1))
+    #expect(start.events.map(\.dedupeKey) == ["anchor"])
+    let cursor = try #require(older ? start.older : start.newer)
+    let request: TranscriptPageRequest = older ? .before(cursor) : .after(cursor)
+    var updates = try fixture.store.transcriptPageUpdates(in: session.key, request: request, limit: 1).makeAsyncIterator()
+    let initial = try await updates.next()
+    #expect((initial ?? nil)?.events.map(\.dedupeKey) == ["moving"])
+
+    try fixture.store.write([event("moving", older ? 15 : 5)])
+    // The anchor is still valid for a one-off read, but this live range has emptied.
+    #expect(try fixture.store.transcriptPage(in: session.key, request: request, limit: 1)?.events.isEmpty == true)
+    await #expect(throws: TranscriptPagingError.staleCursor) { _ = try await updates.next() }
+    let restarted = try #require(try fixture.store.transcriptPage(in: session.key, limit: 1))
+    #expect(restarted.events.count == 1)
+    #expect(restarted.newer != nil)
+    #expect(try fixture.store.events(in: session.key).count == 2)
+}
+
 private struct BrowserStoreFixture {
     let directory: URL
     let store: AgentStore
