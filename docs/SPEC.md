@@ -938,9 +938,11 @@ All user-facing strings go through a String Catalog (`Localizable.xcstrings`). S
 Mask common secret formats at display time (e.g. `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox[bp]-…`, `-----BEGIN … PRIVATE KEY-----`, and `.env`-style assignments to variables whose names end in KEY, TOKEN, SECRET or PASSWORD) as `••••••`; click to reveal temporarily. Rules live in `ADPrivacy` with unit tests. v1 masks only in the UI and keeps the original text in the index (so users can still search their own config keys); "also strip at index time" is a setting.
 
 Apply the display projection to raw text before rendering Markdown or snippets.
-Keep dotenv names and comments visible; when a quoted secret or private-key
-block is truncated, hide its remaining content. The projection leaves the
-stored transcript untouched and is not a data sanitization tool.
+Keep dotenv names and trailing comments visible. Single quotes, double
+quotes and backticks can enclose multiline values and embedded hashes. When a
+quoted secret or private-key block is truncated, hide its remaining content.
+The projection leaves the stored transcript untouched and is not a data
+sanitization tool.
 
 ### 12.3 Exclusions
 
