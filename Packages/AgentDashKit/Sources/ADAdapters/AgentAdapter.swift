@@ -3,7 +3,7 @@ import ADCore
 
 /// A per-file decoder consumes only the complete frames supplied by ingestion.
 public protocol AgentFileDecoder {
-    mutating func decode(_ frame: JSONLFrame, context: JSONLDecodeContext) -> DecodedJSONLFrame
+    mutating func decode(_ frame: JSONLFrame, context: JSONLDecodeContext) throws -> DecodedJSONLFrame
 }
 
 /// Normalize local JSONL without opening or writing the app-owned index.

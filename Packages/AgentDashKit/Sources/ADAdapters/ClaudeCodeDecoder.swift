@@ -28,7 +28,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         plainDate.formatOptions = [.withInternetDateTime]
     }
 
-    public mutating func decode(_ frame: JSONLFrame, context: JSONLDecodeContext) -> DecodedJSONLFrame {
+    public mutating func decode(_ frame: JSONLFrame, context: JSONLDecodeContext) throws -> DecodedJSONLFrame {
         if Self.isEarlySnapshot(frame.bytes) { return .init(state: context.state) }
         let object = frame.isTruncated ? nil : (try? JSONSerialization.jsonObject(with: frame.bytes)) as? [String: Any]
         if case .history = input { return history(frame, row: object, context: context) }
@@ -42,7 +42,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         case .history: return .init(state: context.state, isUnknown: true)
         }
 
-        let row = object ?? [:]
+        let row = frame.isTruncated ? try ClaudeOversizedJSON.row(from: frame) ?? [:] : object ?? [:]
         let type = row["type"] as? String
         let parsedTime = timestamp(row["timestamp"])
         let time = parsedTime ?? context.previousTimestamp
@@ -52,10 +52,13 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         let prior = load(context.state)
         var metadata = prior
         let message = row["message"] as? [String: Any] ?? [:]
-        // A resumed transcript can contain actual rows from a different session.
-        // Their events dedupe globally, but their workspace must not replace this file's.
-        let recordedSession = Self.id(row["sessionId"]).flatMap(UUID.init(uuidString:))
-        if file.role == .subagent || recordedSession == nil || recordedSession?.uuidString.lowercased() == key.nativeID {
+        // A subagent's sessionId identifies its parent; only a primary
+        // transcript can inherit rows from another primary session.
+        let recordedID = file.role == .session
+            ? Self.id(row["sessionId"]).flatMap(UUID.init(uuidString:))?.uuidString.lowercased() : nil
+        let owner = recordedID.map { SessionKey(agent: .claudeCode, nativeID: $0) } ?? key
+        let ownership: RecordedSessionOwnership? = recordedID.map { $0 == key.nativeID ? .original : .inherited }
+        if ownership != .inherited {
             metadata.cwd = Self.metadata(row["cwd"], maximum: 4096) ?? metadata.cwd
             metadata.branch = Self.metadata(row["gitBranch"], maximum: 1024) ?? metadata.branch
             metadata.version = Self.metadata(row["version"], maximum: 128) ?? metadata.version
@@ -73,23 +76,30 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                            gitBranch: metadata.branch, cliVersion: metadata.version, model: metadata.model,
                            parentNativeID: parent))
         ]
+        if ownership == .inherited {
+            records.append(.session(.init(key: owner, sourceID: file.sourceID, environment: environment,
+                                          referenceOnly: true)))
+        }
         func event(_ kind: EventKind, _ body: String, index: Int = 0, tool: String? = nil,
                    metadata: String? = nil) -> NormalizedRecord {
-            .event(.init(session: key, sequence: frame.sequence, timestamp: time ?? 0, kind: kind,
+            .event(.init(session: owner, sequence: frame.sequence, timestamp: time ?? 0, kind: kind,
                          toolName: tool, text: body, metadataJSON: metadata,
-                         dedupeKey: "claude:event:\(eventID):\(index)"))
+                         dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership))
         }
 
         var unknown = false
+        var recoveredToolResult = false
         switch type {
         case "user", "assistant":
             let isUser = type == "user"
             let isMeta = (row["isMeta"] as? Bool) == true
-            if let text = message["content"] as? String {
+            if !frame.isTruncated, let text = message["content"] as? String {
                 if !isUser || !isMeta { records.append(event(isUser ? .user : .assistant, text)) }
             } else if let blocks = message["content"] as? [[String: Any]] {
                 for (index, block) in blocks.prefix(240).enumerated() {
-                    switch block["type"] as? String {
+                    let blockType = block["type"] as? String
+                    if frame.isTruncated && blockType != "tool_result" { continue }
+                    switch blockType {
                     case "text":
                         if let text = block["text"] as? String, !isUser || !isMeta {
                             records.append(event(isUser ? .user : .assistant, text, index: index))
@@ -101,6 +111,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                                              tool: Self.metadata(block["name"], maximum: 128),
                                              metadata: Self.toolMetadata(block["id"])))
                     case "tool_result":
+                        recoveredToolResult = true
                         records.append(event(.toolResult, Self.bounded(Self.contentText(block["content"]), bytes: 2048),
                                              index: index, metadata: Self.toolMetadata(block["tool_use_id"],
                                                  isError: (block["is_error"] as? Bool) == true)))
@@ -114,23 +125,26 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             } else {
                 unknown = true
             }
-            if !isUser, let usage = message["usage"] as? [String: Any], let counts = Self.counts(usage),
+            if !frame.isTruncated, !isUser, let usage = message["usage"] as? [String: Any], let counts = Self.counts(usage),
                let id = Self.id(message["id"]) ?? Self.id(row["requestId"]) ?? Self.id(row["uuid"]) {
-                records.append(.tokens(.init(session: key, timestamp: time ?? 0,
+                records.append(.tokens(.init(session: owner, timestamp: time ?? 0,
                                              model: Self.metadata(message["model"], maximum: 256),
-                                             counts: counts, dedupeKey: "claude:response:\(id)")))
+                                             counts: counts, dedupeKey: "claude:response:\(id)", recordedOwnership: ownership)))
             }
         case "summary":
-            if let text = row["summary"] as? String { records.append(event(.summary, text)) }
+            if !frame.isTruncated, let text = row["summary"] as? String { records.append(event(.summary, text)) }
             else { unknown = true }
         case "system":
-            let text = Self.contentText(row["content"])
-            if !text.isEmpty {
-                records.append(event(row["subtype"] as? String == "error" ? .error : .system, text))
+            if !frame.isTruncated {
+                let text = Self.contentText(row["content"])
+                if !text.isEmpty {
+                    records.append(event(row["subtype"] as? String == "error" ? .error : .system, text))
+                }
             }
         default:
             unknown = true
         }
+        if frame.isTruncated && !recoveredToolResult { unknown = true }
         if unknown {
             let prefix = String(decoding: frame.bytes.prefix(2048), as: UTF8.self)
             // A partial or partially understood message can still contain thinking.

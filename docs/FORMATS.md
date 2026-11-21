@@ -266,11 +266,17 @@ outside the repository; no captured bytes or account details are part of
 these tests. Capture preserves the public `display` field name and masks its
 value just like other prompt text.
 
-The parser uses the transcript filename as its session identity, so copied
-rows cannot replace that session's workspace. The nested subagent directory
-supplies a parent hint; a flat legacy filename alone does not. Response
-fragments can advance a globally deduplicated output count only for the same
-input/cache basis. Prompt history is kept separate from transcripts.
+For primary transcripts, the filename identifies the file's session and a
+valid record `sessionId` identifies the owner of its events and usage. Copied
+rows cannot replace either session's workspace. A nested subagent's session ID
+can identify its parent, so subagent rows stay in their child session.
+Response fragments can advance a globally deduplicated output count only for
+the same input/cache basis. Prompt history is kept separate from transcripts.
+
+Tool results can contain a string or an array of text blocks. Field order
+is not assumed: `tool_use_id`, `is_error` and the outer record identity can
+appear after the large body. Oversized records can retain a tool-result
+preview of at most 2 KiB via bounded reads of the same line.
 
 ## Local source availability for M0
 

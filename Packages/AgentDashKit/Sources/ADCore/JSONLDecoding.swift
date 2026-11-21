@@ -7,12 +7,17 @@ public struct JSONLFrame: Sendable {
     public let isTruncated: Bool
     public let endOffset: Int64
     public let sequence: Int64
+    /// Optional access to the rest of this physical line, relative to the
+    /// end of `bytes` and excluding LF. Reads never cross into the next line.
+    public let readOverflow: (@Sendable (_ offset: Int64, _ count: Int) throws -> Data)?
 
-    public init(bytes: Data, isTruncated: Bool, endOffset: Int64, sequence: Int64) {
+    public init(bytes: Data, isTruncated: Bool, endOffset: Int64, sequence: Int64,
+                readOverflow: (@Sendable (Int64, Int) throws -> Data)? = nil) {
         self.bytes = bytes
         self.isTruncated = isTruncated
         self.endOffset = endOffset
         self.sequence = sequence
+        self.readOverflow = readOverflow
     }
 }
 

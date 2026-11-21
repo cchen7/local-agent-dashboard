@@ -28,15 +28,20 @@ public struct SessionRecord: Codable, Equatable, Sendable {
     public var cliVersion: String?
     public var model: String?
     public var parentNativeID: String?
+    /// An inherited transcript can establish an owner before its own file is found.
+    /// Does not replace metadata already written by that session.
+    public var referenceOnly: Bool?
     /// Create a normalized value without performing file access.
     public init(key: SessionKey, sourceID: Int64, fileID: Int64? = nil, environment: String,
                 cwd: String? = nil, title: String? = nil, startedAt: Int64? = nil,
                 lastEventAt: Int64? = nil, status: SessionStatus = .unknown, gitBranch: String? = nil,
-                cliVersion: String? = nil, model: String? = nil, parentNativeID: String? = nil) {
+                cliVersion: String? = nil, model: String? = nil, parentNativeID: String? = nil,
+                referenceOnly: Bool? = nil) {
         self.key = key; self.sourceID = sourceID; self.fileID = fileID; self.environment = environment
         self.cwd = cwd; self.title = title; self.startedAt = startedAt; self.lastEventAt = lastEventAt
         self.status = status
         self.gitBranch = gitBranch; self.cliVersion = cliVersion; self.model = model; self.parentNativeID = parentNativeID
+        self.referenceOnly = referenceOnly
     }
 }
 
@@ -45,6 +50,10 @@ public enum EventKind: String, Codable, Sendable {
     case user, assistant, toolCall = "tool_call", toolResult = "tool_result", summary, system, error
     case promptHistory = "prompt_history", unknown
 }
+
+/// A producer-supplied session identity, separate from the file being scanned.
+/// A copy can fill absent records, but its physical order is provisional.
+public enum RecordedSessionOwnership: String, Codable, Sendable { case original, inherited }
 
 /// Searchable normalized event. The adapter owns truncation and the globally deterministic dedupe key.
 public struct EventRecord: Codable, Equatable, Sendable {
@@ -56,11 +65,14 @@ public struct EventRecord: Codable, Equatable, Sendable {
     public var text: String?
     public var metadataJSON: String?
     public var dedupeKey: String
+    public var recordedOwnership: RecordedSessionOwnership?
     /// Create a normalized value without performing file access.
     public init(session: SessionKey, sequence: Int64, timestamp: Int64, kind: EventKind,
-                toolName: String? = nil, text: String? = nil, metadataJSON: String? = nil, dedupeKey: String) {
+                toolName: String? = nil, text: String? = nil, metadataJSON: String? = nil, dedupeKey: String,
+                recordedOwnership: RecordedSessionOwnership? = nil) {
         self.session = session; self.sequence = sequence; self.timestamp = timestamp; self.kind = kind
         self.toolName = toolName; self.text = text; self.metadataJSON = metadataJSON; self.dedupeKey = dedupeKey
+        self.recordedOwnership = recordedOwnership
     }
 }
 
@@ -93,11 +105,13 @@ public struct TokenEvent: Codable, Equatable, Sendable {
     public var counts: TokenCounts
     public var precision: TokenPrecision
     public var dedupeKey: String
+    public var recordedOwnership: RecordedSessionOwnership?
     /// Create a normalized value without performing file access.
     public init(session: SessionKey, timestamp: Int64, model: String? = nil, counts: TokenCounts,
-                precision: TokenPrecision = .call, dedupeKey: String) {
+                precision: TokenPrecision = .call, dedupeKey: String, recordedOwnership: RecordedSessionOwnership? = nil) {
         self.session = session; self.timestamp = timestamp; self.model = model
         self.counts = counts; self.precision = precision; self.dedupeKey = dedupeKey
+        self.recordedOwnership = recordedOwnership
     }
 }
 

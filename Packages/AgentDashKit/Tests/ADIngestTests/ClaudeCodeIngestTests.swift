@@ -34,8 +34,8 @@ func claudeDiscoveryKeepsTheSourceBoundary() throws {
     #expect(resume == #"cd '/synthetic/project'\''s folder' && claude --resume 00000000-0000-0000-0000-000000000001"#)
 }
 
-@Test("ADP-CC: repeated and copied responses keep exact cumulative cache-inclusive token totals")
-func claudeGoldenUsageAndTranscript() throws {
+@Test("ADP-CC: copied responses keep exact totals and ownership in both scan orders", arguments: [false, true])
+func claudeGoldenUsageAndTranscript(copyFirst: Bool) throws {
     let box = try ClaudeFixture()
     defer { box.remove() }
     let split = ["ephemeral_5m_input_tokens": 2, "ephemeral_1h_input_tokens": 1]
@@ -64,16 +64,22 @@ func claudeGoldenUsageAndTranscript() throws {
     let uuidFallback = assistant("synthetic-answer-5",
         usage: ["input_tokens": 2, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 4, "output_tokens": 3])
     try box.write([user, first, update, older, tool, meta, requestFallback, uuidFallback], to: box.main)
+    let copyPrompt: [String: Any] = ["type": "user", "sessionId": copyID, "uuid": "synthetic-copy-prompt",
+        "message": ["content": "New synthetic prompt"], "cwd": "/synthetic/continued"]
+    // The copy has different physical positions, which must not overwrite
+    // known original positions even when the copy is imported last.
+    try box.write([copyPrompt, user, first], to: box.copy)
+    if copyFirst {
+        _ = try box.importPath(box.copy, role: .session)
+        #expect(try box.store.events(in: box.key).map(\.text) == ["修复登录问题", "合成回复"])
+    }
     let initial = try box.importPath(box.main, role: .session)
     #expect(initial.completeLines == 8)
     #expect(initial.checkpoint.unknownRecords == 1)
-
-    let copyPrompt: [String: Any] = ["type": "user", "sessionId": copyID, "uuid": "synthetic-copy-prompt",
-        "message": ["content": "New synthetic prompt"], "cwd": "/synthetic/continued"]
-    try box.write([user, first, copyPrompt], to: box.copy)
-    _ = try box.importPath(box.copy, role: .session)
+    if !copyFirst { _ = try box.importPath(box.copy, role: .session) }
     let events = try box.store.events(in: box.key)
     #expect(events.first?.text == "修复登录问题")
+    #expect(events.prefix(2).map(\.sequence) == [0, 1])
     #expect(events.allSatisfy { $0.timestamp == 1_767_225_600_000 })
     #expect(events.allSatisfy { !($0.text ?? "").contains("private synthetic reasoning") })
     #expect(events.allSatisfy { !($0.text ?? "").contains("injected synthetic context") })
@@ -99,6 +105,79 @@ func claudeGoldenUsageAndTranscript() throws {
             WHERE t.dedupe_key='claude:response:synthetic-response-a'
             """)
         #expect(owner == mainID)
+        #expect(try Int64.fetchOne(db, sql: "SELECT file_id FROM sessions WHERE native_id=?",
+                                   arguments: [mainID]) == initial.fileID)
+    }
+}
+
+@Test("ADP-7: oversized tool results retain text and late metadata, and the next line imports",
+      arguments: [false, true])
+func claudeOversizedToolResult(nested: Bool) throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    let beginning = "工具预览 \"quoted\"\n🙂 "
+    let output = beginning + String(repeating: "测", count: 380_000)
+    let content: Any = nested ? [["type": "text", "text": output]] as [[String: String]] : output
+    let call = assistant("oversize-call", usage: [:], content: [
+        ["type": "tool_use", "id": "tool-oversize", "name": "Synthetic", "input": ["command": "synthetic check"]]
+    ])
+    let result: [String: Any] = ["type": "user", "uuid": "oversize-result", "sessionId": mainID, "timestamp": 1234,
+        "message": ["content": [["type": "tool_result", "tool_use_id": "tool-oversize", "is_error": true,
+                                 "content": content]]]]
+    let next: [String: Any] = ["type": "user", "uuid": "after-oversize", "sessionId": mainID,
+        "message": ["content": "next synthetic line"]]
+    try box.write([call, result, next], to: box.main)
+    let imported = try box.importPath(box.main, role: .session)
+    #expect(imported.completeLines == 3)
+    #expect(imported.checkpoint.size > 1_048_576)
+    let rows = try box.store.events(in: box.key)
+    #expect(rows.map(\.kind) == [.toolCall, .toolResult, .user])
+    let tool = try #require(rows.first { $0.kind == .toolResult })
+    let preview = try #require(tool.text)
+    #expect(preview.hasPrefix(beginning))
+    #expect((2046...2048).contains(preview.utf8.count))
+    #expect(tool.metadataJSON == #"{"is_error":true,"tool_use_id":"tool-oversize"}"#)
+    #expect(tool.dedupeKey == "claude:event:oversize-result:0")
+    #expect(tool.timestamp == 1234)
+    #expect(rows.last?.text == "next synthetic line")
+}
+
+@Test("ADP-CC: replay repairs rows previously assigned to the copy without re-billing usage")
+func claudeReplayRepairsFormerOwnership() throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    let copied = assistant("legacy-owner-event", id: "legacy-owner-response",
+                           usage: ["input_tokens": 2, "output_tokens": 3],
+                           content: [["type": "text", "text": "synthetic inherited reply"]])
+    try box.write([copied], to: box.copy)
+    let copyKey = SessionKey(agent: .claudeCode, nativeID: copyID)
+    let sourceID = try #require(box.source.id)
+    let snapshot = try SourceFileReader(root: box.root, relativePath: box.copy).snapshot()
+    let old = Checkpoint(inode: snapshot.inode, size: snapshot.size, offset: snapshot.size, parserVersion: 1,
+                         sequence: 0, previousTimestamp: nil,
+                         device: snapshot.device, modificationTimeNS: snapshot.modificationTimeNS)
+    let fileID = try box.store.upsertFile(.init(sourceID: sourceID, relativePath: box.copy, role: .session), checkpoint: nil)
+    try box.store.write([
+        .session(.init(key: copyKey, sourceID: sourceID, fileID: fileID, environment: "Synthetic")),
+        .event(.init(session: copyKey, sequence: 0, timestamp: 0, kind: .assistant,
+                     text: "synthetic inherited reply", dedupeKey: "claude:event:legacy-owner-event:0")),
+        .tokens(.init(session: copyKey, timestamp: 0, model: "claude-synthetic", counts: .init(inputFresh: 2, output: 4),
+                      dedupeKey: "claude:response:legacy-owner-response")),
+    ], fileID: fileID, checkpoint: old)
+
+    let replay = try box.importPath(box.copy, role: .session)
+    #expect(replay.completeLines == 1)
+    #expect(replay.checkpoint.parserVersion == ClaudeCodeAdapter.parserVersion)
+    #expect(try box.store.events(in: copyKey).isEmpty)
+    #expect(try box.store.events(in: box.key).map(\.text) == ["synthetic inherited reply"])
+    try box.store.databasePool.read { db in
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT s.native_id, t.input_fresh, t.output FROM token_events t JOIN sessions s ON s.id=t.session_id
+            """)
+        #expect(rows.count == 1)
+        #expect((rows.first?["native_id"] as String?) == mainID)
+        #expect((rows.first?["input_fresh"] as Int?) == 2)
+        #expect((rows.first?["output"] as Int?) == 4)
     }
 }
 
