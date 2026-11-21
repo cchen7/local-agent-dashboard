@@ -65,6 +65,20 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    func testSourcesShowsRecordedIndexCounts() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEX_STATUS"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Sources"].click()
+        XCTAssertTrue(settings.staticTexts["source.index.files.1"].wait(for: \.label,
+                                                                       toEqual: "Indexed files: 1 of 2", timeout: 5))
+        XCTAssertEqual(settings.staticTexts["source.index.sessions.1"].label, "Indexed sessions: 1")
+        XCTAssertEqual(settings.staticTexts["source.index.unknown.1"].label, "Unknown records: 3")
+        XCTAssertTrue(settings.staticTexts["Partial files: 1"].exists)
+    }
+
     func testIndexedSessionsKeepCredentialsMaskedAndPageWithinSelection() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
         XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))

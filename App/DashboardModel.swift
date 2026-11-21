@@ -88,6 +88,10 @@ final class DashboardModel {
                 if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
                 }
+                if synthetic && (CommandLine.arguments.contains("--synthetic-index-status") ||
+                    ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEX_STATUS"] == "1") {
+                    try Self.seedIndexStatus(store, in: directory)
+                }
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
                 return (store, try store.sources(), home)
             }.value
@@ -95,6 +99,20 @@ final class DashboardModel {
             sources = result.1
             searchHome = result.2
         } catch { storageFailed = true }
+    }
+
+    nonisolated private static func seedIndexStatus(_ store: AgentStore, in directory: URL) throws {
+        let sourceID = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic indexed source",
+            rootURL: directory.appendingPathComponent("unused-status-root"), environment: "Synthetic"))
+        let fileID = try store.upsertFile(.init(sourceID: sourceID, relativePath: "projects/synthetic.jsonl", role: .session),
+                                         checkpoint: nil)
+        _ = try store.upsertFile(.init(sourceID: sourceID, relativePath: "projects/pending.jsonl", role: .session),
+                                 checkpoint: nil)
+        let session = SessionKey(agent: .claudeCode, nativeID: "preview-source-status")
+        try store.commitFileBatch([
+            .session(.init(key: session, sourceID: sourceID, fileID: fileID, environment: "Synthetic")),
+        ], for: fileID, from: nil, to: .init(inode: 11, size: 20, offset: 15, parserVersion: 1,
+                                             sequence: 3, previousTimestamp: nil, unknownRecords: 3))
     }
 
     func observeSessionIndex() async {
