@@ -49,8 +49,9 @@ struct MainWindow: View {
                 }
                 .searchable(text: $model.sessionSearchText, prompt: Text("Search Sessions"))
                 .task(id: SearchInput(text: model.sessionSearchText, offset: model.sessionSearchOffset,
-                                       ready: model.store != nil)) {
-                    await model.runSessionSearch(model.sessionSearchText, offset: model.sessionSearchOffset)
+                                       ready: model.store != nil)) { [text = model.sessionSearchText,
+                                                                    offset = model.sessionSearchOffset] in
+                    await model.observeSessionSearch(text, offset: offset)
                 }
             }
         }

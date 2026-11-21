@@ -40,6 +40,26 @@ func mixedSearchGroupsAndAnchors() throws {
     #expect(restricted.hits.first?.id != second.hits.first?.id)
 }
 
+@Test("FR-SR: the same query sees new sessions and event-only rewrites", .timeLimit(.minutes(1)))
+func unchangedQueryPicksUpEventOnlyCommits() async throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let session = fixture.session("live", cwd: "/synthetic/work")
+    let query = "登录"
+    var changes = fixture.store.searchIndexChanges().makeAsyncIterator()
+    try #require(try await changes.next() != nil)
+    #expect(try fixture.run(query).matchCount == 0)
+
+    try fixture.store.write([.session(session), fixture.event(session.key, "live-event", 1, "修复登录问题")])
+    try #require(try await changes.next() != nil)
+    #expect(try fixture.run(query).hits.map(\.id) == [session.key])
+
+    // Rewrite the indexed text without changing any row in the session list.
+    try fixture.store.write([fixture.event(session.key, "live-event", 1, "已完成修复")])
+    try #require(try await changes.next() != nil)
+    #expect(try fixture.run(query).matchCount == 0)
+}
+
 @Test("FR-SR: a Shanghai date, file and role filters work together without exposing prompt history by default")
 func queriesUseStructuredFilters() throws {
     let shanghai = try #require(TimeZone(identifier: "Asia/Shanghai"))

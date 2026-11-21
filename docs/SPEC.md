@@ -656,6 +656,7 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 ### 9.1 Behavior (FR-SR)
 
 - Toolbar search field; searches as you type (150 ms debounce); Return pins the query.
+- While a search is open, committed changes to indexed events and search metadata refresh the current result page. Coalesce bursts of changes; restart at the first page if the current result page disappears.
 - Results are grouped by session: "12 matches in 6 sessions". Each session shows its best snippet with highlighted terms.
 - Compute exact totals before limiting the displayed groups. Mask the complete snippet candidate before highlighting or taking an excerpt.
 - Opening a session scrolls the transcript to the first match; "3 of 12" with up/down arrows jumps between matches (already in the prototype).

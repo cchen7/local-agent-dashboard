@@ -35,6 +35,15 @@ public struct IndexedSearchSnapshot: Sendable {
 }
 
 public extension AgentStore {
+    /// Signal once on subscription and again when a search input is committed.
+    /// FTS is maintained by event triggers; search also reads session metadata,
+    /// project names and file touches. The observer doesn't run the query.
+    func searchIndexChanges() -> some AsyncSequence<Void, any Error> & Sendable {
+        ValueObservation.tracking(region: Table("events"), Table("sessions"),
+                                  Table("projects"), Table("file_touches"), fetch: { _ in () })
+            .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
+    }
+
     /// Find and group normalized index records in one read snapshot. The database
     /// returns full display candidates for the selected groups only.
     func searchIndex(_ query: SearchQuery, scope: IndexedSearchScope,

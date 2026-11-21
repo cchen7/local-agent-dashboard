@@ -118,8 +118,8 @@ final class DashboardModel {
         }
     }
 
-    func runSessionSearch(_ text: String, offset: Int) async {
-        guard let store else { return }
+    func observeSessionSearch(_ text: String, offset: Int) async {
+        guard let store, searchIsCurrent(text, offset: offset) else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             if !sessions.contains(where: { $0.id == selectedSessionID }) { selectedSessionID = sessions.first?.id }
             searchForText = nil
@@ -128,33 +128,43 @@ final class DashboardModel {
         }
         do {
             if text != searchForText { try await Task.sleep(for: .milliseconds(150)) }
-            let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
-                                           timeZone: .current, hostHome: searchHome)
-            let limit = Self.sessionSearchPageSize
-            let work = Task.detached(priority: .userInitiated) {
-                try SessionSearch.run(text, in: store, scope: scope, limit: limit, offset: offset)
+            for try await _ in store.searchIndexChanges() {
+                guard searchIsCurrent(text, offset: offset) else { return }
+                let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
+                                               timeZone: .current, hostHome: searchHome)
+                let limit = Self.sessionSearchPageSize
+                let work = Task.detached(priority: .userInitiated) {
+                    try SessionSearch.run(text, in: store, scope: scope, limit: limit, offset: offset)
+                }
+                let found = try await withTaskCancellationHandler {
+                    try await work.value
+                } onCancel: {
+                    work.cancel()
+                }
+                guard searchIsCurrent(text, offset: offset) else { return }
+                if offset > 0 && found.hits.isEmpty {
+                    sessionSearchOffset = 0
+                    return
+                }
+                searchForText = text
+                searchForOffset = offset
+                lastSearchState = .results(found)
+                selectSearchHit(found)
+                // At most one query runs at a time. While it runs or cools
+                // down, the stream retains one wakeup for all pending writes.
+                try await Task.sleep(for: .milliseconds(150))
             }
-            let found = try await withTaskCancellationHandler {
-                try await work.value
-            } onCancel: {
-                work.cancel()
-            }
-            guard !Task.isCancelled, text == sessionSearchText, offset == sessionSearchOffset else { return }
-            if offset > 0 && found.hits.isEmpty {
-                sessionSearchOffset = 0
-                return
-            }
-            searchForText = text
-            searchForOffset = offset
-            lastSearchState = .results(found)
-            selectSearchHit(found)
         } catch {
-            guard !Task.isCancelled, text == sessionSearchText, offset == sessionSearchOffset else { return }
+            guard searchIsCurrent(text, offset: offset) else { return }
             searchForText = text
             searchForOffset = offset
             lastSearchState = error is SearchQuery.Failure || (error as? IndexedSearchFailure) == .invalidFilter
                 ? .invalid : .failed
         }
+    }
+
+    private func searchIsCurrent(_ text: String, offset: Int) -> Bool {
+        !Task.isCancelled && text == sessionSearchText && offset == sessionSearchOffset
     }
 
     func pageSessionSearch(forward: Bool) {

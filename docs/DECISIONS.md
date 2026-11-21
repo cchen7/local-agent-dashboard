@@ -119,4 +119,6 @@ before cropping snippets. Full-text reads may use a reader-local 64 MiB
 SQLite mapping to avoid copying hot pages. Dates use the display time zone;
 `after:` includes the start of that local day and `before:` excludes it.
 Directory filters compare whole components of recorded paths; the host
-home is used only for `~/`.
+home is used only for `~/`. Observe commits to every table read by search,
+including edits that change only event text. Refresh the same query and offset
+with at most one query running and one pending refresh.
