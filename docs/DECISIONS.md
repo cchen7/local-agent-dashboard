@@ -128,8 +128,9 @@ and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 
 A session Overview observes one bounded database snapshot. Prefer the
 recorded summary, prompt, reply, file touches and command results. Rebuild
-Claude text blocks from the same physical record before masking and making
-an excerpt. Use the newest actions across structured and normalized records.
+Claude assistant text by producer message ID across physical records when
+available, and otherwise from the same physical record, before masking and
+making an excerpt. Use the newest actions across structured and normalized records.
 Each structured row replaces at most one call by timestamp, exact payload
 and tool kind so repeat calls and tool results survive.
 Omit oversized fields rather than clipping before masking. Catalog topic

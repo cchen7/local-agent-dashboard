@@ -710,7 +710,9 @@ Shown on the session Overview tab and on the project page:
 5. Current branch and last activity time.
 
 The Overview reads a bounded snapshot of one session's index. Preserve the
-order of text blocks within the latest recorded message. Include recent tool
+order of text blocks within the latest recorded message. Join Claude
+assistant fragments across lines when they share a producer message ID.
+Include recent tool
 actions that have no matching structured record. Mask complete fields before
 shortening them for display. Omit oversized fields instead of clipping
 unmasked text. A topic chip must be able to retrieve its own session.

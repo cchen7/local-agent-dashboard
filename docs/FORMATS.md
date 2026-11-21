@@ -273,10 +273,15 @@ can identify its parent, so subagent rows stay in their child session.
 Response fragments can advance a globally deduplicated output count only for
 the same input/cache basis. Prompt history is kept separate from transcripts.
 
-Normalized text blocks share the physical record's sequence and key stem
+Assistant records can share a producer `message.id` across JSONL lines
+with distinct record UUIDs (§5.4). Text events preserve that ID separately
+from the event dedupe key; token accounting continues to use its existing
+message ID rules. Normalized text blocks share the physical record's sequence and key stem
 (`claude:event:<record identity>:`); the final numeric component orders the
-blocks. The Overview rejoins text from that record before masking and
-excerpting it. Distinct records can share the sequence after replay.
+blocks. The Overview rejoins assistant text across records when the ID is
+available, or within one physical record otherwise, before masking and
+excerpting it. Version 4 replays older file checkpoints to add the ID
+without changing event keys.
 
 Tool results can contain a string or an array of text blocks. Field order
 is not assumed: `tool_use_id`, `is_error` and the outer record identity can

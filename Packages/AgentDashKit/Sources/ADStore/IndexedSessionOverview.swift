@@ -134,8 +134,14 @@ public extension AgentStore {
     }
 
     private static func overviewMessage(in id: Int64, agent: AgentKind, kind: EventKind, db: Database) throws -> String? {
+        // Legacy/non-Claude rows can contain other metadata or invalid JSON.
+        let assistantID = """
+            CASE WHEN kind='assistant' AND length(CAST(meta_json AS BLOB))<=4096 AND json_valid(meta_json)
+                 THEN json_extract(meta_json,'$.claude_message_id') END
+            """
         guard let latest = try Row.fetchOne(db, sql: """
-            SELECT seq,dedupe_key,CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
+            SELECT seq,dedupe_key,\(assistantID) AS message_id,
+                   CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
             FROM events WHERE session_id=? AND kind=? AND text IS NOT NULL AND text<>''
             ORDER BY seq DESC,id DESC LIMIT 1
             """, arguments: [id, kind.rawValue]) else { return nil }
@@ -143,26 +149,44 @@ public extension AgentStore {
         guard body != nil, agent == .claudeCode, kind == .user || kind == .assistant,
               let record = claudeBlock(latest["dedupe_key"]) else { return body }
 
-        // Match the complete physical record key, not just sequence:
-        // copied/replayed transcripts can carry other records at the same seq.
+        let selection: String
+        let selectionArgs: StatementArguments
+        if kind == .assistant, let messageID: String = latest["message_id"] {
+            selection = "(\(assistantID))=? COLLATE BINARY"
+            selectionArgs = [messageID]
+        } else {
+            // Old indexes and user prompts have only physical record identity.
+            selection = """
+                seq=? AND substr(dedupe_key,1,length(?))=? COLLATE BINARY
+                      AND instr(substr(dedupe_key,length(?) + 1),':')=0
+                """
+            selectionArgs = [latest["seq"] as Int64, record.prefix, record.prefix, record.prefix]
+        }
         let rows = try Row.fetchCursor(db, sql: """
-            SELECT dedupe_key,CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
-            FROM events WHERE session_id=? AND kind=? AND seq=? AND text IS NOT NULL
-              AND substr(dedupe_key,1,length(?))=? COLLATE BINARY
-              AND instr(substr(dedupe_key,length(?) + 1),':')=0
+            SELECT seq,dedupe_key,CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
+            FROM events WHERE session_id=? AND kind=? AND text IS NOT NULL AND \(selection)
+            ORDER BY seq,id
             LIMIT 241
-            """, arguments: [id, kind.rawValue, latest["seq"] as Int64, record.prefix, record.prefix, record.prefix])
-        var pieces: [(Int, String)] = []
+            """, arguments: [id, kind.rawValue] + selectionArgs)
+        var records: [PhysicalBlockRecord: Int] = [:]
+        var pieces: [(record: Int, index: Int, text: String)] = []
         var bytes = 0
         while let row = try rows.next() {
-            guard let block = claudeBlock(row["dedupe_key"]) else { continue }
-            guard let text: String = row["preview"], pieces.count < 240,
+            guard let block = claudeBlock(row["dedupe_key"]), let text: String = row["preview"], pieces.count < 240,
                   text.utf8.count <= 1_048_576 - bytes else { return nil }
             bytes += text.utf8.count
-            pieces.append((block.index, text))
+            let physical = PhysicalBlockRecord(sequence: row["seq"], key: Array(block.prefix.utf8))
+            let order = records[physical, default: records.count]
+            records[physical] = order
+            pieces.append((order, block.index, text))
         }
         // Do not insert delimiters before masking; a credential can straddle blocks.
-        return pieces.sorted { $0.0 < $1.0 }.map { $0.1 }.joined()
+        return pieces.sorted { ($0.record, $0.index) < ($1.record, $1.index) }.map(\.text).joined()
+    }
+
+    private struct PhysicalBlockRecord: Hashable {
+        let sequence: Int64
+        let key: [UInt8]
     }
 
     private static func claudeBlock(_ key: String) -> (prefix: String, index: Int)? {

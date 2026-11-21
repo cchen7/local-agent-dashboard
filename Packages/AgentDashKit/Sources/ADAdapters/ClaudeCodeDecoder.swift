@@ -102,8 +102,9 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         case "user", "assistant":
             let isUser = type == "user"
             let isMeta = (row["isMeta"] as? Bool) == true
+            let textMetadata = isUser || frame.isTruncated ? nil : Self.messageMetadata(message["id"])
             if !frame.isTruncated, let text = message["content"] as? String {
-                if !isUser || !isMeta { records.append(event(isUser ? .user : .assistant, text)) }
+                if !isUser || !isMeta { records.append(event(isUser ? .user : .assistant, text, metadata: textMetadata)) }
             } else if let blocks = message["content"] as? [[String: Any]] {
                 for (index, block) in blocks.prefix(240).enumerated() {
                     let blockType = block["type"] as? String
@@ -111,7 +112,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                     switch blockType {
                     case "text":
                         if let text = block["text"] as? String, !isUser || !isMeta {
-                            records.append(event(isUser ? .user : .assistant, text, index: index))
+                            records.append(event(isUser ? .user : .assistant, text, index: index, metadata: textMetadata))
                         }
                     case "tool_use":
                         let input = block["input"] as? [String: Any] ?? [:]
@@ -247,6 +248,12 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         return (raw as? [[String: Any]] ?? []).compactMap {
             $0["type"] as? String == "text" ? $0["text"] as? String : nil
         }.joined(separator: "\n")
+    }
+
+    private static func messageMetadata(_ raw: Any?) -> String? {
+        guard let id = Self.id(raw),
+              let data = try? JSONSerialization.data(withJSONObject: ["claude_message_id": id]) else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func toolMetadata(_ id: Any?, isError: Bool = false) -> String? {
