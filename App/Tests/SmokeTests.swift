@@ -97,16 +97,60 @@ final class SmokeTests: XCTestCase {
         }
     }
 
-    func testChineseSearchOpensTheMatchedTranscriptPage() throws {
+    func testChineseSearchStepsAcrossBoundedTranscriptPages() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        openSyntheticChineseSearch()
+        let position = element("transcript.match.position")
+        let previous = window.buttons["Previous Match"]
+        let next = window.buttons["Next Match"]
+        let first = window.staticTexts["修复登录问题 · Synthetic search target"]
+        let second = window.staticTexts["验证登录配置 · Second synthetic search target"]
+        let third = window.staticTexts["完成登录修复 · Final synthetic search target"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertTrue(position.wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+        XCTAssertFalse(previous.isEnabled)
+        XCTAssertTrue(next.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+
+        next.click()
+        XCTAssertTrue(second.waitForExistence(timeout: 5))
+        XCTAssertTrue(position.wait(for: \.label, toEqual: "2 of 3 matches", timeout: 5))
+        XCTAssertFalse(first.exists)
+        next.click()
+        XCTAssertTrue(third.waitForExistence(timeout: 5))
+        XCTAssertTrue(position.wait(for: \.label, toEqual: "3 of 3 matches", timeout: 5))
+        XCTAssertFalse(next.isEnabled)
+
+        previous.click()
+        XCTAssertTrue(second.waitForExistence(timeout: 5))
+        previous.click()
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertTrue(position.wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+        XCTAssertFalse(window.staticTexts["API_TOKEN=synthetic-preview-only"].exists)
+    }
+
+    func testSearchMatchControlsAtAllSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance, populated: true)
+                openSyntheticChineseSearch()
+                XCTAssertTrue(element("transcript.match.position").wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+                let next = window.buttons["Next Match"]
+                XCTAssertTrue(next.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+                XCTAssertTrue(next.isHittable)
+                let name = "search-match-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                try awaitVisualReviewIfRequested(caseName: name, frame: window.frame)
+                app.terminate()
+            }
+        }
+    }
+
+    private func openSyntheticChineseSearch() {
         XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.click()
         search.typeText("登录")
         XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
-        XCTAssertTrue(window.staticTexts["修复登录问题 · Synthetic search target"].waitForExistence(timeout: 5))
-        XCTAssertFalse(window.staticTexts["API_TOKEN=synthetic-preview-only"].exists)
     }
 
     func testMenuPanelReopensClosedDashboard() throws {

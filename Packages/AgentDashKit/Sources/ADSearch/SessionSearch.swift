@@ -41,6 +41,12 @@ public enum SessionSearch {
         return .init(hits: hits, matchCount: snapshot.matchCount, sessionCount: snapshot.sessionCount)
     }
 
+    /// Match navigation uses the same parsed filters and search scope as the list.
+    public static func position(_ raw: String, in store: AgentStore, scope: IndexedSearchScope,
+                                session: SessionKey, around preferred: String? = nil) throws -> IndexedSearchMatchPosition? {
+        try store.searchMatchPosition(SearchQuery.parse(raw), scope: scope, in: session, around: preferred)
+    }
+
     private static let comparison: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
 
     private static func containsAny(_ text: String, terms: [String]) -> Bool {

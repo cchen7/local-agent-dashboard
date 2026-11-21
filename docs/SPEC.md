@@ -660,7 +660,7 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 - While a search is open, committed changes to indexed events and search metadata refresh the current result page. Coalesce bursts of changes; restart at the first page if the current result page disappears.
 - Results are grouped by session: "12 matches in 6 sessions". Each session shows its best snippet with highlighted terms.
 - Compute exact totals before limiting the displayed groups. Mask the complete snippet candidate before highlighting or taking an excerpt.
-- Opening a session scrolls the transcript to the first match; "3 of 12" with up/down arrows jumps between matches (already in the prototype).
+- Opening a session scrolls the transcript to the first match. The up/down buttons move between matching events in that session using transcript order and show the current position. Only a bounded transcript page is loaded at each match. When the index changes, keep the current event if it still matches; otherwise restart at the first match.
 - Sort: relevance (default) / most recent / token volume.
 - A query can be saved as a "Smart Group" in the sidebar.
 

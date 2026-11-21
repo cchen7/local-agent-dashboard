@@ -151,4 +151,8 @@ SQLite mapping to avoid copying hot pages. Dates use the display time zone;
 Directory filters compare whole components of recorded paths; the host
 home is used only for `~/`. Observe commits to every table read by search,
 including edits that change only event text. Refresh the same query and offset
-with at most one query running and one pending refresh.
+with at most one query running and one pending refresh. Transcript navigation
+uses the same filter snapshot as the result list. Resolve the preferred hit,
+ordinal and neighboring keys in one scoped read, ordered by sequence and
+row ID. Search refreshes retain valid selected events and only reseek the
+transcript when the selected event changes.
