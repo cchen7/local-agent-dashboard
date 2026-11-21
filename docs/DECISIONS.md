@@ -96,7 +96,8 @@ reassigned. All six size/appearance combinations were executed and visually chec
 
 ## DEV-038 — Commit JSONL batches against the expected checkpoint
 
-Read from a pinned, read-only descriptor up to its observed size. Preserve
+Read the expected checkpoint before opening the pinned, read-only source
+descriptor, then read the file up to its observed size. Preserve
 newline byte offsets and keep at most a 1 MiB prefix of a physical line.
 The adapter normalizes complete lines; record writes, decoder state and the
 checkpoint share a transaction that rejects stale readers. A changed

@@ -53,12 +53,22 @@ public enum JSONLFileImporter {
     public static func importFile(_ file: SourceFile, authorizedRoot: URL, store: AgentStore,
                                   decode: (JSONLFrame, JSONLDecodeContext) throws -> DecodedJSONLFrame)
     throws -> JSONLImportResult {
+        try importFile(file, authorizedRoot: authorizedRoot, store: store,
+                       snapshot: { try $0.snapshot() }, decode: decode)
+    }
+
+    static func importFile(_ file: SourceFile, authorizedRoot: URL, store: AgentStore,
+                           snapshot: (SourceFileReader) throws -> SourceFileReader.Snapshot,
+                           decode: (JSONLFrame, JSONLDecodeContext) throws -> DecodedJSONLFrame)
+    throws -> JSONLImportResult {
         guard file.parserVersion > 0 else { throw JSONLImportFailure.invalidParserVersion }
         try Task.checkCancellation()
-        let reader = try SourceFileReader(root: authorizedRoot, relativePath: file.relativePath)
-        let initial = try reader.snapshot()
+        // The expected checkpoint must precede the source snapshot. Otherwise a
+        // concurrent append can make older bytes look like a legitimate shrink.
         let fileID = try store.upsertFile(file, checkpoint: nil)
         var saved = try store.checkpoint(for: fileID)
+        let reader = try SourceFileReader(root: authorizedRoot, relativePath: file.relativePath)
+        let initial = try snapshot(reader)
         let resume = saved.flatMap { resumable($0, file: file, snapshot: initial) ? $0 : nil }
         var next = Checkpoint(inode: initial.inode, size: initial.size, offset: resume?.offset ?? 0,
                               parserVersion: file.parserVersion, sequence: resume?.sequence ?? -1,
