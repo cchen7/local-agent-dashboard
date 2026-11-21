@@ -10,6 +10,36 @@ final class SmokeTests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
     override func tearDown() async throws { app.terminate() }
 
+    func testIndexedProjectsTimelineOpensLatestSession() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(element("projects.list").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("projects.timeline").waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["Synthetic checkout verified"].waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["PROJECT_TOKEN=••••••"].exists)
+        XCTAssertFalse(window.staticTexts["PROJECT_TOKEN=synthetic-project-secret"].exists)
+        XCTAssertFalse(window.staticTexts["Synthetic documentation reviewed"].exists)
+        window.buttons["Open Latest Session"].click()
+        XCTAssertTrue(element("session.transcript").waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["Synthetic checkout verified"].exists)
+    }
+
+    func testIndexedProjectsAtAllSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance, projects: true)
+                app.typeKey("2", modifierFlags: .command)
+                XCTAssertTrue(element("projects.detail").waitForExistence(timeout: 5))
+                let latest = window.buttons["Open Latest Session"]
+                XCTAssertTrue(latest.waitForExistence(timeout: 5))
+                XCTAssertTrue(latest.isHittable)
+                let name = "projects-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                try awaitVisualReviewIfRequested(caseName: name, frame: window.frame)
+                app.terminate()
+            }
+        }
+    }
+
     func testEmptyNavigationAndSettingsReopening() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
         for (key, identifier) in [("3", "empty.tokens"), ("2", "empty.projects"), ("1", "empty.sessions")] {
@@ -137,10 +167,12 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(element("empty.sessions").waitForExistence(timeout: 3))
     }
 
-    private func launch(size: CGSize, appearance: String, populated: Bool = false) throws -> XCUIElement {
+    private func launch(size: CGSize, appearance: String, populated: Bool = false,
+                        projects: Bool = false) throws -> XCUIElement {
         app.launchArguments = ["--synthetic", "--window-size", "\(Int(size.width))x\(Int(size.height))", "--appearance", appearance,
                                "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         if populated { app.launchArguments.append("--synthetic-sessions") }
+        if projects { app.launchArguments.append("--synthetic-projects") }
         app.launch()
         app.activate()
         let window = app.windows["dashboardWindow"]

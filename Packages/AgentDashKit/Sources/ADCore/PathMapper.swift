@@ -21,6 +21,12 @@ public enum PathMapper {
     /// the same normalized source fail; equivalent duplicate rules are allowed.
     /// Returns a path string, not a shell-quoted command or an authorized source URL.
     public static func map(_ path: String, using mappings: [PathMapping], hostHome: String? = nil) throws -> String {
+        try mappedPath(path, using: mappings, hostHome: hostHome) ?? path
+    }
+
+    /// Like map, but nil means no rule matched, even if a matching rule could
+    /// produce a path identical to the input.
+    public static func mappedPath(_ path: String, using mappings: [PathMapping], hostHome: String? = nil) throws -> String? {
         var rules: [Rule] = []
         for (index, mapping) in mappings.enumerated() {
             guard let from = absoluteBytes(mapping.from) else { throw Failure.invalidFrom(ruleIndex: index) }
@@ -38,7 +44,7 @@ public enum PathMapper {
                   rule.from.count == 1 || input.count == rule.from.count || input[rule.from.count] == slash else { continue }
             if rule.from.count > (winner?.from.count ?? 0) { winner = rule }
         }
-        guard let winner else { return path }
+        guard let winner else { return nil }
 
         var suffix = input.dropFirst(winner.from.count)
         if suffix.first == slash { suffix = suffix.dropFirst() }

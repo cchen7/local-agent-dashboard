@@ -3,6 +3,16 @@ import Foundation
 /// Supported local agent families; entrypoints and providers are separate metadata.
 public enum AgentKind: String, Codable, CaseIterable, Sendable {
     case claudeCode = "claude_code", codex, copilot, grokBuild = "grok_build"
+
+    /// Folder name beneath the host home for a default local source.
+    public var defaultSourceDirectoryName: String {
+        switch self {
+        case .claudeCode: ".claude"
+        case .codex: ".codex"
+        case .copilot: ".copilot"
+        case .grokBuild: ".grok"
+        }
+    }
 }
 
 /// An in-environment → host-path rule for display and future copy-resume use.
