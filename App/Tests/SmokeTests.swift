@@ -46,6 +46,27 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(pending.waitForNonExistence(timeout: 5))
     }
 
+    func testAddSourceFormRequiresNameAndCancelsWithoutAdding() throws {
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Sources"].click()
+        let add = settings.buttons["source.add"]
+        XCTAssertTrue(add.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        add.click()
+        let name = app.textFields["source.add.name"]
+        let choose = app.buttons["source.add.choose"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertFalse(choose.isEnabled)
+        name.click()
+        name.typeText("Synthetic custom source")
+        XCTAssertTrue(choose.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        app.buttons["Cancel"].firstMatch.click()
+        XCTAssertTrue(name.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(settings.staticTexts["Synthetic custom source"].exists)
+    }
+
     func testNativeWindowGeometry() throws {
         for appearance in ["dark", "light"] {
             for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {

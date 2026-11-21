@@ -4,8 +4,14 @@ import ADCore
 
 /// Store errors deliberately omit paths, record contents, and bookmark bytes.
 public enum StoreError: Error, Equatable, Sendable {
-    case invalidLocation, invalidRelativePath, invalidCheckpoint, invalidTokenCounts
+    case invalidLocation, invalidRelativePath, invalidCheckpoint, invalidTokenCounts, invalidCustomSource
     case missingSession, missingFile, invalidStoredValue, missingMigration, staleCheckpoint
+}
+
+/// A duplicate choice leaves the existing source and all of its children intact.
+public enum CustomSourceRegistration: Equatable, Sendable {
+    case added(Int64)
+    case alreadyRegistered(Int64)
 }
 
 /// App-owned WAL database. The caller must supply a URL in its own container (or a
@@ -46,7 +52,24 @@ public final class AgentStore: Sendable {
     /// Upsert by (agent, root path); returns the stable row ID and never replaces children.
     @discardableResult
     public func upsertSource(_ source: Source) throws -> Int64 {
+        try saveSource(source, replaceExisting: true).id
+    }
+
+    /// Register a caller-supplied read-only bookmark. No root is opened here.
+    /// The caller obtains the bookmark only after the user picks a directory.
+    public func registerCustomSource(_ source: Source) throws -> CustomSourceRegistration {
+        guard Source.isLocalRoot(source.rootURL) else { throw StoreError.invalidLocation }
+        guard case .bookmark(let data) = source.access, !data.isEmpty,
+              !source.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !source.environment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw StoreError.invalidCustomSource }
+        let result = try saveSource(source, replaceExisting: false)
+        return result.changed ? .added(result.id) : .alreadyRegistered(result.id)
+    }
+
+    private func saveSource(_ source: Source, replaceExisting: Bool) throws -> (id: Int64, changed: Bool) {
         guard source.rootURL.isFileURL else { throw StoreError.invalidLocation }
+        let root = source.rootURL.standardizedFileURL.path
         let mappings = String(decoding: try JSONEncoder().encode(source.pathMappings), as: UTF8.self)
         let rules = String(decoding: try JSONEncoder().encode(source.environmentRules), as: UTF8.self)
         let kind: String
@@ -55,19 +78,22 @@ public final class AgentStore: Sendable {
         case .defaultLocation: kind = "default_location"; bookmark = nil
         case .bookmark(let data): kind = "bookmark"; bookmark = data
         }
+        let conflict = replaceExisting ? """
+            DO UPDATE SET label=excluded.label, environment=excluded.environment, path_mappings_json=excluded.path_mappings_json,
+            env_rules_json=excluded.env_rules_json, access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=excluded.enabled
+            """ : "DO NOTHING"
         return try databasePool.write { db in
             try db.execute(sql: """
                 INSERT INTO sources(agent,label,root_path,environment,path_mappings_json,env_rules_json,access_kind,bookmark,enabled)
-                VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,root_path) DO UPDATE SET
-                label=excluded.label, environment=excluded.environment, path_mappings_json=excluded.path_mappings_json,
-                env_rules_json=excluded.env_rules_json, access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=excluded.enabled
-                """, arguments: [source.agent.rawValue, source.label, source.rootURL.standardizedFileURL.path,
+                VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,root_path) \(conflict)
+                """, arguments: [source.agent.rawValue, source.label, root,
                                   source.environment, mappings, rules, kind, bookmark, source.enabled])
+            let changed = db.changesCount == 1
             guard let id = try Int64.fetchOne(db, sql: "SELECT id FROM sources WHERE agent=? AND root_path=?",
-                                              arguments: [source.agent.rawValue, source.rootURL.standardizedFileURL.path]) else {
+                                              arguments: [source.agent.rawValue, root]) else {
                 throw StoreError.invalidStoredValue
             }
-            return id
+            return (id, changed)
         }
     }
 

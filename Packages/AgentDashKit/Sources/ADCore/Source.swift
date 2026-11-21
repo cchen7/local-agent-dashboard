@@ -43,6 +43,13 @@ public struct Source: Codable, Equatable, Sendable, Identifiable {
     public var access: AccessKind
     public var enabled: Bool
 
+    /// Validate URL metadata without resolving or opening a directory.
+    public static func isLocalRoot(_ url: URL) -> Bool {
+        let host = url.host(percentEncoded: false)?.lowercased()
+        return url.isFileURL && (host == nil || host == "" || host == "localhost") &&
+            url.path.hasPrefix("/") && !url.path.utf8.contains(0)
+    }
+
     /// Create a normalized value without performing file access.
     public init(id: Int64? = nil, agent: AgentKind, label: String, rootURL: URL,
                 environment: String = "Local", pathMappings: [PathMapping] = [],

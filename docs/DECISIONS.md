@@ -94,6 +94,14 @@ converts the 960×600 outer minimum to content constraints without a fixed toolb
 height. Its state belongs to window content; unchanged native values are not
 reassigned. All six size/appearance combinations were executed and visually checked.
 
+## DEV-047 — Register a custom source without replacing an existing one
+
+Sources → Add Source records the agent, label, environment and read-only
+permission after an explicit local folder choice. The app-owned store inserts
+by agent and standardized root and reports an existing row without changing
+its permission, configuration, checkpoint or history. Cancellation does not
+write settings. Registration does not read session files or start indexing.
+
 ## DEV-038 — Commit JSONL batches against the expected checkpoint
 
 Read the expected checkpoint before opening the pinned, read-only source
