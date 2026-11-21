@@ -709,6 +709,11 @@ Shown on the session Overview tab and on the project page:
 4. The last 5 actions: files changed (with +/- lines), commands run (with result and duration).
 5. Current branch and last activity time.
 
+The Overview reads a bounded snapshot of one session's index. If the index
+does not yet have structured file or command actions, show recorded tool
+actions. Mask complete fields before shortening them for display. Omit
+oversized fields instead of clipping unmasked text.
+
 ### 10.4 Status inference
 
 A sandboxed app cannot see other processes, so **status is inferred from file content and activity time only**; hovering the status shows the evidence. All thresholds are configurable.

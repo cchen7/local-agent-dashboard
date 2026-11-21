@@ -58,6 +58,12 @@ private func highlightedSnippet(_ parts: [SearchSnippetPart]) -> AttributedStrin
 }
 
 struct SessionTranscript: View {
+    @State private var section = DetailSection.transcript
+    @Environment(\.sessionOverviewOptions) private var overviewOptions
+
+    private enum DetailSection: Hashable { case overview, transcript }
+    private var showingOverview: Bool { overviewOptions.enabled && section == .overview }
+
     let session: SessionListItem
     let store: AgentStore
     let openingMatch: String?
@@ -101,14 +107,27 @@ struct SessionTranscript: View {
 
             Divider()
             HStack(spacing: 8) {
-                Text("Transcript").font(.headline)
+                if overviewOptions.enabled {
+                    Picker("Session Details", selection: $section) {
+                        Text("Overview").tag(DetailSection.overview)
+                        Text("Transcript").tag(DetailSection.transcript)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityIdentifier("session.details.tabs")
+                } else {
+                    Text("Transcript").font(.headline)
+                }
                 Spacer()
                 pagingButton("Older Messages", icon: "chevron.up", cursor: page?.older, direction: TranscriptPageRequest.before)
                 pagingButton("Newer Messages", icon: "chevron.down", cursor: page?.newer, direction: TranscriptPageRequest.after)
             }
             .padding(.horizontal, 18).padding(.vertical, 9)
 
-            if failed {
+            if showingOverview {
+                SessionOverview(session: session, store: store)
+            } else if failed {
                 EmptyPanel(title: "Could not read the transcript", symbol: "exclamationmark.triangle",
                            message: "Select the session again to retry.")
             } else if loading {
@@ -161,7 +180,9 @@ struct SessionTranscript: View {
         .labelStyle(.iconOnly)
         .accessibilityLabel(Text(label))
         .help(Text(label))
-        .disabled(cursor == nil || loading)
+        .disabled(cursor == nil || loading || showingOverview)
+        .opacity(showingOverview ? 0 : 1)
+        .accessibilityHidden(showingOverview)
     }
 
     private func observePage(_ requested: TranscriptPageRequest) async {

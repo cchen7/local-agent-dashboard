@@ -46,6 +46,12 @@
 		D2740EFD5804A93FE8C32426 = {
 			isa = PBXBuildFile; fileRef = 03AF56BE2C9FDF9DEFBDE818;
 		};
+		AD4900000000000000000005 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionOverview.swift"; sourceTree = "<group>";
+		};
+		AD4900000000000000000006 = {
+			isa = PBXBuildFile; fileRef = AD4900000000000000000005;
+		};
 		7BF0346EAFE21A43227B2108 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SourceAccessProbe.swift"; sourceTree = "<group>";
 		};
@@ -88,6 +94,7 @@
 				48B9829DDB297129458B3902,
 				03AF56BE2C9FDF9DEFBDE818,
 				AD4300000000000000000001,
+				AD4900000000000000000005,
 				7BF0346EAFE21A43227B2108,
 				CCB32DA757F8CB91EA8A9F9D,
 				C5E55183ECB076EB335DF6EE,
@@ -128,6 +135,7 @@
 				C497F0C95670E0D8F1966C44,
 				D2740EFD5804A93FE8C32426,
 				AD4300000000000000000002,
+				AD4900000000000000000006,
 				DB58144FCB6BA78D6866E33F,
 			); runOnlyForDeploymentPostprocessing = 0;
 		};

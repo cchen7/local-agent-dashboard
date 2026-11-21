@@ -124,6 +124,17 @@ an empty marker that v2 would have emitted for the same committed file prefix.
 Carry that boundary in decoder state until replay reaches it. The replacement
 and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 
+## DEV-046 — Read the Overview from the owned index
+
+A session Overview observes one bounded database snapshot. Prefer the
+recorded summary, prompt, reply, file touches and command results; use
+normalized tool actions when structured actions are absent. Mask complete
+indexed fields before producing excerpts. Omit oversized fields that cannot
+be read within the overview budget. Show available catalog topic terms only
+when supported by the masked display sample. Searching still opens the
+transcript, and the Overview does not read working directories or execute
+commands.
+
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 
 The owner removed Markdown/JSON session export from the product scope. Full
