@@ -59,7 +59,12 @@ public enum JSONLFileImporter {
         var saved = try store.checkpoint(for: fileID)
         let reader = try SourceFileReader(root: authorizedRoot, relativePath: file.relativePath)
         let initial = try snapshot(reader)
-        let resume = saved.flatMap { resumable($0, file: file, snapshot: initial) ? $0 : nil }
+        let sameFile = saved.flatMap { canReusePrefix($0, snapshot: initial) ? $0 : nil }
+        let resume = sameFile.flatMap { $0.parserVersion == file.parserVersion ? $0 : nil }
+        let replayedPrefix: JSONLDecodeContext.ReplayedPrefix? = sameFile.flatMap {
+            guard $0.parserVersion < file.parserVersion, $0.offset > 0 else { return nil }
+            return .init(parserVersion: $0.parserVersion, endOffset: $0.offset)
+        }
         var next = Checkpoint(inode: initial.inode, size: initial.size, offset: resume?.offset ?? 0,
                               parserVersion: file.parserVersion, sequence: resume?.sequence ?? -1,
                               previousTimestamp: resume?.previousTimestamp, device: initial.device,
@@ -98,7 +103,7 @@ public enum JSONLFileImporter {
                 let line = framed.isTruncated ? withOverflow(framed, start: lineStart, reader: reader) : framed
                 lineStart = line.endOffset
                 let decoded = try decode(line, .init(fileID: fileID, previousTimestamp: next.previousTimestamp,
-                                                     state: next.decoderState))
+                                                     state: next.decoderState, replayedPrefix: replayedPrefix))
                 guard decoded.records.count <= batchLimit else { throw JSONLImportFailure.recordLimit }
                 guard (decoded.state?.count ?? 0) <= Checkpoint.maximumDecoderStateBytes
                 else { throw JSONLImportFailure.stateLimit }
@@ -141,10 +146,9 @@ public enum JSONLFileImporter {
         }
     }
 
-    private static func resumable(_ checkpoint: Checkpoint, file: SourceFile,
-                                  snapshot: SourceFileReader.Snapshot) -> Bool {
+    private static func canReusePrefix(_ checkpoint: Checkpoint, snapshot: SourceFileReader.Snapshot) -> Bool {
         checkpoint.device == snapshot.device && checkpoint.inode == snapshot.inode &&
-            checkpoint.parserVersion == file.parserVersion && checkpoint.size <= snapshot.size &&
+            checkpoint.size <= snapshot.size &&
             checkpoint.offset >= 0 && checkpoint.offset <= checkpoint.size &&
             checkpoint.sequence >= -1 && checkpoint.unknownRecords >= 0 &&
             (checkpoint.decoderState?.count ?? 0) <= Checkpoint.maximumDecoderStateBytes &&

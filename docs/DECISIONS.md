@@ -119,7 +119,10 @@ in bounded chunks from the pinned descriptor and retain only recognized tool
 results with their identity and up to 2 KiB shared across each result’s text
 blocks. Discard unrelated payloads as they are read. Successfully recovered
 results do not count as unknown; malformed or unclassified records keep an
-unknown marker without a raw fallback.
+unknown marker without a raw fallback. During a v2-to-v3 replay, replace only
+an empty marker that v2 would have emitted for the same committed file prefix.
+Carry that boundary in decoder state until replay reaches it. The replacement
+and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 

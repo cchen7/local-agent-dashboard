@@ -177,6 +177,151 @@ func claudeOversizedTextBlocks(extraOutput: Bool) throws {
     #expect(rows.last?.text == "next after multi-block result")
 }
 
+@Test("ADP-1/4/7: upgrading a v2 index replaces only the obsolete oversized placeholder",
+      arguments: [false, true])
+func claudeUpgradeReconcilesOversizedPlaceholder(interrupt: Bool) throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    // A deterministic batch boundary before the oversized row lets the upgrade
+    // be interrupted after a durable v3 checkpoint but before reconciliation.
+    let leading: [[String: Any]] = interrupt
+        ? Array(repeating: ["type": "file-history-snapshot", "message": [:]], count: 500) : []
+    let sequence = Int64(leading.count)
+    let blocks = Array(repeating: ["type": "text", "text": String(repeating: "m", count: 12_000)], count: 100)
+    let tool: [String: Any] = ["type": "tool_result", "tool_use_id": "upgrade-call", "content": blocks]
+    let result: [String: Any] = ["type": "user", "uuid": "upgrade-result", "sessionId": mainID, "timestamp": 42,
+                                  "message": ["content": [tool]]]
+    let unknown: [String: Any] = ["type": "user", "sessionId": mainID, "message": ["content": 5]]
+    let next: [String: Any] = ["type": "user", "uuid": "upgrade-next", "sessionId": mainID,
+                              "message": ["content": "next after v2 upgrade"]]
+    try box.write(leading + [result, unknown, next], to: box.main)
+
+    let id = try #require(box.source.id)
+    let file = SourceFile(sourceID: id, relativePath: box.main, role: .session, parserVersion: 2)
+    func legacyKey(_ sequence: Int64) -> String { "claude:event:file:\(id):\(box.main):\(sequence):240" }
+    let snapshot = try SourceFileReader(root: box.root, relativePath: box.main).snapshot()
+    let fileID = try box.store.upsertFile(file, checkpoint: nil)
+    let saved = Checkpoint(inode: snapshot.inode, size: snapshot.size, offset: snapshot.size, parserVersion: 2,
+                           sequence: sequence + 2, previousTimestamp: nil, device: snapshot.device,
+                           modificationTimeNS: snapshot.modificationTimeNS, unknownRecords: 2)
+    let unrelated = "claude:event:archived-synthetic:0"
+    try box.store.write([
+        .session(.init(key: box.key, sourceID: id, fileID: fileID, environment: "Synthetic")),
+        .event(.init(session: box.key, sequence: sequence, timestamp: 0, kind: .unknown,
+                     text: "", dedupeKey: legacyKey(sequence))),
+        .event(.init(session: box.key, sequence: sequence + 1, timestamp: 0, kind: .unknown,
+                     text: "", dedupeKey: legacyKey(sequence + 1))),
+        .event(.init(session: box.key, sequence: sequence + 2, timestamp: 0, kind: .user,
+                     text: "next after v2 upgrade", dedupeKey: "claude:event:upgrade-next:0")),
+        .event(.init(session: box.key, sequence: sequence, timestamp: 0, kind: .unknown,
+                     text: "", dedupeKey: unrelated)),
+    ], fileID: fileID, checkpoint: saved)
+    try box.store.databasePool.write { db in
+        try db.execute(sql: "INSERT INTO blobs(id,raw_len,data) VALUES(1,1,X'23')")
+        try db.execute(sql: "UPDATE events SET blob_id=1 WHERE dedupe_key=?", arguments: [unrelated])
+    }
+
+    if interrupt {
+        enum Stop: Error { case beforeTool }
+        var target = file
+        target.parserVersion = ClaudeCodeAdapter.parserVersion
+        var decoder = try box.adapter.makeDecoder(for: target, in: box.source)
+        #expect(throws: Stop.beforeTool) {
+            try JSONLFileImporter.importFile(target, authorizedRoot: box.root, store: box.store) { frame, context in
+                if frame.sequence == sequence { throw Stop.beforeTool }
+                return try decoder.decode(frame, context: context)
+            }
+        }
+        let partial = try #require(try box.store.checkpoint(for: fileID))
+        #expect(partial.parserVersion == ClaudeCodeAdapter.parserVersion && partial.sequence == sequence - 1)
+        #expect(try box.store.events(in: box.key).contains { $0.dedupeKey == legacyKey(sequence) })
+
+        // Make the same batch fail after producing the recovered event and removal.
+        // Neither the old row nor its checkpoint may be lost.
+        #expect(throws: StoreError.invalidTokenCounts) {
+            try JSONLFileImporter.importFile(target, authorizedRoot: box.root, store: box.store) { frame, context in
+                let decoded = try decoder.decode(frame, context: context)
+                guard frame.sequence == sequence else { return decoded }
+                let invalid = TokenEvent(session: box.key, timestamp: 0, counts: .init(inputFresh: -1),
+                                         dedupeKey: "synthetic:invalid-migration-batch")
+                return .init(records: decoded.records + [.tokens(invalid)], timestamp: decoded.timestamp,
+                             state: decoded.state, isUnknown: decoded.isUnknown,
+                             recoveredOversizedRecord: decoded.recoveredOversizedRecord)
+            }
+        }
+        #expect(try box.store.checkpoint(for: fileID) == partial)
+        #expect(try box.store.events(in: box.key).contains { $0.dedupeKey == legacyKey(sequence) })
+        #expect(try !box.store.events(in: box.key).contains { $0.kind == .toolResult })
+    }
+
+    let reopened = try AgentStore(databaseURL: box.index)
+    let replay = try box.importPath(box.main, role: .session, store: reopened)
+    #expect(replay.checkpoint.unknownRecords == 1)
+    let upgraded = try reopened.events(in: box.key)
+    let current = upgraded.filter { $0.dedupeKey != unrelated }
+    #expect(current.map(\.kind) == [.toolResult, .unknown, .user])
+    #expect(current.map(\.sequence) == [sequence, sequence + 1, sequence + 2])
+    #expect(current.first?.text == String(repeating: "m", count: 2048))
+    #expect(current.first?.metadataJSON == #"{"tool_use_id":"upgrade-call"}"#)
+    #expect(upgraded.filter { $0.dedupeKey == unrelated }.count == 1)
+    let archivedPayload = try reopened.databasePool.read { db in
+        try Data.fetchOne(db, sql: """
+            SELECT blobs.data FROM blobs JOIN events ON events.blob_id=blobs.id WHERE events.dedupe_key=?
+            """, arguments: [unrelated])
+    }
+    #expect(archivedPayload == Data([0x23]))
+
+    let fresh = try ClaudeFixture()
+    defer { fresh.remove() }
+    try fresh.write(leading + [result, unknown, next], to: fresh.main)
+    let freshImport = try fresh.importPath(fresh.main, role: .session)
+    #expect(freshImport.checkpoint.unknownRecords == replay.checkpoint.unknownRecords)
+    #expect(try fresh.store.events(in: fresh.key) == current)
+    #expect(try box.importPath(box.main, role: .session, store: reopened).completeLines == 0)
+    #expect(try reopened.events(in: box.key) == upgraded)
+}
+
+@Test("ADP-2/4: replay does not retire an old marker at a reused file position",
+      arguments: [false, true])
+func claudeRecoveryKeepsOlderGenerationMarker(replaced: Bool) throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    // A prior generation can leave an empty legacy marker at this sequence.
+    // In the unchanged variant v2 already understood the current large result;
+    // in the replacement variant v2 never saw the new generation.
+    let oldResult: [String: Any] = ["type": "user", "uuid": "earlier-tool", "sessionId": mainID, "timestamp": 42,
+        "message": ["content": [["type": "tool_result", "tool_use_id": "early",
+                                 "content": String(repeating: "s", count: 1_100_000)]]]]
+    try box.write([oldResult], to: box.main)
+    let id = try #require(box.source.id)
+    let file = SourceFile(sourceID: id, relativePath: box.main, role: .session, parserVersion: 2)
+    let legacy = "claude:event:file:\(id):\(box.main):0:240"
+    let snapshot = try SourceFileReader(root: box.root, relativePath: box.main).snapshot()
+    let fileID = try box.store.upsertFile(file, checkpoint: nil)
+    try box.store.write([
+        .session(.init(key: box.key, sourceID: id, fileID: fileID, environment: "Synthetic")),
+        .event(.init(session: box.key, sequence: 0, timestamp: 0, kind: .unknown, text: "", dedupeKey: legacy)),
+        .event(.init(session: box.key, sequence: 0, timestamp: 42, kind: .toolResult,
+                     text: String(repeating: "s", count: 2048), dedupeKey: "claude:event:earlier-tool:0")),
+    ], fileID: fileID, checkpoint: .init(inode: snapshot.inode, size: snapshot.size, offset: snapshot.size,
+                                         parserVersion: 2, sequence: 0, previousTimestamp: 42,
+                                         device: snapshot.device, modificationTimeNS: snapshot.modificationTimeNS,
+                                         unknownRecords: 1))
+    if replaced {
+        let blocks = Array(repeating: ["type": "text", "text": String(repeating: "m", count: 12_000)], count: 100)
+        let result: [String: Any] = ["type": "user", "uuid": "replacement-tool", "sessionId": mainID,
+            "message": ["content": [["type": "tool_result", "tool_use_id": "later", "content": blocks]]]]
+        let bytes = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) + Data([0x0A])
+        try bytes.write(to: box.root.appendingPathComponent(box.main), options: .atomic)
+    }
+
+    let replay = try box.importPath(box.main, role: .session)
+    #expect(replay.checkpoint.unknownRecords == 0)
+    let rows = try box.store.events(in: box.key)
+    #expect(rows.map(\.dedupeKey) == [legacy, "claude:event:earlier-tool:0"]
+            + (replaced ? ["claude:event:replacement-tool:0"] : []))
+}
+
 @Test("ADP-1: malformed ignored fields in an oversized record still count as unknown",
       arguments: [false, true])
 func claudeMalformedOversizedToolResult(badUTF8: Bool) throws {

@@ -277,7 +277,10 @@ Tool results can contain a string or an array of text blocks. Field order
 is not assumed: `tool_use_id`, `is_error` and the outer record identity can
 appear after the large body. Oversized records can retain a tool-result
 preview of at most 2 KiB across all text blocks via bounded reads of the
-same line. Unrelated payload fields do not consume this preview budget.
+same line. Unrelated payload fields do not consume this preview budget. A v2
+overflow that lost the JSON envelope wrote an empty marker keyed by source,
+relative file path and physical sequence. In-place v3 replay reconciles that
+marker when it recovers the same line.
 
 ## Local source availability for M0
 
