@@ -113,7 +113,9 @@ final class SmokeTests: XCTestCase {
         XCTAssertFalse(previous.isEnabled)
         XCTAssertTrue(next.wait(for: \.isEnabled, toEqual: true, timeout: 5))
 
-        next.click()
+        window.typeKey("g", modifierFlags: [.command, .shift])
+        XCTAssertEqual(position.label, "1 of 3 matches")
+        window.typeKey("g", modifierFlags: .command)
         XCTAssertTrue(second.waitForExistence(timeout: 5))
         XCTAssertTrue(position.wait(for: \.label, toEqual: "2 of 3 matches", timeout: 5))
         XCTAssertTrue(first.waitForNonExistence(timeout: 5))
@@ -124,8 +126,10 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(second.waitForNonExistence(timeout: 5))
         XCTAssertFalse(next.isEnabled)
 
+        window.typeKey("g", modifierFlags: .command)
+        XCTAssertEqual(position.label, "3 of 3 matches")
         XCTAssertTrue(previous.wait(for: \.isEnabled, toEqual: true, timeout: 5))
-        previous.click()
+        window.typeKey("g", modifierFlags: [.command, .shift])
         XCTAssertTrue(second.waitForExistence(timeout: 5))
         XCTAssertTrue(position.wait(for: \.label, toEqual: "2 of 3 matches", timeout: 5))
         XCTAssertTrue(third.waitForNonExistence(timeout: 5))

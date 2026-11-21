@@ -189,7 +189,9 @@ struct SessionTranscript: View {
             .lineLimit(1)
             .accessibilityIdentifier("transcript.match.position")
             matchButton("Previous Match", icon: "chevron.up", key: ready ? match?.previousKey : nil)
+                .keyboardShortcut("g", modifiers: [.command, .shift])
             matchButton("Next Match", icon: "chevron.down", key: ready ? match?.nextKey : nil)
+                .keyboardShortcut("g", modifiers: .command)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
