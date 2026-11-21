@@ -224,16 +224,47 @@ final class DashboardModel {
         }
     }
 
+    func chooseCustomSource(agent: AgentKind, name: String, environment: String) async -> SourceAdditionResult {
+        let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let environment = environment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty, !environment.isEmpty, store != nil else { return .storageFailed }
+        let panel = Self.sourceFolderPanel()
+        guard await panel.begin() == .OK, let url = panel.url else { return .cancelled }
+        guard Source.isLocalRoot(url) else { return .inaccessible }
+        let identity = await Task.detached { try? SourceFileReader.directoryIdentity(root: url) }.value
+        guard let identity else { return .inaccessible }
+        let bytes: Data
+        do {
+            bytes = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                         includingResourceValuesForKeys: nil, relativeTo: nil)
+        } catch { return .inaccessible }
+        return await registerCustomSource(.init(agent: agent, label: label, rootURL: url, environment: environment,
+                                                 access: .bookmark(bytes)), identity: identity)
+    }
+
+    /// Save metadata to the app's index only. Do not start a scan or verify access here.
+    func registerCustomSource(_ source: Source, identity: SourceRootIdentity) async -> SourceAdditionResult {
+        guard let store else { return .storageFailed }
+        do {
+            let (outcome, snapshot) = try await Task.detached {
+                let existing = try store.sources().first {
+                    $0.agent == source.agent && SourceAccessProbe.directoryIdentity($0) == identity
+                }
+                let result = try store.registerCustomSource(source, identity: identity, existing: existing)
+                return (result, try store.sources())
+            }.value
+            sources = snapshot
+            switch outcome {
+            case .added: return .added
+            case .alreadyRegistered: return .duplicate
+            }
+        } catch { return .storageFailed }
+    }
+
     func grantAccess(to source: Source) async {
         guard let store else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        panel.resolvesAliases = false
+        let panel = Self.sourceFolderPanel()
         panel.directoryURL = source.rootURL
-        panel.message = String(localized: "Choose this agent's source directory. Access is read-only.")
         guard await panel.begin() == .OK, let url = panel.url else { return }
         guard url.standardizedFileURL == source.rootURL.standardizedFileURL else {
             if let id = source.id { access[id] = .wrongDirectory }
@@ -251,6 +282,20 @@ final class DashboardModel {
             if let id = source.id { access[id] = .denied }
         }
     }
+    private static func sourceFolderPanel() -> NSOpenPanel {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.resolvesAliases = false
+        panel.message = String(localized: "Choose this agent's source directory. Access is read-only.")
+        return panel
+    }
+}
+
+enum SourceAdditionResult: Equatable {
+    case added, duplicate, cancelled, inaccessible, storageFailed
 }
 
 enum SessionSearchState: Equatable {

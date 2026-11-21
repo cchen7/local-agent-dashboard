@@ -33,8 +33,8 @@ func freshAndReopened() throws {
             #expect(try String.fetchOne(db, sql: "PRAGMA journal_mode") == "wal")
             #expect(try Int.fetchOne(db, sql: "PRAGMA foreign_keys") == 1)
             #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY identifier") ==
-                ["v1", "v2_jsonl_checkpoint", "v3_session_parent_hint"])
-            for name in ["sources", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
+                ["source_root_identity", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint"])
+            for name in ["sources", "source_root_identities", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
                          "file_touches", "commands", "token_events", "token_minute", "rate_limit_snapshots",
                          "session_keywords", "term_df", "saved_searches", "app_meta"] {
                 #expect(try db.tableExists(name))
