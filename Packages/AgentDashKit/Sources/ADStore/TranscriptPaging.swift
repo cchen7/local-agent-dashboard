@@ -38,12 +38,20 @@ public extension AgentStore {
         }
     }
 
-    /// Observe the requested page as the index changes, retaining only the latest snapshot.
+    /// Observe the requested page as the index changes, retaining only the latest
+    /// snapshot. A directional page that no longer has rows invalidates navigation,
+    /// even when the anchor still exists; restart at the first page in that case.
     func transcriptPageUpdates(in session: SessionKey, request: TranscriptPageRequest = .first,
                                limit: Int = 128) throws -> some AsyncSequence<TranscriptPage?, any Error> & Sendable {
         try Self.validate(request, in: session, limit: limit)
         return ValueObservation.tracking { db in
-            try Self.fetchPage(in: session, request: request, limit: limit, db: db)
+            let page = try Self.fetchPage(in: session, request: request, limit: limit, db: db)
+            switch request {
+            case .before, .after:
+                guard page?.events.isEmpty == false else { throw TranscriptPagingError.staleCursor }
+            default: break
+            }
+            return page
         }
         .removeDuplicates()
         .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
