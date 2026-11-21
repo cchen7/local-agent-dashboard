@@ -30,6 +30,7 @@ final class DashboardModel {
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
     var access: [Int64: SourceAccessStatus] = [:]
+    var selectedProjectID: IndexedProject.ID?
     var storageFailed = false
     var verifying = false
     private(set) var sessions: [SessionListItem] = []
@@ -47,6 +48,8 @@ final class DashboardModel {
     private var searchForOffset = 0
     private var lastSearchState: SessionSearchState = .waiting
     private var searchHome: String?
+
+    var projectPathHome: String? { searchHome }
 
     var isSearchingSessions: Bool { !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -85,7 +88,9 @@ final class DashboardModel {
                 for source in defaults where !existing.contains(where: {
                     $0.agent == source.agent && $0.rootURL.standardizedFileURL == source.rootURL.standardizedFileURL
                 }) { try store.upsertSource(source) }
-                if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
+                if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
+                    try Self.seedProjects(store, in: directory)
+                } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
                 }
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
@@ -212,6 +217,42 @@ final class DashboardModel {
                                        text: text, dedupeKey: "preview:import:\(i)")))
         }
         try store.write(records)
+    }
+
+    nonisolated private static func seedProjects(_ store: AgentStore, in directory: URL) throws {
+        let codex = try store.upsertSource(.init(agent: .codex, label: "Synthetic Codex",
+                                                rootURL: directory.appendingPathComponent("unused-codex")))
+        let claude = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude",
+                                                rootURL: directory.appendingPathComponent("unused-claude")))
+        let client = "/synthetic/work/client"
+        let primary = SessionKey(agent: .codex, nativeID: "preview-project-client")
+        let peer = SessionKey(agent: .claudeCode, nativeID: "preview-project-worktree")
+        let docs = SessionKey(agent: .codex, nativeID: "preview-project-docs")
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try store.write([
+            .session(.init(key: primary, sourceID: codex, environment: "Local",
+                           cwd: client, title: "Verify synthetic checkout",
+                           startedAt: now - 900_000, lastEventAt: now, status: .completed, gitBranch: "main")),
+            .session(.init(key: peer, sourceID: claude, environment: "Local",
+                           cwd: client + "/.claude/worktrees/demo", title: "Validate synthetic integration",
+                           startedAt: now - 800_000, lastEventAt: now - 30_000, status: .running, gitBranch: "demo")),
+            .session(.init(key: docs, sourceID: codex, environment: "Local",
+                           cwd: "/synthetic/work/docs", title: "Review synthetic documentation",
+                           startedAt: now - 2_000_000, lastEventAt: now - 120_000, status: .waiting)),
+            .event(.init(session: primary, sequence: 0, timestamp: now, kind: .assistant,
+                         text: "Synthetic checkout verified", dedupeKey: "preview:project:checkout")),
+            .event(.init(session: peer, sequence: 0, timestamp: now - 30_000, kind: .toolResult,
+                         toolName: "Synthetic check", text: "PROJECT_TOKEN=synthetic-project-secret",
+                         dedupeKey: "preview:project:worktree")),
+            .event(.init(session: docs, sequence: 0, timestamp: now - 120_000, kind: .assistant,
+                         text: "Synthetic documentation reviewed", dedupeKey: "preview:project:docs")),
+        ])
+    }
+
+    func openProjectSession(_ id: SessionKey) {
+        sessionSearchText = ""
+        selectedSessionID = id
+        page = .sessions
     }
 
     func verifyAccess() async {

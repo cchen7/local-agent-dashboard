@@ -328,7 +328,7 @@ private enum TranscriptFormatting {
     }
 }
 
-private struct SessionTitle: View {
+struct SessionTitle: View {
     let title: String?
 
     var body: some View {
@@ -339,7 +339,7 @@ private struct SessionTitle: View {
     }
 }
 
-private struct SessionAgentMark: View {
+struct SessionAgentMark: View {
     let agent: AgentKind
 
     var body: some View {
@@ -365,7 +365,7 @@ private struct SessionStatusPill: View {
     }
 }
 
-private extension SessionStatus {
+extension SessionStatus {
     var label: LocalizedStringResource {
         switch self {
         case .running: "Running"
@@ -386,7 +386,7 @@ private extension SessionStatus {
     }
 }
 
-private extension AgentKind {
+extension AgentKind {
     var sessionName: String {
         switch self {
         case .claudeCode: "Claude Code"
@@ -415,7 +415,7 @@ private extension AgentKind {
     }
 }
 
-private extension EventKind {
+extension EventKind {
     var transcriptLabel: LocalizedStringResource {
         switch self {
         case .user, .promptHistory: "You"
@@ -430,6 +430,6 @@ private extension EventKind {
     }
 }
 
-private func sessionDate(_ epochMilliseconds: Int64) -> Date {
+func sessionDate(_ epochMilliseconds: Int64) -> Date {
     Date(timeIntervalSince1970: Double(epochMilliseconds) / 1_000)
 }

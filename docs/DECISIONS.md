@@ -130,6 +130,17 @@ The owner removed Markdown/JSON session export from the product scope. Full
 transcripts remain viewable in the app, and Copy Resume Command and Show in
 Finder remain available. No entitlement change is needed.
 
+## DEV-040 — Browse projects from the local index
+
+Observe the Projects catalog only when the page is open. An indexed project
+ID wins when provided. Otherwise use the recorded absolute workspace,
+collapse Claude worktrees to their repository root, and match path bytes
+without reading the filesystem. Default local paths and explicitly mapped
+host paths may group together. Unmapped named environments stay scoped by
+source and environment, even if a path has the same spelling. The timeline
+uses indexed event times and fetches text only for the bounded recent set.
+Mask complete activity text before shortening it for display.
+
 ## DEV-036 — Observe indexed sessions and one transcript page
 
 The Sessions view observes committed metadata and the selected 128-record
