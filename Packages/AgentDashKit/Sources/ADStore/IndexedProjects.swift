@@ -81,8 +81,8 @@ public extension AgentStore {
             """).map(CatalogProject.init)
         let catalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
         let rootClaims = Dictionary(grouping: catalog.compactMap { project -> (Data, CatalogProject)? in
-            guard let root = project.normalizedRoot else { return nil }
-            return (Data(root.utf8), project)
+            guard let root = project.hostRootKey else { return nil }
+            return (root, project)
         }, by: { $0.0 }).compactMapValues { claims in claims.count == 1 ? claims.first?.1 : nil }
 
         let rows = try Row.fetchCursor(db, sql: """
@@ -118,7 +118,8 @@ public extension AgentStore {
             let isHost = mapped != nil || (recorded?.normalized != nil &&
                 source.localDefaultAgent == session.id.agent && session.environment == "Local")
             let explicitCatalog = (row["project_id"] as Int64?).flatMap { catalogByID[$0] }
-            let attributed = explicitCatalog ?? (isHost ? workspace.flatMap { rootClaims[Data($0.root.utf8)] } : nil)
+            let hostRoot = isHost ? workspace?.hostRootKey : nil
+            let attributed = explicitCatalog ?? hostRoot.flatMap { rootClaims[$0] }
             let id: IndexedProject.ID
             let name: String
             let path: String?
@@ -191,13 +192,17 @@ private struct CatalogProject {
     let name: String
     let path: String?
     let normalizedRoot: String?
+    let hostRootKey: Data?
     let repoURL: String?
 
     init(_ row: Row) {
         id = row["id"]
         name = row["display_name"]
         path = row["root_path"]
-        normalizedRoot = path.flatMap(WorkspacePath.init)?.normalized
+        let workspace = path.flatMap(WorkspacePath.init)
+        // The displayed catalog path can still name the worktree.
+        normalizedRoot = workspace?.normalized
+        hostRootKey = workspace?.hostRootKey
         repoURL = row["repo_url"]
     }
 }
@@ -229,6 +234,9 @@ private struct WorkspacePath {
     let root: String
     let name: String
     let worktree: String?
+
+    /// One identity for catalog claims and proven host workspaces.
+    var hostRootKey: Data? { normalized.map { _ in Data(root.utf8) } }
 
     init?(_ path: String) {
         let bytes = path.utf8

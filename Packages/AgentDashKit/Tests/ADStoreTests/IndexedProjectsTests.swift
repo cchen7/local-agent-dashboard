@@ -158,17 +158,22 @@ func projectsNormalizeUnambiguousWorkspaceSpellings() async throws {
 }
 
 @Test("SPEC §11.3: unique host roots preserve mapped membership across partial catalog attribution",
-      .timeLimit(.minutes(1)))
-func catalogAttributionKeepsMappedSessionsTogether() async throws {
+      .timeLimit(.minutes(1)), arguments: [false, true])
+func catalogAttributionKeepsMappedSessionsTogether(worktree: Bool) async throws {
     let box = try ProjectFixture()
     defer { box.remove() }
-    let local = try box.source(.codex, label: "Codex")
-    let mapped = try box.source(.claudeCode, label: "VM", environment: "VM",
-                                mappings: [.init(from: "/vm/client", to: "/host/work/client")])
+    let parent = "/host/work/client"
+    let catalogRoot = worktree ? parent + "/.claude/worktrees/preview" : parent
+    let conflictingRoot = worktree ? parent + "/.claude/worktrees/other" : "/host//work/client"
+    let localAgent: AgentKind = worktree ? .claudeCode : .codex
+    let mappedAgent: AgentKind = worktree ? .codex : .claudeCode
+    let local = try box.source(localAgent, label: "Local")
+    let mapped = try box.source(mappedAgent, label: "VM", environment: "VM",
+                                mappings: [.init(from: "/workspace", to: parent)])
     let unrelated = try box.source(.copilot, label: "Unmapped", environment: "Remote")
-    let a = box.session(.codex, local, "host", "/host/work/client", activity: 100)
-    let b = box.session(.claudeCode, mapped, "mapped", "/vm/client", activity: 90, environment: "VM")
-    let c = box.session(.copilot, unrelated, "isolated", "/host/work/client", activity: 80, environment: "Remote")
+    let a = box.session(localAgent, local, "host", catalogRoot, activity: 100)
+    let b = box.session(mappedAgent, mapped, "mapped", "/workspace", activity: 90, environment: "VM")
+    let c = box.session(.copilot, unrelated, "isolated", parent, activity: 80, environment: "Remote")
     try box.store.write([.session(a), .session(b), .session(c),
                          box.event(a.key, "host-event", 1, 25, .assistant),
                          box.event(b.key, "mapped-event", 1, 30, .assistant),
@@ -178,15 +183,17 @@ func catalogAttributionKeepsMappedSessionsTogether() async throws {
     try await box.store.databasePool.write { db in
         try db.execute(sql: """
             INSERT INTO projects(id,key,display_name,root_path)
-            VALUES(1,'https://example.invalid/team/app','Catalog Client','/host/work/client');
+            VALUES(1,'https://example.invalid/team/app','Catalog Client',?);
             UPDATE sessions SET project_id=1 WHERE native_id='host'
-            """)
+            """, arguments: [catalogRoot])
     }
 
     let partial = try await projects(in: box.store)
     let shared = try #require(partial.first)
     #expect(partial.count == 2)
     #expect(shared.name == "Catalog Client" && shared.sessions.map(\.session.id) == [a.key, b.key])
+    #expect(shared.path == catalogRoot)
+    #expect(shared.sessions.first?.worktree == (worktree ? "preview" : nil))
     var updates = try box.store.indexedProjectActivityUpdates(shared.activityScope, limit: 3).makeAsyncIterator()
     let timeline = try #require(try await updates.next())
     #expect(timeline.map(\.id) == ["mapped-event", "host-event"])
@@ -198,9 +205,9 @@ func catalogAttributionKeepsMappedSessionsTogether() async throws {
     try await box.store.databasePool.write { db in
         try db.execute(sql: """
             INSERT INTO projects(id,key,display_name,root_path)
-            VALUES(2,'https://example.invalid/team/other','Conflicting Root','/host//work/client');
+            VALUES(2,'https://example.invalid/team/other','Conflicting Root',?);
             UPDATE sessions SET project_id=NULL WHERE native_id='mapped'
-            """)
+            """, arguments: [conflictingRoot])
     }
     let ambiguous = try await projects(in: box.store)
     #expect(ambiguous.map { $0.sessions.map(\.session.id) } == [[a.key], [b.key], [c.key]])

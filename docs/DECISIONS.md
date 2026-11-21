@@ -134,8 +134,10 @@ Finder remain available. No entitlement change is needed.
 
 Observe the Projects catalog only when the page is open. An indexed project
 ID wins when provided. An otherwise unattributed local or explicitly mapped
-host workspace can join a catalog project only at its unique recorded host
-root. An unmapped environment stays scoped by source and environment.
+host workspace can join a catalog project only at its unique host root.
+Collapse worktrees for both sides of that identity; keep the recorded
+catalog path for display. An unmapped environment stays scoped by source
+and environment.
 Recognize default local sources by registered root and environment, independently
 of how access was granted. Normalize unambiguous absolute path spellings by byte
 and collapse Claude worktrees to their repository root. Keep parent traversal
