@@ -51,6 +51,14 @@ func masksMultilineValues() {
     #expect(SecretMasker.mask(truncated) == "DEBUG=yes\nAPI_SECRET=\"\(marker)")
 }
 
+@Test("SEC-8 / §12.2: backtick quoting keeps embedded hashes and multiline values private")
+func masksBacktickValues() {
+    let text = "API_SECRET=`first # part\r\nsecond \\` part` # visible\r\nMODE=demo"
+    #expect(SecretMasker.mask(text) == "API_SECRET=`\(marker)` # visible\r\nMODE=demo")
+    let truncated = "API_SECRET=`first # part\npartial second line"
+    #expect(SecretMasker.mask(truncated) == "API_SECRET=`\(marker)")
+}
+
 @Test("SEC-8 / §12.2: private key blocks require a matching end and are masked if truncated")
 func masksPrivateKeyBlocks() {
     let text = "说明\n-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC BODY\n"

@@ -70,7 +70,7 @@ public enum SecretMasker {
     private static func assignmentValue(in text: NSString, from start: Int) -> NSRange? {
         guard start < text.length else { return nil }
         let first = text.character(at: start)
-        let quoted = first == 0x22 || first == 0x27
+        let quoted = first == 0x22 || first == 0x27 || first == 0x60
         let valueStart = quoted ? start + 1 : start
         var cursor = valueStart
         var precededBySpace = true
