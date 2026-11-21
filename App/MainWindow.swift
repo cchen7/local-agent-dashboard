@@ -1,3 +1,5 @@
+import ADCore
+import ADSearch
 import SwiftUI
 
 struct MainWindow: View {
@@ -31,17 +33,24 @@ struct MainWindow: View {
                     NavigationSplitView {
                         sidebar
                     } content: {
-                        sessionList
+                        sessionColumn
                             .navigationSplitViewColumnWidth(min: 300, ideal: preferredListWidth(geometry.size.width), max: 420)
                             .navigationTitle("Sessions")
                     } detail: {
-                        if let session = model.selectedSession, let store = model.store {
-                            SessionTranscript(session: session, store: store)
-                                .id(session.id)
+                        if let session = model.selectedSession, let store = model.store,
+                           !model.isSearchingSessions || model.selectedMatchKey != nil {
+                            let match = model.selectedMatchKey
+                            SessionTranscript(session: session, store: store, openingMatch: match)
+                                .id(TranscriptSelection(session: session.id, match: match))
                         } else {
                             emptyDetail
                         }
                     }
+                }
+                .searchable(text: $model.sessionSearchText, prompt: Text("Search Sessions"))
+                .task(id: SearchInput(text: model.sessionSearchText, offset: model.sessionSearchOffset,
+                                       ready: model.store != nil)) {
+                    await model.runSessionSearch(model.sessionSearchText, offset: model.sessionSearchOffset)
                 }
             }
         }
@@ -57,6 +66,63 @@ struct MainWindow: View {
                 SettingsLink { Label("Source Access", systemImage: "folder.badge.gearshape") }
                     .accessibilityIdentifier("openSettings")
             }
+        }
+    }
+
+    @ViewBuilder private var sessionColumn: some View {
+        if model.isSearchingSessions {
+            switch model.sessionSearchState {
+            case .waiting:
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .invalid:
+                EmptyPanel(title: "Check the search query", symbol: "magnifyingglass",
+                           message: "Check quoted phrases and filter values.")
+            case .failed:
+                EmptyPanel(title: "Could not search sessions", symbol: "exclamationmark.triangle",
+                           message: "Edit the query to try again.")
+            case .results(let results):
+                searchResults(results)
+            }
+        } else {
+            sessionList
+        }
+    }
+
+    @ViewBuilder private func searchResults(_ results: SessionSearchResults) -> some View {
+        if results.hits.isEmpty {
+            EmptyPanel(title: "No search matches", symbol: "magnifyingglass",
+                       message: "Try a different word or filter.")
+        } else {
+            let sessions = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0) })
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Matches: \(results.matchCount) · Sessions: \(results.sessionCount)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                if results.sessionCount > DashboardModel.sessionSearchPageSize {
+                    HStack(spacing: 8) {
+                        Text("Sessions \(model.sessionSearchOffset + 1)–\(model.sessionSearchOffset + results.hits.count)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button { model.pageSessionSearch(forward: false) } label: {
+                            Label("Earlier Results", systemImage: "chevron.left").labelStyle(.iconOnly)
+                        }
+                        .disabled(model.sessionSearchOffset == 0)
+                        Button { model.pageSessionSearch(forward: true) } label: {
+                            Label("Later Results", systemImage: "chevron.right").labelStyle(.iconOnly)
+                        }
+                        .disabled(model.sessionSearchOffset + results.hits.count >= results.sessionCount)
+                    }
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+                }
+                List(selection: $model.selectedSessionID) {
+                    ForEach(results.hits) { hit in
+                        if let session = sessions[hit.id] {
+                            SessionListCell(session: session, snippet: hit.snippet).tag(hit.id)
+                        }
+                    }
+                }
+            }
+            .accessibilityIdentifier("sessions.searchResults")
         }
     }
 
@@ -106,6 +172,17 @@ struct MainWindow: View {
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
     }
+}
+
+private struct SearchInput: Equatable {
+    let text: String
+    let offset: Int
+    let ready: Bool
+}
+
+private struct TranscriptSelection: Hashable {
+    let session: SessionKey
+    let match: String?
 }
 
 struct EmptyPanel: View {

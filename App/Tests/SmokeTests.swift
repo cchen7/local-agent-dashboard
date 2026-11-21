@@ -97,6 +97,18 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    func testChineseSearchOpensTheMatchedTranscriptPage() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.click()
+        search.typeText("登录")
+        XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["修复登录问题 · Synthetic search target"].waitForExistence(timeout: 5))
+        XCTAssertFalse(window.staticTexts["API_TOKEN=synthetic-preview-only"].exists)
+    }
+
     func testMenuPanelReopensClosedDashboard() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
         window.buttons[XCUIIdentifierCloseWindow].click()

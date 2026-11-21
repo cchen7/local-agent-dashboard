@@ -109,3 +109,14 @@ before formatting; raw transcript data stays in the app's index. An explicit
 reveal applies to one entry and expires after ten seconds, when the entry
 leaves the view, or when the app loses focus. Markdown does not open links or
 load images from transcripts.
+
+## DEV-037 — Use the app-owned index for grouped search and navigation
+
+Compile the query tree to literal FTS operands and bound SQL arguments. Keep
+ranking and the first match in file order separate. Fetch text only for the
+displayed 50-group page in the same read snapshot, then mask complete values
+before cropping snippets. Full-text reads may use a reader-local 64 MiB
+SQLite mapping to avoid copying hot pages. Dates use the display time zone;
+`after:` includes the start of that local day and `before:` excludes it.
+Directory filters compare whole components of recorded paths; the host
+home is used only for `~/`.
