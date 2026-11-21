@@ -24,13 +24,19 @@ public struct SessionRecord: Codable, Equatable, Sendable {
     public var startedAt: Int64?
     public var lastEventAt: Int64?
     public var status: SessionStatus
+    public var gitBranch: String?
+    public var cliVersion: String?
+    public var model: String?
+    public var parentNativeID: String?
     /// Create a normalized value without performing file access.
     public init(key: SessionKey, sourceID: Int64, fileID: Int64? = nil, environment: String,
                 cwd: String? = nil, title: String? = nil, startedAt: Int64? = nil,
-                lastEventAt: Int64? = nil, status: SessionStatus = .unknown) {
+                lastEventAt: Int64? = nil, status: SessionStatus = .unknown, gitBranch: String? = nil,
+                cliVersion: String? = nil, model: String? = nil, parentNativeID: String? = nil) {
         self.key = key; self.sourceID = sourceID; self.fileID = fileID; self.environment = environment
         self.cwd = cwd; self.title = title; self.startedAt = startedAt; self.lastEventAt = lastEventAt
         self.status = status
+        self.gitBranch = gitBranch; self.cliVersion = cliVersion; self.model = model; self.parentNativeID = parentNativeID
     }
 }
 

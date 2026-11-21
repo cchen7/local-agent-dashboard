@@ -1,13 +1,5 @@
+import ADCore
 import Foundation
-
-/// One complete physical line. Offsets include its LF (or CRLF), while bytes
-/// exclude the terminator. Oversized lines carry a bounded prefix.
-public struct JSONLFrame: Sendable {
-    public let bytes: Data
-    public let isTruncated: Bool
-    public let endOffset: Int64
-    public let sequence: Int64
-}
 
 struct JSONLFramer {
     private let prefixLimit: Int

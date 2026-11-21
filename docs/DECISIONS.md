@@ -105,6 +105,17 @@ replay with the adapter's existing dedupe keys. Older indexed records are
 retained for the archive. This implements the common importer without
 assuming any vendor's record format.
 
+## DEV-039 — Normalize Claude Code files before indexing
+
+Enumerate the authorized root descriptor without following symlinks. Use a
+file's session ID for its transcript and the recorded workspace for display.
+Persist the nested child's parent hint so it resolves when the parent arrives
+later. Usage keeps the first owning session, and a compatible increase in
+cumulative output updates that response without adding a second token row.
+Thinking blocks stay outside the index; unclassified or partial message
+bodies keep an unknown marker rather than exposing hidden blocks through a
+raw fallback. Searchable tool text is capped by bytes.
+
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 
 The owner removed Markdown/JSON session export from the product scope. Full

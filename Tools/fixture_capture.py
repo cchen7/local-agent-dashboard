@@ -45,7 +45,7 @@ window_minutes resets_at plan_type model_context_window context_window
 stop_reason stop_sequence isMeta is_error success error code status kind data
 startTime endTime created_at updated_at started_at completed_at duration_ms
 context approval_policy sandbox_policy effort precision producer copilotVersion
-summary title description instructions command path file_path filePath directory
+summary title description display instructions command path file_path filePath directory
 project project_path workspace workspace_path repository filename files changes
 added removed lines_added lines_removed count seq optional active metadata
 last_agent_message parent forked_from continued_from agentType

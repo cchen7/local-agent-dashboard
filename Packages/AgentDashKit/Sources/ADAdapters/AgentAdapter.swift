@@ -1,14 +1,19 @@
 import Foundation
 import ADCore
 
-/// Future vendor adapters; M0 implements no parser and reads no agent data.
+/// A per-file decoder consumes only the complete frames supplied by ingestion.
+public protocol AgentFileDecoder {
+    mutating func decode(_ frame: JSONLFrame, context: JSONLDecodeContext) -> DecodedJSONLFrame
+}
+
+/// Normalize local JSONL without opening or writing the app-owned index.
 public protocol AgentAdapter: Sendable {
+    associatedtype Decoder: AgentFileDecoder
     static var kind: AgentKind { get }
     static var parserVersion: Int { get }
-    /// Discover local files without modifying or locking sources.
-    func discover(root: URL) async throws -> [SourceFile]
-    /// Resume parsing at a complete-record checkpoint and emit deterministic identities.
-    func parse(_ file: SourceFile, from checkpoint: Checkpoint?) -> AsyncThrowingStream<NormalizedRecord, Error>
+    /// The caller has already authorized the root and owns its access lifetime.
+    func discover(in source: Source, authorizedRoot: URL) throws -> [SourceFile]
+    func makeDecoder(for file: SourceFile, in source: Source) throws -> Decoder
     /// Return text for copying only; never execute the command.
     func resumeCommand(for session: SessionRecord) -> String?
 }

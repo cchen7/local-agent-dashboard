@@ -253,11 +253,24 @@ after the inventory snapshot and is not included in the tables above. It verifie
 the configured provider/model and a completed agent tool loop, not upstream model
 deployment telemetry. Do not classify the `exec` entrypoint as a separate environment.
 
-## Adapter fixture status
+## Claude Code parser contract
 
-Claude, Codex, Copilot and Grok adapter fixtures have not yet been captured or
-approved. M0-TOOLING must first deliver and validate the sanitizer. EXP-1 does not
-waive capture-before-parser, accounting golden tests, or read-only source access.
+The checked-in Claude Code tests use wholly synthetic project transcripts,
+child transcripts, and prompt history drawn from the contract in SPEC §5.4.
+The public [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+describes resume, and [Agent SDK cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
+describes cumulative output usage and cache token fields. Public
+[history examples](https://github.com/anthropics/claude-code/issues/19995)
+show the prompt, workspace and timestamp fields. Local capture checks stay
+outside the repository; no captured bytes or account details are part of
+these tests. Capture preserves the public `display` field name and masks its
+value just like other prompt text.
+
+The parser uses the transcript filename as its session identity, so copied
+rows cannot replace that session's workspace. The nested subagent directory
+supplies a parent hint; a flat legacy filename alone does not. Response
+fragments can advance a globally deduplicated output count only for the same
+input/cache basis. Prompt history is kept separate from transcripts.
 
 ## Local source availability for M0
 

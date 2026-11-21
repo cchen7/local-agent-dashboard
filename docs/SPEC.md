@@ -217,7 +217,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 |---|---|
 | Root | `~/.claude` (user may add other roots, e.g. a custom `CLAUDE_CONFIG_DIR`) |
 | Session files | `projects/<encoded-path>/<session-uuid>.jsonl` — one file per session, append-only |
-| Subagents | Newer versions: `projects/<…>/<session-uuid>/subagents/agent-*.jsonl` with `agent-*.meta.json` (`agentType`, `description`). Older versions: `projects/<…>/agent-*.jsonl`. Both become child sessions with `parent_session_id`. |
+| Subagents | Newer versions: `projects/<…>/<session-uuid>/subagents/agent-*.jsonl` with `agent-*.meta.json` (`agentType`, `description`). Older versions: `projects/<…>/agent-*.jsonl`. Index both separately and link `parent_session_id` when the parent ID is known. |
 | Large tool outputs | `projects/<…>/<session-uuid>/tool-results/*.txt`: not indexed; read on demand when viewing. |
 | Prompt history | `~/.claude/history.jsonl`: one line per prompt the user typed (timestamp + project path). Index as "prompt history" records so prompts stay searchable after transcripts are cleaned up. |
 | Directory | **Never derive the path from the folder name** (`/` and `.` both become `-`; it cannot be reversed). Use each record's `cwd`; same for `gitBranch` and `version` (take the latest non-null value; `cwd` can change mid-session — record the change). |

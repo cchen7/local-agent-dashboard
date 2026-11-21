@@ -1,3 +1,4 @@
+import ADAdapters
 import ADCore
 import ADStore
 import Foundation
@@ -5,30 +6,6 @@ import Foundation
 /// ADP-1…5. Categories only; never carry source paths or record bytes.
 public enum JSONLImportFailure: Error, Equatable, Sendable {
     case invalidParserVersion, positionOverflow, sourceChanged, recordLimit, stateLimit
-}
-
-public struct JSONLDecodeContext: Sendable {
-    public let fileID: Int64
-    public let previousTimestamp: Int64?
-    public let state: Data?
-}
-
-/// The adapter owns normalized record identities and tolerant decoding.
-/// A nil timestamp keeps the prior timestamp. Forward the state in the
-/// input context when the resume data remains unchanged.
-public struct DecodedJSONLFrame: Sendable {
-    public let records: [NormalizedRecord]
-    public let timestamp: Int64?
-    public let state: Data?
-    public let isUnknown: Bool
-
-    public init(records: [NormalizedRecord] = [], timestamp: Int64? = nil,
-                state: Data? = nil, isUnknown: Bool = false) {
-        self.records = records
-        self.timestamp = timestamp
-        self.state = state
-        self.isUnknown = isUnknown
-    }
 }
 
 public struct JSONLImportResult: Equatable, Sendable {
@@ -43,6 +20,19 @@ public enum JSONLFileImporter {
     private static let prefixLimit = 1024 * 1024
     private static let batchLimit = 500
     private static let batchInterval: Duration = .milliseconds(200)
+
+    /// Connect a discovered file to its adapter and the transactional store.
+    @discardableResult
+    public static func importFile<A: AgentAdapter>(_ file: SourceFile, from source: Source,
+                                                   authorizedRoot: URL, store: AgentStore, adapter: A)
+    throws -> JSONLImportResult {
+        var versioned = file
+        versioned.parserVersion = A.parserVersion
+        var decoder = try adapter.makeDecoder(for: versioned, in: source)
+        return try importFile(versioned, authorizedRoot: authorizedRoot, store: store) {
+            decoder.decode($0, context: $1)
+        }
+    }
 
     /// Import one discovered file beneath a root the caller already authorized.
     /// Run off the UI actor. Never pass an unverified watcher hint as a file.
