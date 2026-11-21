@@ -779,7 +779,7 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 - Two tabs: **Overview** | **Transcript**.
   - Overview: main-topic chips, latest progress (§10.3), touched files (top 10, with +/-), commands run (top 10), mini token chart for this session.
   - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to full input/output; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
-    Read bounded pages in file order, with the event row ID breaking sequence ties. Seek straight to a selected match without reading intervening pages. Pages are scoped to one session; restart paging when the file order changes.
+    Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Seek straight to a selected match without reading intervening pages. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor.
 - Bottom buttons:
   - **Copy Resume Command** (primary; replaces the prototype's old "Open in Terminal"): copies the command from §5 / Appendix C.
   - **Show in Finder** (reveals the session's record file).
@@ -941,6 +941,8 @@ Apply the display projection to raw text before rendering Markdown or snippets.
 Keep dotenv names and comments visible; when a quoted secret or private-key
 block is truncated, hide its remaining content. The projection leaves the
 stored transcript untouched and is not a data sanitization tool.
+Reveal applies to one entry and ends after ten seconds, when the entry leaves
+the view, or when the app loses focus.
 
 ### 12.3 Exclusions
 

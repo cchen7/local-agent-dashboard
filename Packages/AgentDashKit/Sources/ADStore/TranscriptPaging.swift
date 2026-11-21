@@ -2,7 +2,7 @@ import ADCore
 import GRDB
 
 public enum TranscriptPagingError: Error, Equatable, Sendable {
-    case invalidLimit, foreignCursor
+    case invalidLimit, foreignCursor, staleCursor
 }
 
 /// An opaque position in one session's file order. A cursor avoids scanning and
@@ -32,39 +32,63 @@ public extension AgentStore {
     /// restart navigation when a rewrite changes the file order.
     func transcriptPage(in session: SessionKey, request: TranscriptPageRequest = .first,
                         limit: Int = 128) throws -> TranscriptPage? {
+        try Self.validate(request, in: session, limit: limit)
+        return try databasePool.read { db in
+            try Self.fetchPage(in: session, request: request, limit: limit, db: db)
+        }
+    }
+
+    /// Observe the requested page as the index changes, retaining only the latest snapshot.
+    func transcriptPageUpdates(in session: SessionKey, request: TranscriptPageRequest = .first,
+                               limit: Int = 128) throws -> some AsyncSequence<TranscriptPage?, any Error> & Sendable {
+        try Self.validate(request, in: session, limit: limit)
+        return ValueObservation.tracking { db in
+            try Self.fetchPage(in: session, request: request, limit: limit, db: db)
+        }
+        .removeDuplicates()
+        .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
+    }
+
+    private static func validate(_ request: TranscriptPageRequest, in session: SessionKey, limit: Int) throws {
         guard (1...256).contains(limit) else { throw TranscriptPagingError.invalidLimit }
         switch request {
         case .before(let cursor), .after(let cursor):
             guard cursor.session == session else { throw TranscriptPagingError.foreignCursor }
         default: break
         }
-        return try databasePool.read { db in
-            guard let id = try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE agent=? AND native_id=?",
-                                             arguments: [session.agent.rawValue, session.nativeID])
-            else { return nil }
-            let paging = TranscriptPaging(db: db, sessionID: id)
-            let rows: [Row]
-            switch request {
-            case .first: rows = try paging.rows(.later, limit: limit)
-            case .last: rows = Array(try paging.rows(.earlier, limit: limit).reversed())
-            case .after(let cursor): rows = try paging.rows(.later, pivot: cursor.position, limit: limit)
-            case .before(let cursor): rows = Array(try paging.rows(.earlier, pivot: cursor.position, limit: limit).reversed())
-            case .around(let key):
-                guard let anchor = try paging.anchor(key) else { return nil }
-                rows = try paging.window(around: anchor, limit: limit)
-            }
-            guard let first = rows.first, let last = rows.last else {
-                return .init(events: [], older: nil, newer: nil)
-            }
-            let firstPosition = TranscriptPosition(first)
-            let lastPosition = TranscriptPosition(last)
-            let older = try paging.exists(.earlier, pivot: firstPosition)
-                ? TranscriptCursor(session: session, position: firstPosition) : nil
-            let newer = try paging.exists(.later, pivot: lastPosition)
-                ? TranscriptCursor(session: session, position: lastPosition) : nil
-            return .init(events: try rows.map { try Self.readTranscriptEvent($0, in: session) },
-                         older: older, newer: newer)
+    }
+
+    private static func fetchPage(in session: SessionKey, request: TranscriptPageRequest, limit: Int,
+                                  db: Database) throws -> TranscriptPage? {
+        guard let id = try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE agent=? AND native_id=?",
+                                         arguments: [session.agent.rawValue, session.nativeID])
+        else { return nil }
+        let paging = TranscriptPaging(db: db, sessionID: id)
+        let rows: [Row]
+        switch request {
+        case .first: rows = try paging.rows(.later, limit: limit)
+        case .last: rows = Array(try paging.rows(.earlier, limit: limit).reversed())
+        case .after(let cursor):
+            try paging.requirePivot(cursor.position)
+            rows = try paging.rows(.later, pivot: cursor.position, limit: limit)
+        case .before(let cursor):
+            try paging.requirePivot(cursor.position)
+            rows = Array(try paging.rows(.earlier, pivot: cursor.position, limit: limit).reversed())
+        case .around(let key):
+            guard let anchor = try paging.anchor(key) else { return nil }
+            rows = try paging.window(around: anchor, limit: limit)
         }
+        guard let first = rows.first, let last = rows.last else {
+            return .init(events: [], older: nil, newer: nil)
+        }
+        let firstPosition = TranscriptPosition(first)
+        let lastPosition = TranscriptPosition(last)
+        let older = try paging.exists(.earlier, pivot: firstPosition)
+            ? TranscriptCursor(session: session, position: firstPosition) : nil
+        let newer = try paging.exists(.later, pivot: lastPosition)
+            ? TranscriptCursor(session: session, position: lastPosition) : nil
+        return .init(events: try rows.map { try Self.readTranscriptEvent($0, in: session) },
+                     older: older, newer: newer)
     }
 }
 
@@ -87,6 +111,13 @@ private struct TranscriptPaging {
 
     func anchor(_ key: String) throws -> Row? {
         try Row.fetchOne(db, sql: "SELECT * FROM events WHERE dedupe_key=? AND session_id=?", arguments: [key, sessionID])
+    }
+
+    func requirePivot(_ position: TranscriptPosition) throws {
+        guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM events WHERE id=? AND session_id=? AND seq=?)",
+                                arguments: [position.rowID, sessionID, position.sequence]) == true else {
+            throw TranscriptPagingError.staleCursor
+        }
     }
 
     func rows(_ direction: Direction, pivot: TranscriptPosition? = nil, limit: Int) throws -> [Row] {
