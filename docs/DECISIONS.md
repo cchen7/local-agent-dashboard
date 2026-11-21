@@ -106,6 +106,14 @@ replay with the adapter's existing dedupe keys. Older indexed records are
 retained for the archive. This implements the common importer without
 assuming any vendor's record format.
 
+## DEV-048 — Separate index status from directory access
+
+Source diagnostics summarize committed app-index records. A file is counted
+as indexed only after a checkpoint is persisted. Keep partial, missing and
+error file counts separate; exclude prompt-history buckets from navigable
+session counts. Show only a recorded scan timestamp and a typed error
+indicator, never source modification times or raw stored error text.
+
 ## DEV-039 — Normalize Claude Code files before indexing
 
 Enumerate the authorized root descriptor without following symlinks. Use the
