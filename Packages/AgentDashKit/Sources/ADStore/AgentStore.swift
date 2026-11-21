@@ -5,7 +5,7 @@ import ADCore
 /// Store errors deliberately omit paths, record contents, and bookmark bytes.
 public enum StoreError: Error, Equatable, Sendable {
     case invalidLocation, invalidRelativePath, invalidCheckpoint, invalidTokenCounts
-    case missingSession, missingFile, invalidStoredValue, missingMigration
+    case missingSession, missingFile, invalidStoredValue, missingMigration, staleCheckpoint
 }
 
 /// App-owned WAL database. The caller must supply a URL in its own container (or a
@@ -27,6 +27,12 @@ public final class AgentStore: Sendable {
         let schema = try String(contentsOf: url, encoding: .utf8)
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1") { db in try db.execute(sql: schema) }
+        migrator.registerMigration("v2_jsonl_checkpoint") { db in
+            try db.execute(sql: """
+                ALTER TABLE source_files ADD COLUMN device INTEGER;
+                ALTER TABLE source_files ADD COLUMN decoder_state BLOB;
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -103,12 +109,7 @@ public final class AgentStore: Sendable {
 
     /// A file without an observed inode/size has no durable read checkpoint yet.
     public func checkpoint(for fileID: Int64) throws -> Checkpoint? {
-        try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM source_files WHERE id=?", arguments: [fileID]),
-                  let size: Int64 = row["size"] else { return nil }
-            return Checkpoint(inode: row["inode"], size: size, offset: row["read_offset"],
-                              parserVersion: row["parser_version"], sequence: row["last_seq"], previousTimestamp: row["previous_ts"])
-        }
+        try databasePool.read { try Self.readCheckpoint(fileID, db: $0) }
     }
 
     /// Atomically persist ordered records and optional file progress. Dedupe-key conflicts
@@ -116,16 +117,43 @@ public final class AgentStore: Sendable {
     /// This M0 primitive does not yet calculate rollups or insights.
     public func write(_ records: [NormalizedRecord], fileID: Int64? = nil, checkpoint: Checkpoint? = nil) throws {
         try databasePool.write { db in
-            for record in records {
-                switch record {
-                case .session(let session): try Self.save(session, db: db)
-                case .event(let event): try Self.save(event, db: db)
-                case .tokens(let event): try Self.save(event, db: db)
-                }
-            }
+            try Self.save(records, db: db)
             if let checkpoint {
                 guard let fileID else { throw StoreError.missingFile }
                 try Self.save(checkpoint, fileID: fileID, db: db)
+            }
+        }
+    }
+
+    /// Commit parsed records only if the read position is still the expected
+    /// one. This check is in the writer transaction to reject concurrent scans.
+    public func commitFileBatch(_ records: [NormalizedRecord], for fileID: Int64,
+                                from expected: Checkpoint?, to next: Checkpoint) throws {
+        try databasePool.write { db in
+            guard try Self.readCheckpoint(fileID, db: db) == expected else {
+                throw StoreError.staleCheckpoint
+            }
+            try Self.save(records, db: db)
+            try Self.save(next, fileID: fileID, db: db)
+        }
+    }
+
+    private static func readCheckpoint(_ fileID: Int64, db: Database) throws -> Checkpoint? {
+        guard let row = try Row.fetchOne(db, sql: "SELECT * FROM source_files WHERE id=?", arguments: [fileID]),
+              let size: Int64 = row["size"] else { return nil }
+        return Checkpoint(inode: row["inode"], size: size, offset: row["read_offset"],
+                          parserVersion: row["parser_version"], sequence: row["last_seq"],
+                          previousTimestamp: row["previous_ts"], device: row["device"],
+                          modificationTimeNS: row["mtime_ns"], decoderState: row["decoder_state"],
+                          unknownRecords: row["unknown_records"])
+    }
+
+    private static func save(_ records: [NormalizedRecord], db: Database) throws {
+        for record in records {
+            switch record {
+            case .session(let session): try save(session, db: db)
+            case .event(let event): try save(event, db: db)
+            case .tokens(let event): try save(event, db: db)
             }
         }
     }
@@ -192,11 +220,18 @@ public final class AgentStore: Sendable {
 
     private static func save(_ checkpoint: Checkpoint, fileID: Int64, db: Database) throws {
         guard checkpoint.size >= 0, checkpoint.offset >= 0, checkpoint.offset <= checkpoint.size,
-              checkpoint.parserVersion > 0, checkpoint.sequence >= -1 else { throw StoreError.invalidCheckpoint }
+              checkpoint.parserVersion > 0, checkpoint.sequence >= -1, checkpoint.unknownRecords >= 0,
+              (checkpoint.decoderState?.count ?? 0) <= Checkpoint.maximumDecoderStateBytes
+        else { throw StoreError.invalidCheckpoint }
         try db.execute(sql: """
-            UPDATE source_files SET inode=?,size=?,read_offset=?,parser_version=?,last_seq=?,previous_ts=? WHERE id=?
-            """, arguments: [checkpoint.inode, checkpoint.size, checkpoint.offset, checkpoint.parserVersion,
-                              checkpoint.sequence, checkpoint.previousTimestamp, fileID])
+            UPDATE source_files SET device=?,inode=?,size=?,mtime_ns=?,read_offset=?,parser_version=?,
+                last_seq=?,previous_ts=?,decoder_state=?,unknown_records=?,
+                state=CASE WHEN ? < ? THEN 'partial' ELSE 'ok' END,last_error=NULL
+            WHERE id=?
+            """, arguments: [checkpoint.device, checkpoint.inode, checkpoint.size, checkpoint.modificationTimeNS,
+                              checkpoint.offset, checkpoint.parserVersion, checkpoint.sequence,
+                              checkpoint.previousTimestamp, checkpoint.decoderState, checkpoint.unknownRecords,
+                              checkpoint.offset, checkpoint.size, fileID])
         guard db.changesCount == 1 else { throw StoreError.missingFile }
     }
 }

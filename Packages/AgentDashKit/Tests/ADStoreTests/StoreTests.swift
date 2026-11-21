@@ -21,7 +21,7 @@ private func seed(_ store: AgentStore) throws -> SessionRecord {
     return session
 }
 
-@Test("M0: fresh and reopened WAL database has v1 tables, foreign keys and registered tokenizer")
+@Test("M0 / ADP-2: fresh and reopened WAL database has its tables, foreign keys and tokenizer")
 func freshAndReopened() throws {
     try withStore { store, directory in
         let session = try seed(store)
@@ -32,7 +32,8 @@ func freshAndReopened() throws {
         try reopened.databasePool.read { db throws -> Void in
             #expect(try String.fetchOne(db, sql: "PRAGMA journal_mode") == "wal")
             #expect(try Int.fetchOne(db, sql: "PRAGMA foreign_keys") == 1)
-            #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations") == ["v1"])
+            #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY identifier") ==
+                ["v1", "v2_jsonl_checkpoint"])
             for name in ["sources", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
                          "file_touches", "commands", "token_events", "token_minute", "rate_limit_snapshots",
                          "session_keywords", "term_df", "saved_searches", "app_meta"] {
@@ -41,6 +42,59 @@ func freshAndReopened() throws {
             #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?", arguments: ["登录"]) == 1)
             #expect(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty)
         }
+    }
+}
+
+@Test("ADP-2: upgrading an existing v1 database retains its source progress")
+func upgradesLegacyCheckpoint() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jsonl-migration-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("index.sqlite")
+    let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+    let original = try String(contentsOf: package.appendingPathComponent("Sources/ADStore/Resources/v1.sql"),
+                              encoding: .utf8)
+    do {
+        var config = Configuration()
+        config.prepareDatabase { $0.add(tokenizer: AgentDashTokenizer.self) }
+        let legacy = try DatabaseQueue(path: url.path, configuration: config)
+        var migrations = DatabaseMigrator()
+        migrations.registerMigration("v1") { db in try db.execute(sql: original) }
+        try migrations.migrate(legacy)
+        try legacy.write { db in
+            try db.execute(sql: """
+                INSERT INTO sources(id,agent,label,root_path,access_kind)
+                VALUES(1,'codex','Synthetic','/synthetic','default_location');
+                INSERT INTO source_files(id,source_id,rel_path,role,inode,size,mtime_ns,read_offset,
+                                         last_seq,previous_ts,parser_version,state,unknown_records)
+                VALUES(1,1,'file.jsonl','session',17,12,100,10,3,200,2,'partial',1);
+                """)
+        }
+    }
+
+    let upgraded = try AgentStore(databaseURL: url)
+    #expect(try upgraded.checkpoint(for: 1) == Checkpoint(inode: 17, size: 12, offset: 10, parserVersion: 2,
+                                                         sequence: 3, previousTimestamp: 200,
+                                                         modificationTimeNS: 100, unknownRecords: 1))
+}
+
+@Test("ADP-2/3: a stale batch cannot write records or overwrite the winning checkpoint")
+func staleFileBatchIsAtomic() throws {
+    try withStore { store, _ in
+        let session = try seed(store)
+        let file = SourceFile(sourceID: session.sourceID, relativePath: "synthetic.jsonl", role: .session)
+        let fileID = try store.upsertFile(file, checkpoint: nil)
+        let first = Checkpoint(inode: 3, size: 12, offset: 12, parserVersion: 1, sequence: 0,
+                               previousTimestamp: 4, device: 2, modificationTimeNS: 5)
+        try store.commitFileBatch([], for: fileID, from: nil, to: first)
+        let staleEvent = EventRecord(session: session.key, sequence: 0, timestamp: 4, kind: .assistant,
+                                     text: "Stale synthetic text", dedupeKey: "synthetic:stale")
+        #expect(throws: StoreError.staleCheckpoint) {
+            try store.commitFileBatch([.event(staleEvent)], for: fileID, from: nil, to: first)
+        }
+        #expect(try store.events(in: session.key).isEmpty)
+        #expect(try store.checkpoint(for: fileID) == first)
     }
 }
 

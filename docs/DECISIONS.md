@@ -94,6 +94,18 @@ converts the 960×600 outer minimum to content constraints without a fixed toolb
 height. Its state belongs to window content; unchanged native values are not
 reassigned. All six size/appearance combinations were executed and visually checked.
 
+## DEV-038 — Commit JSONL batches against the expected checkpoint
+
+Read the expected checkpoint before opening the pinned, read-only source
+descriptor, then read the file up to its observed size. Preserve
+newline byte offsets and keep at most a 1 MiB prefix of a physical line.
+The adapter normalizes complete lines; record writes, decoder state and the
+checkpoint share a transaction that rejects stale readers. A changed
+device/inode, shrink, same-size modification, or parser version causes
+replay with the adapter's existing dedupe keys. Older indexed records are
+retained for the archive. This implements the common importer without
+assuming any vendor's record format.
+
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 
 The owner removed Markdown/JSON session export from the product scope. Full
