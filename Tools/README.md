@@ -23,6 +23,9 @@ The default smoke profile writes 8 sessions, 288 JSONL records and
 session/usage records, not just displayed messages. Raw bytes include the
 Grok sidecars and exclude the manifest. Use `--plan` to check the full
 configuration without writing anything. Generation checks free space first.
+The separate `benchmark-native` profile has the same total sessions,
+records, and bytes, all in Claude Code, Codex, and Copilot CLI logs,
+so the importer can process all 5 GB while Grok is deferred.
 
 The command prints the path of a fresh, owner-only temporary directory.
 There is no input log or user-specified output path. When the App-owned index
@@ -48,6 +51,30 @@ fixture captured from a real Grok installation or proof of its adapter.
 Generating the corpus is not an ingestion benchmark. Measure elapsed import
 time and database bytes separately, and report which sources the App
 actually imported.
+
+To measure the production importer and the SQLite footprint in an optimized
+test process:
+
+```sh
+corpus=$(Tools/synthgen --profile benchmark)
+AGENTDASH_FULL_INDEX_CORPUS="${corpus##*/}" \
+  swift test --package-path Packages/AgentDashKit -c release \
+  --filter firstIndexFromSyntheticCorpus
+```
+
+The test accepts the generator's temporary directory identifier, uses a new
+index and the bundled price table, and checks persisted checkpoints, sessions
+and token components against the manifest. Sources run concurrently as in
+onboarding, sharing one index. It reports import time separately from the
+final WAL checkpoint, with sizes for the live and checkpointed SQLite files.
+Use the smoke profile or set `AGENTDASH_FULL_INDEX_SERIAL=1` for diagnostics
+without performance assertions. Grok bytes stay outside the measured throughput
+and storage denominator until there is a native importer. The result is a
+package benchmark with the same import and persistence code as the app;
+UI work and live watcher startup are not measured.
+Use `--profile benchmark-native` in the generation command to verify the
+full 5 GB duration on the three native importers. Keep the four-format
+profile and its unsupported coverage separate in reports.
 
 ## Guardrails
 

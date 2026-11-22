@@ -17,6 +17,7 @@ import uuid
 
 
 AGENTS = ("claude_code", "codex", "copilot", "grok_build")
+NATIVE_AGENTS = ("claude_code", "codex", "copilot")
 COUNTS = ("inputFresh", "cacheRead", "cacheWrite", "cacheWrite1h", "output", "reasoning")
 MODEL = dict(zip(AGENTS, ("claude-opus-5-5", "gpt-6.2-sol", "gpt-6.2-sol", "grok-4.7")))
 SAMPLE = dict(zip(AGENTS, ((37, 11, 7, 3, 13, 0), (31, 9, 0, 0, 11, 3), (29, 8, 4, 0, 9, 2), (23, 6, 0, 0, 7, 0))))
@@ -38,11 +39,13 @@ class Profile:
     sessions: int
     records: int
     raw_bytes: int
+    agents: tuple[str, ...] = AGENTS
 
 
 PROFILES = {
     "smoke": Profile(8, 288, 1_000_000),
     "benchmark": Profile(2_000, 1_000_000, 5_000_000_000),
+    "benchmark-native": Profile(2_000, 1_000_000, 5_000_000_000, NATIVE_AGENTS),
 }
 
 
@@ -88,9 +91,11 @@ def split(total, count, position):
 
 
 def session_layout(profile, seed):
-    if profile.sessions < 4 or profile.records < profile.sessions * 8 or profile.raw_bytes <= 0:
-        raise CorpusError("need four agent families and at least eight records per session")
-    return tuple(Session(AGENTS[i % 4], i, seed, split(profile.records, profile.sessions, i))
+    agents = profile.agents
+    if (not agents or len(set(agents)) != len(agents) or not set(agents).issubset(AGENTS)
+            or profile.sessions < len(agents) or profile.records < profile.sessions * 8 or profile.raw_bytes <= 0):
+        raise CorpusError("need at least one session per agent and eight records per session")
+    return tuple(Session(agents[i % len(agents)], i, seed, split(profile.records, profile.sessions, i))
                  for i in range(profile.sessions))
 
 
@@ -221,7 +226,7 @@ def sidecars(session, sid):
 def plan(profile, seed, label):
     sessions = session_layout(profile, seed)
     agents = {name: {"root": name, "sessions": 0, "records": 0, "rawBytes": 0, "outputSlots": 0,
-                     "expectedTokens": dict(zip(COUNTS, ZERO))} for name in AGENTS}
+                     "expectedTokens": dict(zip(COUNTS, ZERO))} for name in profile.agents}
     for session in sessions:
         stats = agents[session.agent]
         stats["sessions"] += 1
@@ -357,7 +362,7 @@ def generate(prepared, parent, sources):
     sessions, manifest, slots, excess = prepared
     output = new_output(parent, sources, manifest["rawBytes"])
     ordinal = 0
-    written = {name: 0 for name in AGENTS}
+    written = {name: 0 for name in manifest["agents"]}
     for session in sessions:
         sid = session.id
         filename = output / session.agent / session.log(sid)
@@ -375,7 +380,7 @@ def generate(prepared, parent, sources):
                 written[session.agent] += file.write(data)
     if sum(written.values()) != manifest["rawBytes"] or ordinal != slots:
         raise CorpusError("raw file size did not match the plan")
-    for name in AGENTS:
+    for name in written:
         manifest["agents"][name]["rawBytes"] = written[name]
     with (output / "manifest.json").open("x", encoding="utf-8") as file:
         json.dump(manifest, file, ensure_ascii=False, indent=2)
