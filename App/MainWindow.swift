@@ -13,6 +13,8 @@ struct MainWindow: View {
     @State private var removalFailed = false
     @State private var sessionGrouping: SessionProjectGrouping?
     @State private var groupingFor: SessionGroupingInput?
+    @State private var sessionListWidth: CGFloat = 356
+    @State private var sessionListDragWidth: CGFloat?
 
     private var groupingInput: SessionGroupingInput {
         .init(enabled: model.groupSessionsByProject, ready: model.store != nil,
@@ -62,7 +64,15 @@ struct MainWindow: View {
                         sidebar
                     } content: {
                         sessionColumn
-                            .navigationSplitViewColumnWidth(min: 300, ideal: preferredListWidth(geometry.size.width), max: 420)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(SessionsColumnSizing(preferredWidth: sessionListDragWidth
+                                                             ?? model.preferredSessionListWidth,
+                                                             resize: resizeSessionList))
+                            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { sessionListWidth = $0 }
+                            .overlay(alignment: .trailing) { sessionListResizeHandle }
+                            .navigationSplitViewColumnWidth(min: 300,
+                                ideal: model.preferredSessionListWidth
+                                    ?? DashboardLayoutRules.sessionListWidth(at: geometry.size.width), max: 420)
                             .navigationTitle("Sessions")
                     } detail: {
                         let search = model.selectedTranscriptSearch
@@ -181,6 +191,34 @@ struct MainWindow: View {
             .padding(.horizontal, 12).padding(.vertical, 7)
             Divider()
             sessionColumnContent
+        }
+    }
+
+    private var sessionListResizeHandle: some View {
+        // SwiftUI's native outer divider is not a draggable hit target in
+        // this three-column arrangement. Keep the hit area on the list edge.
+        Color.clear
+            .frame(width: 8)
+            .frame(maxHeight: .infinity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Session List Width")
+            .accessibilityValue(Text(verbatim: Double(sessionListWidth).formatted(.number.precision(.fractionLength(0)))))
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: model.rememberSessionListWidth(sessionListWidth + 12)
+                case .decrement: model.rememberSessionListWidth(sessionListWidth - 12)
+                @unknown default: break
+                }
+            }
+            .accessibilityIdentifier("sessions.column.resize")
+    }
+
+    private func resizeSessionList(_ width: CGFloat, finished: Bool) {
+        if finished {
+            model.rememberSessionListWidth(width)
+            sessionListDragWidth = nil
+        } else {
+            sessionListDragWidth = min(420, max(300, width))
         }
     }
 
@@ -384,11 +422,6 @@ struct MainWindow: View {
         }
     }
 
-    private func preferredListWidth(_ windowWidth: CGFloat) -> CGFloat {
-        if windowWidth <= 1120 { return 300 + 56 * min(1, max(0, (windowWidth - 960) / 160)) }
-        return 356 + 64 * min(1, max(0, (windowWidth - 1120) / 320))
-    }
-
     private var sidebar: some View {
         List(selection: $model.page) {
             Section("Library") {
@@ -514,6 +547,157 @@ struct SyntheticRowDrawMarker: NSViewRepresentable {
     }
 }
 #endif
+
+/// SwiftUI uses the ideal column width when it first constructs the split view.
+/// Apply the window-dependent default to the same native divider after resizing,
+/// without rebuilding the search field, list or transcript.
+private struct SessionsColumnSizing: NSViewRepresentable {
+    let preferredWidth: CGFloat?
+    let resize: (CGFloat, Bool) -> Void
+
+    func makeNSView(context: Context) -> Marker { Marker(configuration: self) }
+    func updateNSView(_ nsView: Marker, context: Context) {
+        nsView.configuration = self
+        nsView.scheduleSizing()
+    }
+
+    static func dismantleNSView(_ nsView: Marker, coordinator: ()) { nsView.stopMonitoring() }
+
+    final class Marker: NSView {
+        var configuration: SessionsColumnSizing
+        private weak var splitView: NSSplitView?
+        private weak var combinedPane: NSView?
+        private var appliedWindowWidth: CGFloat?
+        private var appliedLeadingEdge: CGFloat?
+        private var appliedPreference: CGFloat?
+        private var scheduled = false
+        private var eventMonitor: Any?
+        private var drag: (x: CGFloat, width: CGFloat, moved: Bool)?
+
+        init(configuration: SessionsColumnSizing) {
+            self.configuration = configuration
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { return nil }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let notifications = NotificationCenter.default
+            notifications.removeObserver(self)
+            stopMonitoring()
+            splitView = nil
+            combinedPane = nil
+            appliedWindowWidth = nil
+            appliedLeadingEdge = nil
+            if let window {
+                notifications.addObserver(self, selector: #selector(windowResized(_:)),
+                                          name: NSWindow.didResizeNotification, object: window)
+                // Observe only pointer events already dispatched to this app.
+                // The grip does not depend on hit testing the SwiftUI wrapper.
+                eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) {
+                    [weak self] event in
+                    guard let self else { return event }
+                    return self.routePointer(event)
+                }
+                scheduleSizing()
+            }
+        }
+
+        func stopMonitoring() {
+            if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
+            eventMonitor = nil
+            drag = nil
+        }
+
+        override func layout() {
+            super.layout()
+            scheduleSizing()
+        }
+
+        @objc private func windowResized(_ notification: Notification) { scheduleSizing() }
+
+        func scheduleSizing() {
+            guard !scheduled else { return }
+            scheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                scheduled = false
+                sizeColumn()
+            }
+        }
+
+        private func sizeColumn() {
+            guard let window, window.isVisible else { return }
+            var ancestor: NSView = self
+            while let parent = ancestor.superview {
+                if let split = parent as? NSSplitView, split.isVertical,
+                   split.arrangedSubviews.count == 3, split.arrangedSubviews[1] === ancestor {
+                    guard ancestor.frame.width > 0, !split.isSubviewCollapsed(ancestor) else { return }
+                    if splitView !== split {
+                        NotificationCenter.default.removeObserver(self, name: NSSplitView.didResizeSubviewsNotification,
+                                                                  object: splitView)
+                        splitView = split
+                        combinedPane = ancestor
+                        appliedWindowWidth = nil
+                        appliedLeadingEdge = nil
+                        NotificationCenter.default.addObserver(self, selector: #selector(splitResized(_:)),
+                            name: NSSplitView.didResizeSubviewsNotification, object: split)
+                    }
+                    let width = window.frame.width
+                    // The outer split's arranged view can hold both the
+                    // sidebar and the session list. The marker is inside
+                    // the list, so use its native leading edge.
+                    let leadingEdge = convert(bounds, to: split).minX
+                    let current = ancestor.frame.maxX - leadingEdge
+                    guard current > 0 else { return }
+                    let preference = configuration.preferredWidth
+                    guard appliedWindowWidth != width || appliedLeadingEdge != leadingEdge
+                          || appliedPreference != preference else { return }
+                    appliedWindowWidth = width
+                    appliedLeadingEdge = leadingEdge
+                    appliedPreference = preference
+                    let target = preference ?? DashboardLayoutRules.sessionListWidth(at: width)
+                    if abs(current - target) > 0.5 {
+                        split.setPosition(leadingEdge + target, ofDividerAt: 1)
+                    }
+                    return
+                }
+                ancestor = parent
+            }
+        }
+
+        @objc private func splitResized(_ notification: Notification) {
+            if let splitView, appliedLeadingEdge != convert(bounds, to: splitView).minX { scheduleSizing() }
+        }
+
+        private func routePointer(_ event: NSEvent) -> NSEvent? {
+            guard let window, event.window === window, window.isVisible, !isHiddenOrHasHiddenAncestor else { return event }
+            let point = event.locationInWindow
+            switch event.type {
+            case .leftMouseDown:
+                guard let splitView, let combinedPane, !splitView.isSubviewCollapsed(combinedPane) else { return event }
+                let list = convert(bounds, to: nil)
+                let edge = splitView.convert(combinedPane.frame, to: nil).maxX
+                let grip = CGRect(x: edge - 8, y: list.minY, width: 9, height: list.height)
+                guard grip.contains(point), edge > list.minX else { return event }
+                drag = (point.x, edge - list.minX, false)
+            case .leftMouseDragged:
+                guard let origin = drag else { return event }
+                drag?.moved = true
+                configuration.resize(origin.width + point.x - origin.x, false)
+            case .leftMouseUp:
+                guard let origin = drag else { return event }
+                drag = nil
+                if origin.moved { configuration.resize(origin.width + point.x - origin.x, true) }
+            default:
+                return event
+            }
+            return nil
+        }
+    }
+}
 
 private extension SessionStatus {
     var sidebarSymbol: String {

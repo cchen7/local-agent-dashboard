@@ -875,3 +875,16 @@ the index view.
 Map a sidecar notification only to an already known event file. On
 an unchanged event checkpoint, refresh the title without reading event
 bytes. A metadata-only workspace does not enter the transcript index.
+
+## DEV-096 — Use the native Sessions divider for responsive widths
+
+Apply the specified 300/356/420-point defaults to the actual native
+list pane. Keep its mounted search, selection and transcript; the narrow
+detail uses a 2×2 fact grid. A user drag overrides the interpolated
+default and is persisted as an App presentation preference. Limit the
+mouse handler to a gesture that starts on the Sessions divider in its
+own window.
+
+Verify geometry without input. Verify drag and relaunch with the
+explicit native visual review handoff; a skip outside that handoff
+does not attest pointer behavior or persistence.

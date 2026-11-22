@@ -1265,11 +1265,51 @@ final class SmokeTests: XCTestCase {
                 let window = try launch(size: size, appearance: appearance, populated: true)
                 XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
                 XCTAssertTrue(window.staticTexts["API_TOKEN=••••••"].waitForExistence(timeout: 5))
+                let target: CGFloat = switch size.width { case 960: 300; case 1120: 356; default: 420 }
+                assertSessionListWidth(target, in: window)
+                let layout = size.width == 960 ? "compact" : "wide"
+                XCTAssertTrue(element("session.details.facts.\(layout)").waitForExistence(timeout: 5))
                 let name = "sessions-\(appearance)-\(Int(size.width))x\(Int(size.height))"
                 try awaitVisualReviewIfRequested(caseName: name, frame: window.frame)
                 app.terminate()
             }
         }
+    }
+
+    func testDraggedSessionListWidthPersistsOnRelaunch() throws {
+        guard ProcessInfo.processInfo.environment["AGENTDASH_VISUAL_REVIEW_DIR"] != nil else {
+            throw XCTSkip("A real pointer drag and relaunch readback require the explicit visual review handoff.")
+        }
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_PRESENTATION_ID"] = UUID().uuidString
+        let first = try launch(size: .init(width: 1120, height: 720), appearance: "dark", populated: true)
+        assertSessionListWidth(356, in: first)
+        let handle = element("sessions.column.resize")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5))
+        let grip = handle.frame
+        let trailingDivider = first.splitters.element(boundBy: 1).frame
+        XCTAssertTrue(first.frame.contains(grip))
+        XCTAssertEqual(grip.width, 8, accuracy: 1)
+        XCTAssertEqual(grip.maxX, trailingDivider.midX, accuracy: 2,
+                       "The mouse target must touch the actual trailing divider.")
+        try awaitVisualReviewIfRequested(caseName: "session-divider-drag", frame: first.frame)
+        let resized = first.splitters.element(boundBy: 1).frame.midX - first.splitters.element(boundBy: 0).frame.midX
+        XCTAssertTrue((378...420).contains(resized), "Drag must change the actual Sessions list width; got \(resized)pt")
+        app.terminate()
+        let reopened = try launch(size: .init(width: 1440, height: 900), appearance: "light", populated: true)
+        assertSessionListWidth(resized, in: reopened)
+    }
+
+    private func assertSessionListWidth(_ target: CGFloat, in window: XCUIElement, tolerance: CGFloat = 2) {
+        let splitters = window.splitters
+        let left = splitters.element(boundBy: 0)
+        let right = splitters.element(boundBy: 1)
+        guard left.waitForExistence(timeout: 5), right.waitForExistence(timeout: 5) else {
+            return XCTFail("The Sessions window is missing either native divider.")
+        }
+        let matches = NSPredicate { _, _ in abs(right.frame.midX - left.frame.midX - target) <= tolerance }
+        let expectation = XCTNSPredicateExpectation(predicate: matches, object: nil)
+        let result = XCTWaiter.wait(for: [expectation], timeout: 4)
+        XCTAssertEqual(result, .completed, "Expected \(target)pt Sessions list; native divider span is \(right.frame.midX - left.frame.midX)pt.")
     }
 
     func testNativeSearchFiltersRemoveAndRestoreASmartGroup() throws {

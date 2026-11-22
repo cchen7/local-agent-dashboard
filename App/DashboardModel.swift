@@ -52,6 +52,7 @@ final class DashboardModel {
     var settingsPage: SettingsPage = .general
     private(set) var clockFormat: DashboardClockFormat
     private(set) var showsMenuBarThroughput: Bool
+    private(set) var preferredSessionListWidth: CGFloat?
     private(set) var menuBarTokensPerMinute: Int64?
     @ObservationIgnored private var menuBarThroughputTask: Task<Void, Never>?
     private let presentationPrefix: String?
@@ -69,6 +70,19 @@ final class DashboardModel {
         clockFormat = prefix.flatMap { UserDefaults.standard.string(forKey: $0 + "clockFormat") }
             .flatMap(DashboardClockFormat.init(rawValue:)) ?? .system
         showsMenuBarThroughput = prefix.map { UserDefaults.standard.bool(forKey: $0 + "showsMenuBarThroughput") } ?? false
+        preferredSessionListWidth = prefix.flatMap {
+            (UserDefaults.standard.object(forKey: $0 + "sessionListWidth") as? NSNumber)?.doubleValue
+        }.flatMap { $0.isFinite && (300...420).contains($0) ? CGFloat($0) : nil }
+    }
+
+    func rememberSessionListWidth(_ width: CGFloat) {
+        guard width.isFinite else { return }
+        let width = min(420, max(300, width))
+        guard preferredSessionListWidth != width else { return }
+        preferredSessionListWidth = width
+        if let prefix = presentationPrefix {
+            UserDefaults.standard.set(Double(width), forKey: prefix + "sessionListWidth")
+        }
     }
 
     func setClockFormat(_ format: DashboardClockFormat) {

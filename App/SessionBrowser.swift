@@ -119,6 +119,7 @@ private func highlightedSnippet(_ parts: [SearchSnippetPart]) -> AttributedStrin
 struct SessionTranscript: View {
     @DashboardClock private var clock
     @State private var section = DetailSection.transcript
+    @State private var compactFacts = false
     @Environment(\.sessionOverviewOptions) private var overviewOptions
     @Environment(\.secretMaskingEnabled) private var maskSessionActivity
     #if AGENTDASH_SYNTHETIC_ONLY
@@ -205,19 +206,24 @@ struct SessionTranscript: View {
                     Spacer(minLength: 8)
                     SessionStatusPill(status: session.status, reason: session.statusReason)
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) {
-                        startFact
-                        turnsFact
-                        usageFact
-                        contextFact
-                    }
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                        GridRow { startFact; turnsFact }
-                        GridRow { usageFact; contextFact }
+                Group {
+                    if compactFacts {
+                        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                            GridRow { startFact; turnsFact }
+                            GridRow { usageFact; contextFact }
+                        }
+                    } else {
+                        HStack(alignment: .top, spacing: 16) {
+                            startFact
+                            turnsFact
+                            usageFact
+                            contextFact
+                        }
                     }
                 }
                 .font(.caption)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(compactFacts ? "session.details.facts.compact" : "session.details.facts.wide")
                 if running, let activity {
                     SessionActivityBar(activity: activity)
                 }
@@ -317,6 +323,9 @@ struct SessionTranscript: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.transcript")
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onGeometryChange(for: Bool.self) {
+            DashboardLayoutRules.compactDetail(width: $0.size.width)
+        } action: { compactFacts = $0 }
         .task(id: request) { [request] in await observePage(request) }
         .task(id: matchLookup) { [lookup = matchLookup] in
             if let lookup { await resolveMatch(lookup) }
