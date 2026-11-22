@@ -97,12 +97,16 @@ public final class AgentStore: Sendable {
     /// Refresh an existing source by ID and directory identity. The caller
     /// reads filesystem metadata and supplies an opaque read-only bookmark.
     /// Legacy custom rows need independent evidence from their old bookmark.
+    /// A live match at the saved path preserves its spelling; it does not
+    /// substitute for a custom source's identity or its old bookmark.
     public func renewSourceAccess(_ source: Source, selectedRoot: URL, identity: SourceRootIdentity,
-                                  bookmark: Data, legacyBookmarkIdentity: SourceRootIdentity? = nil)
+                                  bookmark: Data, legacyBookmarkIdentity: SourceRootIdentity? = nil,
+                                  savedPathIdentity: SourceRootIdentity? = nil)
     throws -> SourceAccessRenewal {
         guard Source.isLocalRoot(selectedRoot) else { throw StoreError.invalidLocation }
         guard !bookmark.isEmpty else { throw StoreError.invalidCustomSource }
-        let root = selectedRoot.standardizedFileURL.path
+        let selectedPath = selectedRoot.standardizedFileURL.path
+        let savedPath = source.rootURL.standardizedFileURL.path
         return try databasePool.write { db in
             let id = try Self.validateObservedSource(source, for: source.agent, db: db)
             let storedMatch = try Bool.fetchOne(db, sql: """
@@ -115,13 +119,14 @@ public final class AgentStore: Sendable {
                 matches = storedMatch
             } else {
                 switch source.access {
-                case .defaultLocation: matches = root.utf8.elementsEqual(source.rootURL.standardizedFileURL.path.utf8)
+                case .defaultLocation: matches = selectedPath.utf8.elementsEqual(savedPath.utf8) || savedPathIdentity == identity
                 case .bookmark: matches = legacyBookmarkIdentity == identity
                 }
             }
             guard matches else { return .wrongDirectory }
             if try Int.fetchOne(db, sql: "SELECT 1 FROM sources WHERE agent=? AND root_path=? AND id<>?",
-                                arguments: [source.agent.rawValue, root, id]) != nil { return .pathConflict }
+                                arguments: [source.agent.rawValue, selectedPath, id]) != nil { return .pathConflict }
+            let root = savedPathIdentity == identity ? savedPath : selectedPath
             try db.execute(sql: "UPDATE sources SET root_path=?, access_kind='bookmark', bookmark=? WHERE id=?",
                            arguments: [root, bookmark, id])
             // The general permission-change trigger invalidates old identity

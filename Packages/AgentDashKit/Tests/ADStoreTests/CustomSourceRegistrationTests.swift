@@ -283,7 +283,8 @@ func renewAccessFollowsTheOriginalDirectory() throws {
     #expect(relocated == original && replacement != original)
     let newBookmark = Data([0x34, 0x57])
     #expect(try box.store.renewSourceAccess(before, selectedRoot: old, identity: replacement,
-                                            bookmark: newBookmark, legacyBookmarkIdentity: replacement) == .wrongDirectory)
+                                            bookmark: newBookmark, legacyBookmarkIdentity: replacement,
+                                            savedPathIdentity: replacement) == .wrongDirectory)
     #expect(try box.store.sources() == [before])
     #expect(try box.store.checkpoint(for: fileID) == checkpoint)
     #expect(try box.store.renewSourceAccess(before, selectedRoot: moved, identity: relocated,
@@ -315,11 +316,45 @@ func renewAccessRequiresLegacyBookmarkEvidence() throws {
     let moved = box.directory.appendingPathComponent("moved")
     let bookmark = Data([0x12, 0x34])
     #expect(try box.store.renewSourceAccess(pending, selectedRoot: source.rootURL, identity: box.identity,
-                                            bookmark: bookmark) == .wrongDirectory)
+                                            bookmark: bookmark, savedPathIdentity: box.identity) == .wrongDirectory)
     #expect(try box.store.sources() == [pending])
     #expect(try box.store.renewSourceAccess(pending, selectedRoot: moved, identity: box.identity,
                                             bookmark: bookmark, legacyBookmarkIdentity: box.identity) == .renewed)
     #expect(try box.store.registerCustomSource(source, identity: box.identity) == .alreadyRegistered(id))
+}
+
+@Test("FR-SRC-2 / §11.3: re-granting through a Data-volume alias preserves default discovery and project membership")
+func renewDefaultSourceThroughAliasKeepsProject() async throws {
+    let fixture = try RegistrationFixture(temporaryRoot: URL(fileURLWithPath: "/private/tmp", isDirectory: true))
+    defer { fixture.remove() }
+    let home = fixture.directory
+    let root = home.appendingPathComponent(".codex", isDirectory: true)
+    let peer = home.appendingPathComponent(".claude", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(at: peer, withIntermediateDirectories: false)
+    let alias = URL(fileURLWithPath: "/System/Volumes/Data" + root.path, isDirectory: true)
+    let savedIdentity = try SourceFileReader.directoryIdentity(root: root)
+    let selectedIdentity = try SourceFileReader.directoryIdentity(root: alias)
+    try #require(savedIdentity == selectedIdentity)
+    let store = fixture.store
+    let codex = try store.upsertSource(.init(agent: .codex, label: "Codex", rootURL: root))
+    let claude = try store.upsertSource(.init(agent: .claudeCode, label: "Claude", rootURL: peer))
+    try store.write([
+        .session(.init(key: .init(agent: .codex, nativeID: "one"), sourceID: codex, environment: "Local", cwd: "/synthetic/repo")),
+        .session(.init(key: .init(agent: .claudeCode, nativeID: "two"), sourceID: claude, environment: "Local", cwd: "/synthetic/repo"))
+    ])
+    var projects = store.indexedProjectUpdates(hostHome: home.standardizedFileURL.path).makeAsyncIterator()
+    let before = try #require(try await projects.next())
+    try #require(before.count == 1 && before.first?.sessions.count == 2)
+    let pending = try #require(try store.sources().first { $0.id == codex })
+    let bookmark = Data([0x10, 0x20])
+    #expect(try store.renewSourceAccess(pending, selectedRoot: alias, identity: selectedIdentity,
+                                       bookmark: bookmark, savedPathIdentity: savedIdentity) == .renewed)
+    let after = try #require(try store.sources().first { $0.id == codex })
+    #expect(after.rootURL == pending.rootURL && after.access == .bookmark(bookmark))
+    // An unchanged catalog is not re-emitted by the live query.
+    var refreshed = store.indexedProjectUpdates(hostHome: home.standardizedFileURL.path).makeAsyncIterator()
+    #expect(try await refreshed.next() == before)
 }
 
 @Test("FR-SRC-2: a default source can receive its first bookmark only at its configured path")

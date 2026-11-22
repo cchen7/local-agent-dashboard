@@ -109,6 +109,8 @@ history intact. Registration does not read session files or start indexing.
 
 Grant access again uses the same directory identity. Update a renamed
 original in place and keep its identity, checkpoints and session history.
+If the saved path still identifies the selected directory, preserve that
+spelling so startup discovery and Projects continue to recognize a default root.
 For a legacy custom source, require the old bookmark to resolve without
 staleness to the same directory; a path match alone does not prove that.
 A default source with no prior bookmark remains defined by its configured

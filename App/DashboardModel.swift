@@ -369,8 +369,10 @@ final class DashboardModel {
                 let legacyIdentity: SourceRootIdentity?
                 if case .bookmark = source.access { legacyIdentity = SourceAccessProbe.directoryIdentity(source) }
                 else { legacyIdentity = nil }
+                let savedPathIdentity = try? SourceFileReader.directoryIdentity(root: source.rootURL)
                 let result = try store.renewSourceAccess(source, selectedRoot: selectedRoot, identity: identity,
-                                                         bookmark: bookmark, legacyBookmarkIdentity: legacyIdentity)
+                                                         bookmark: bookmark, legacyBookmarkIdentity: legacyIdentity,
+                                                         savedPathIdentity: savedPathIdentity)
                 return (result, result == .renewed ? try store.sources() : [])
             }.value
             switch result {
