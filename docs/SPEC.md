@@ -663,7 +663,7 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 - While a search is open, committed changes to indexed events and search metadata refresh the current result page. Coalesce bursts of changes; restart at the first page if the current result page disappears.
 - Results are grouped by session: "12 matches in 6 sessions". Each session shows its best snippet with highlighted terms.
 - Compute exact totals before limiting the displayed groups. Mask the complete snippet candidate before highlighting or taking an excerpt.
-- Opening a session scrolls the transcript to the first match; "3 of 12" with up/down arrows jumps between matches (already in the prototype).
+- Opening a session scrolls the transcript to the first match. The up/down buttons move between matching events in that session using transcript order and show the current position. Only a bounded transcript page is loaded at each match. When the index changes, keep the current event if it still matches; otherwise restart at the first match.
 - Sort: relevance (default) / most recent / token volume.
 - A query can be saved as a "Smart Group" in the sidebar.
 
@@ -711,6 +711,14 @@ Shown on the session Overview tab and on the project page:
 3. The last assistant reply (first 300 characters).
 4. The last 5 actions: files changed (with +/- lines), commands run (with result and duration).
 5. Current branch and last activity time.
+
+The Overview reads a bounded snapshot of one session's index. Preserve the
+order of text blocks within the latest recorded message. Join Claude
+assistant fragments across lines when they share a producer message ID.
+Include recent tool
+actions that have no matching structured record. Mask complete fields before
+shortening them for display. Omit oversized fields instead of clipping
+unmasked text. A topic chip must be able to retrieve its own session.
 
 ### 10.4 Status inference
 
@@ -802,6 +810,7 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
   - Token chart for this project (reuse the Token Usage components with a project filter).
   - Buttons: Show in Finder, Open Latest Session.
 - Project identity: if a repository URL is known, the normalized URL is the key (worktrees of the same repository group together, with the worktree name as a tag); otherwise `cwd`. Claude worktree paths look like `<repo>/.claude/worktrees/<name>` and belong to the main repository.
+  Resolve workspace groups from the owned index. For a registered default local root and local environment, re-granting access does not change project identity. Normalize unambiguous path spellings before applying mappings. An explicit mapping can join the same host project, including a unique catalog root; keep unmapped environments separate and do not infer which catalog project an ambiguous root belongs to. Prompt-history buckets remain searchable and do not count as project sessions or latest-session targets. The recent timeline uses normalized event time and a stable tie break.
 
 ### 11.4 Token Usage page
 
@@ -870,6 +879,10 @@ Per prototype `31:847`:
 | Privacy | Secret masking (default on); index thinking blocks (default off); excluded paths or projects (globs) |
 | Pricing | Active file (external / bundled), `updatedAt`, number of model entries, validation errors; unpriced models with token volume (one-click copy, to hand to an agent); display currency |
 | About | Version; statement that the app has no network permission, listing the entitlements actually present in the signature |
+
+The Sources index counts come from committed checkpoints and session rows,
+separate from checking directory access. Show a scan time only when the
+index contains one, and report errors without exposing raw source details.
 
 Launch at login is off until the user requests it in General. Use
 `SMAppService.mainApp` and show the observed macOS registration status,

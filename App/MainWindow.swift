@@ -17,16 +17,9 @@ struct MainWindow: View {
                         .navigationTitle("Token Usage")
                 }
             } else if model.page == .projects {
-                NavigationSplitView {
+                ProjectsBrowser(store: model.store, hostHome: model.projectPathHome,
+                                selection: $model.selectedProjectID, openSession: model.openProjectSession) {
                     sidebar
-                } content: {
-                    EmptyPanel(title: "No projects yet", symbol: "folder",
-                               message: "Your local library is empty.")
-                        .accessibilityIdentifier("empty.projects")
-                        .navigationSplitViewColumnWidth(min: 300, ideal: 356, max: 420)
-                        .navigationTitle("Projects")
-                } detail: {
-                    emptyDetail
                 }
             } else {
                 GeometryReader { geometry in
@@ -37,11 +30,11 @@ struct MainWindow: View {
                             .navigationSplitViewColumnWidth(min: 300, ideal: preferredListWidth(geometry.size.width), max: 420)
                             .navigationTitle("Sessions")
                     } detail: {
+                        let search = model.selectedTranscriptSearch
                         if let session = model.selectedSession, let store = model.store,
-                           !model.isSearchingSessions || model.selectedMatchKey != nil {
-                            let match = model.selectedMatchKey
-                            SessionTranscript(session: session, store: store, openingMatch: match)
-                                .id(TranscriptSelection(session: session.id, match: match))
+                           !model.isSearchingSessions || search != nil {
+                            SessionTranscript(session: session, store: store, search: search)
+                                .id(TranscriptSelection(session: session.id, query: search?.query))
                         } else {
                             emptyDetail
                         }
@@ -56,6 +49,10 @@ struct MainWindow: View {
             }
         }
         .task(id: model.store != nil) { await model.observeSessionIndex() }
+        .environment(\.sessionOverviewOptions,
+                     .init(enabled: !model.isSearchingSessions, searchTopic: { term in
+                        model.searchFromTopic(term)
+                     }))
         .overlay(alignment: .bottom) {
             if model.storageFailed {
                 Label("Storage could not be opened. Quit and try again.", systemImage: "exclamationmark.triangle")
@@ -148,7 +145,7 @@ struct MainWindow: View {
     }
 
     @ViewBuilder private var emptyDetail: some View {
-        if model.sessions.isEmpty || model.page == .projects {
+        if model.sessions.isEmpty {
             EmptyPanel(title: "Your private, local dashboard", symbol: "lock.shield",
                        message: "Zero network. Read-only sources. Everything stays on this Mac.")
                 .accessibilityIdentifier("empty.detail")
@@ -183,7 +180,7 @@ private struct SearchInput: Equatable {
 
 private struct TranscriptSelection: Hashable {
     let session: SessionKey
-    let match: String?
+    let query: String?
 }
 
 struct EmptyPanel: View {

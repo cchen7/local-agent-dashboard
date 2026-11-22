@@ -1,6 +1,7 @@
 import ADCore
 import ADPrivacy
 import ADSearch
+import ADSearch
 import ADStore
 import AppKit
 import SwiftUI
@@ -58,20 +59,43 @@ private func highlightedSnippet(_ parts: [SearchSnippetPart]) -> AttributedStrin
 }
 
 struct SessionTranscript: View {
+    @State private var section = DetailSection.transcript
+    @Environment(\.sessionOverviewOptions) private var overviewOptions
+
+    private enum DetailSection: Hashable { case overview, transcript }
+    private var showingOverview: Bool { overviewOptions.enabled && section == .overview }
+
     let session: SessionListItem
     let store: AgentStore
-    let openingMatch: String?
+    let search: SessionTranscriptSearch?
     @State private var request: TranscriptPageRequest
     @State private var loading = true
     @State private var failed = false
     @State private var page: TranscriptPage?
     @State private var viewRevision = 0
+    @State private var preferredMatchKey: String?
+    @State private var match: IndexedSearchMatchPosition?
+    @State private var resolvedLookup: MatchLookup?
+    @State private var matchLookupFailed = false
 
-    init(session: SessionListItem, store: AgentStore, openingMatch: String? = nil) {
+    private struct MatchLookup: Equatable, Sendable {
+        let search: SessionTranscriptSearch
+        let preferredKey: String?
+    }
+
+    private var matchLookup: MatchLookup? {
+        search.map { .init(search: $0, preferredKey: preferredMatchKey) }
+    }
+
+    private var highlightedMatchKey: String? {
+        match?.eventKey ?? (resolvedLookup == nil ? search?.firstMatchKey : nil)
+    }
+
+    init(session: SessionListItem, store: AgentStore, search: SessionTranscriptSearch? = nil) {
         self.session = session
         self.store = store
-        self.openingMatch = openingMatch
-        _request = State(initialValue: openingMatch.map(TranscriptPageRequest.around) ?? .first)
+        self.search = search
+        _request = State(initialValue: search.map { .around($0.firstMatchKey) } ?? .first)
     }
 
     var body: some View {
@@ -101,14 +125,31 @@ struct SessionTranscript: View {
 
             Divider()
             HStack(spacing: 8) {
-                Text("Transcript").font(.headline)
+                if overviewOptions.enabled {
+                    Picker("Session Details", selection: $section) {
+                        Text("Overview").tag(DetailSection.overview)
+                        Text("Transcript").tag(DetailSection.transcript)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityIdentifier("session.details.tabs")
+                } else {
+                    Text("Transcript").font(.headline)
+                }
                 Spacer()
                 pagingButton("Older Messages", icon: "chevron.up", cursor: page?.older, direction: TranscriptPageRequest.before)
                 pagingButton("Newer Messages", icon: "chevron.down", cursor: page?.newer, direction: TranscriptPageRequest.after)
+                if let search {
+                    Divider().frame(height: 16)
+                    matchControls(search)
+                }
             }
             .padding(.horizontal, 18).padding(.vertical, 9)
 
-            if failed {
+            if showingOverview {
+                SessionOverview(session: session, store: store)
+            } else if failed {
                 EmptyPanel(title: "Could not read the transcript", symbol: "exclamationmark.triangle",
                            message: "Select the session again to retry.")
             } else if loading {
@@ -118,7 +159,7 @@ struct SessionTranscript: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(page.events, id: \.dedupeKey) { event in
-                                let matched = event.dedupeKey == openingMatch
+                                let matched = event.dedupeKey == highlightedMatchKey
                                 TranscriptEventRow(event: event)
                                     .padding(matched ? 5 : 0)
                                     .background(matched ? Color.accentColor.opacity(0.15) : Color.clear,
@@ -144,24 +185,102 @@ struct SessionTranscript: View {
         }
         .accessibilityIdentifier("session.transcript")
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: request) { await observePage(request) }
+        .task(id: request) { [request] in await observePage(request) }
+        .task(id: matchLookup) { [lookup = matchLookup] in
+            if let lookup { await resolveMatch(lookup) }
+        }
     }
 
-    private func pagingButton(_ label: LocalizedStringResource, icon: String, cursor: TranscriptCursor?,
-                              direction: @escaping (TranscriptCursor) -> TranscriptPageRequest) -> some View {
+    private func matchControls(_ search: SessionTranscriptSearch) -> some View {
+        let ready = resolvedLookup != nil && resolvedLookup == matchLookup
+        return HStack(spacing: 5) {
+            Group {
+                if matchLookupFailed {
+                    Text("Search position unavailable")
+                } else if ready && match == nil {
+                    Text("No matching messages")
+                } else {
+                    Text("\(match?.ordinal ?? 1) of \(match?.count ?? search.count) matches")
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .accessibilityIdentifier("transcript.match.position")
+            matchButton("Previous Match", icon: "chevron.up", key: ready ? match?.previousKey : nil)
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+            matchButton("Next Match", icon: "chevron.down", key: ready ? match?.nextKey : nil)
+                .keyboardShortcut("g", modifiers: .command)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    private func matchButton(_ label: LocalizedStringResource, icon: String, key: String?) -> some View {
         Button {
-            guard let cursor else { return }
-            loading = true
-            page = nil
-            viewRevision += 1
-            request = direction(cursor)
+            if let key { preferredMatchKey = key }
         } label: {
             Label { Text(label) } icon: { Image(systemName: icon) }
         }
         .labelStyle(.iconOnly)
         .accessibilityLabel(Text(label))
         .help(Text(label))
-        .disabled(cursor == nil || loading)
+        .disabled(key == nil)
+    }
+
+    private func resolveMatch(_ lookup: MatchLookup) async {
+        guard resolvedLookup != lookup else { return }
+        matchLookupFailed = false
+        let store = store
+        let sessionID = session.id
+        let work = Task.detached(priority: .userInitiated) {
+            try SessionSearch.position(lookup.search.query, in: store, scope: lookup.search.scope,
+                                       session: sessionID, around: lookup.preferredKey)
+        }
+        do {
+            let position = try await withTaskCancellationHandler {
+                try await work.value
+            } onCancel: {
+                work.cancel()
+            }
+            guard !Task.isCancelled, matchLookup == lookup else { return }
+            // Pin the first resolved hit as well as an explicitly selected
+            // one. A new earlier hit must not steal the current selection.
+            preferredMatchKey = position?.eventKey
+            let previous = match
+            match = position
+            resolvedLookup = matchLookup
+            if let position, position.eventKey != previous?.eventKey,
+               request != .around(position.eventKey) {
+                seek(.around(position.eventKey))
+            }
+        } catch {
+            guard !Task.isCancelled, matchLookup == lookup else { return }
+            matchLookupFailed = true
+        }
+    }
+
+    private func seek(_ target: TranscriptPageRequest) {
+        loading = true
+        page = nil
+        viewRevision += 1
+        request = target
+    }
+
+    private func pagingButton(_ label: LocalizedStringResource, icon: String, cursor: TranscriptCursor?,
+                              direction: @escaping (TranscriptCursor) -> TranscriptPageRequest) -> some View {
+        Button {
+            guard let cursor else { return }
+            seek(direction(cursor))
+        } label: {
+            Label { Text(label) } icon: { Image(systemName: icon) }
+        }
+        .labelStyle(.iconOnly)
+        .accessibilityLabel(Text(label))
+        .help(Text(label))
+        .disabled(cursor == nil || loading || showingOverview)
+        .opacity(showingOverview ? 0 : 1)
+        .accessibilityHidden(showingOverview)
     }
 
     private func observePage(_ requested: TranscriptPageRequest) async {
@@ -169,9 +288,7 @@ struct SessionTranscript: View {
             for try await snapshot in try store.transcriptPageUpdates(in: session.id, request: requested) {
                 guard !Task.isCancelled, request == requested else { return }
                 if snapshot == nil, case .around = requested {
-                    loading = true
-                    page = nil
-                    request = .first
+                    seek(.first)
                     return
                 }
                 page = snapshot
@@ -181,10 +298,7 @@ struct SessionTranscript: View {
         } catch {
             guard !Task.isCancelled, request == requested else { return }
             if error as? TranscriptPagingError == .staleCursor, requested != .first {
-                loading = true
-                page = nil
-                viewRevision += 1
-                request = .first
+                seek(.first)
             } else {
                 loading = false
                 failed = true
@@ -328,7 +442,7 @@ private enum TranscriptFormatting {
     }
 }
 
-private struct SessionTitle: View {
+struct SessionTitle: View {
     let title: String?
 
     var body: some View {
@@ -339,7 +453,7 @@ private struct SessionTitle: View {
     }
 }
 
-private struct SessionAgentMark: View {
+struct SessionAgentMark: View {
     let agent: AgentKind
 
     var body: some View {
@@ -365,7 +479,7 @@ private struct SessionStatusPill: View {
     }
 }
 
-private extension SessionStatus {
+extension SessionStatus {
     var label: LocalizedStringResource {
         switch self {
         case .running: "Running"
@@ -386,7 +500,7 @@ private extension SessionStatus {
     }
 }
 
-private extension AgentKind {
+extension AgentKind {
     var sessionName: String {
         switch self {
         case .claudeCode: "Claude Code"
@@ -415,7 +529,7 @@ private extension AgentKind {
     }
 }
 
-private extension EventKind {
+extension EventKind {
     var transcriptLabel: LocalizedStringResource {
         switch self {
         case .user, .promptHistory: "You"
@@ -430,6 +544,6 @@ private extension EventKind {
     }
 }
 
-private func sessionDate(_ epochMilliseconds: Int64) -> Date {
+func sessionDate(_ epochMilliseconds: Int64) -> Date {
     Date(timeIntervalSince1970: Double(epochMilliseconds) / 1_000)
 }

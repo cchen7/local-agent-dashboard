@@ -30,6 +30,7 @@ final class DashboardModel {
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
     var access: [Int64: SourceAccessStatus] = [:]
+    var selectedProjectID: IndexedProject.ID?
     var storageFailed = false
     var verifying = false
     private(set) var sessions: [SessionListItem] = []
@@ -46,7 +47,10 @@ final class DashboardModel {
     private var searchForText: String?
     private var searchForOffset = 0
     private var lastSearchState: SessionSearchState = .waiting
+    private var lastSearchScope: IndexedSearchScope?
     private var searchHome: String?
+
+    var projectPathHome: String? { searchHome }
 
     var isSearchingSessions: Bool { !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -54,9 +58,10 @@ final class DashboardModel {
         searchForText == sessionSearchText && searchForOffset == sessionSearchOffset ? lastSearchState : .waiting
     }
 
-    var selectedMatchKey: String? {
-        guard isSearchingSessions, case .results(let results) = sessionSearchState else { return nil }
-        return results.hits.first { $0.id == selectedSessionID }?.firstMatchKey
+    var selectedTranscriptSearch: SessionTranscriptSearch? {
+        guard isSearchingSessions, case .results(let results) = sessionSearchState, let scope = lastSearchScope,
+              let hit = results.hits.first(where: { $0.id == selectedSessionID }) else { return nil }
+        return .init(query: sessionSearchText, scope: scope, firstMatchKey: hit.firstMatchKey, count: hit.matchCount)
     }
 
     var selectedSession: SessionListItem? {
@@ -85,8 +90,14 @@ final class DashboardModel {
                 for source in defaults where !existing.contains(where: {
                     $0.agent == source.agent && $0.rootURL.standardizedFileURL == source.rootURL.standardizedFileURL
                 }) { try store.upsertSource(source) }
-                if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
+                if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
+                    try Self.seedProjects(store)
+                } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
+                }
+                if synthetic && (CommandLine.arguments.contains("--synthetic-index-status") ||
+                    ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEX_STATUS"] == "1") {
+                    try Self.seedIndexStatus(store, in: directory)
                 }
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
                 return (store, try store.sources(), home)
@@ -95,6 +106,20 @@ final class DashboardModel {
             sources = result.1
             searchHome = result.2
         } catch { storageFailed = true }
+    }
+
+    nonisolated private static func seedIndexStatus(_ store: AgentStore, in directory: URL) throws {
+        let sourceID = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic indexed source",
+            rootURL: directory.appendingPathComponent("unused-status-root"), environment: "Synthetic"))
+        let fileID = try store.upsertFile(.init(sourceID: sourceID, relativePath: "projects/synthetic.jsonl", role: .session),
+                                         checkpoint: nil)
+        _ = try store.upsertFile(.init(sourceID: sourceID, relativePath: "projects/pending.jsonl", role: .session),
+                                 checkpoint: nil)
+        let session = SessionKey(agent: .claudeCode, nativeID: "preview-source-status")
+        try store.commitFileBatch([
+            .session(.init(key: session, sourceID: sourceID, fileID: fileID, environment: "Synthetic")),
+        ], for: fileID, from: nil, to: .init(inode: 11, size: 20, offset: 15, parserVersion: 1,
+                                             sequence: 3, previousTimestamp: nil, unknownRecords: 3))
     }
 
     func observeSessionIndex() async {
@@ -148,6 +173,7 @@ final class DashboardModel {
                 }
                 searchForText = text
                 searchForOffset = offset
+                lastSearchScope = scope
                 lastSearchState = .results(found)
                 selectSearchHit(found)
                 // At most one query runs at a time. While it runs or cools
@@ -184,6 +210,10 @@ final class DashboardModel {
         }
     }
 
+    func searchFromTopic(_ term: String) {
+        sessionSearchText = SearchQuery.quotedLiteral(term)
+    }
+
     nonisolated private static func seedSessions(_ store: AgentStore, in directory: URL) throws {
         let sourceID = try store.upsertSource(.init(agent: .codex, label: "Synthetic",
             rootURL: directory.appendingPathComponent("unused-source"), environment: "Synthetic"))
@@ -200,18 +230,67 @@ final class DashboardModel {
             .event(.init(session: other, sequence: 0, timestamp: now - 3_600_000, kind: .assistant,
                          text: "Documentation preview", dedupeKey: "preview:docs")),
         ]
-        for i in 0..<133 {
+        for i in 0..<400 {
             let text: String
             switch i {
             case 0: text = "API_TOKEN=synthetic-preview-only"
             case 130: text = "修复登录问题 · Synthetic search target"
+            case 260: text = "验证登录配置 · Second synthetic search target"
+            case 395: text = "完成登录修复 · Final synthetic search target"
             default: text = "合成转录 · Synthetic message \(i)"
             }
             records.append(.event(.init(session: primary, sequence: Int64(i), timestamp: now - 60_000 + Int64(i),
                                        kind: i.isMultiple(of: 2) ? .user : .assistant,
                                        text: text, dedupeKey: "preview:import:\(i)")))
         }
+        if CommandLine.arguments.contains("--synthetic-overview") ||
+            ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_OVERVIEW"] == "1" {
+            records.append(contentsOf: [
+                .event(.init(session: primary, sequence: 1000, timestamp: now - 60_000, kind: .summary,
+                             text: "Synthetic checkpoint verified", dedupeKey: "preview:overview:summary")),
+                .event(.init(session: primary, sequence: 1001, timestamp: now - 4_000, kind: .toolResult,
+                             toolName: "Synthetic check", text: "OVERVIEW_TOKEN=synthetic-overview-only",
+                             dedupeKey: "preview:overview:tool")),
+            ])
+        }
         try store.write(records)
+    }
+
+    nonisolated private static func seedProjects(_ store: AgentStore) throws {
+        let home = URL(fileURLWithPath: "/synthetic")
+        let codex = try store.upsertSource(.init(agent: .codex, label: "Synthetic Codex",
+            rootURL: home.appendingPathComponent(AgentKind.codex.defaultSourceDirectoryName)))
+        let claude = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude",
+            rootURL: home.appendingPathComponent(AgentKind.claudeCode.defaultSourceDirectoryName)))
+        let client = "/synthetic/work/client"
+        let primary = SessionKey(agent: .codex, nativeID: "preview-project-client")
+        let peer = SessionKey(agent: .claudeCode, nativeID: "preview-project-worktree")
+        let docs = SessionKey(agent: .codex, nativeID: "preview-project-docs")
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try store.write([
+            .session(.init(key: primary, sourceID: codex, environment: "Local",
+                           cwd: client, title: "Verify synthetic checkout",
+                           startedAt: now - 900_000, lastEventAt: now, status: .completed, gitBranch: "main")),
+            .session(.init(key: peer, sourceID: claude, environment: "Local",
+                           cwd: client + "/.claude/worktrees/demo", title: "Validate synthetic integration",
+                           startedAt: now - 800_000, lastEventAt: now - 30_000, status: .running, gitBranch: "demo")),
+            .session(.init(key: docs, sourceID: codex, environment: "Local",
+                           cwd: "/synthetic/work/docs", title: "Review synthetic documentation",
+                           startedAt: now - 2_000_000, lastEventAt: now - 120_000, status: .waiting)),
+            .event(.init(session: primary, sequence: 0, timestamp: now, kind: .assistant,
+                         text: "Synthetic checkout verified", dedupeKey: "preview:project:checkout")),
+            .event(.init(session: peer, sequence: 0, timestamp: now - 30_000, kind: .toolResult,
+                         toolName: "Synthetic check", text: "PROJECT_TOKEN=synthetic-project-secret",
+                         dedupeKey: "preview:project:worktree")),
+            .event(.init(session: docs, sequence: 0, timestamp: now - 120_000, kind: .assistant,
+                         text: "Synthetic documentation reviewed", dedupeKey: "preview:project:docs")),
+        ])
+    }
+
+    func openProjectSession(_ id: SessionKey) {
+        sessionSearchText = ""
+        selectedSessionID = id
+        page = .sessions
     }
 
     func verifyAccess() async {
@@ -314,6 +393,13 @@ final class DashboardModel {
         panel.message = String(localized: "Choose this agent's source directory. Access is read-only.")
         return panel
     }
+}
+
+struct SessionTranscriptSearch: Equatable, Sendable {
+    let query: String
+    let scope: IndexedSearchScope
+    let firstMatchKey: String
+    let count: Int
 }
 
 enum SourceAdditionResult: Equatable {

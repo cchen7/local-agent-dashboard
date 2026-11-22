@@ -127,6 +127,14 @@ replay with the adapter's existing dedupe keys. Older indexed records are
 retained for the archive. This implements the common importer without
 assuming any vendor's record format.
 
+## DEV-048 — Separate index status from directory access
+
+Source diagnostics summarize committed app-index records. A file is counted
+as indexed only after a checkpoint is persisted. Keep partial, missing and
+error file counts separate; exclude prompt-history buckets from navigable
+session counts. Show only a recorded scan timestamp and a typed error
+indicator, never source modification times or raw stored error text.
+
 ## DEV-039 — Normalize Claude Code files before indexing
 
 Enumerate the authorized root descriptor without following symlinks. Use the
@@ -145,11 +153,45 @@ an empty marker that v2 would have emitted for the same committed file prefix.
 Carry that boundary in decoder state until replay reaches it. The replacement
 and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 
+## DEV-046 — Read the Overview from the owned index
+
+A session Overview observes one bounded database snapshot. Prefer the
+recorded summary, prompt, reply, file touches and command results. Rebuild
+Claude assistant text by producer message ID across physical records when
+available, and otherwise from the same physical record, before masking and
+making an excerpt. Replaying a retained resume copy can fill a missing
+message ID on a matching record UUID and owner without changing any other
+stored event fields. The v5 replay also repairs files already read by v4.
+Use the newest actions across structured and normalized records.
+Each structured row replaces at most one call by timestamp, exact payload
+and tool kind so repeat calls and tool results survive.
+Omit oversized fields rather than clipping before masking. Catalog topic
+terms must occur in the masked sample and match this session via the same
+literal query the chip starts. Searching still opens the
+transcript, and the Overview does not read working directories or execute
+commands.
+
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 
 The owner removed Markdown/JSON session export from the product scope. Full
 transcripts remain viewable in the app, and Copy Resume Command and Show in
 Finder remain available. No entitlement change is needed.
+
+## DEV-040 — Browse projects from the local index
+
+Observe the Projects catalog only when the page is open. An indexed project
+ID wins when provided. An otherwise unattributed local or explicitly mapped
+host workspace can join a catalog project only at its unique host root.
+Collapse worktrees for both sides of that identity; keep the recorded
+catalog path for display. An unmapped environment stays scoped by source
+and environment.
+Recognize default local sources by registered root and environment, independently
+of how access was granted. Normalize unambiguous absolute path spellings by byte
+and collapse Claude worktrees to their repository root. Keep parent traversal
+and exactly two leading separators literal and scoped; do not read the filesystem.
+Prompt-history buckets stay searchable but are not navigable project sessions.
+The timeline uses indexed event times and fetches text only for the bounded
+recent set. Mask complete activity text before shortening it for display.
 
 ## DEV-036 — Observe indexed sessions and one transcript page
 
@@ -172,4 +214,8 @@ SQLite mapping to avoid copying hot pages. Dates use the display time zone;
 Directory filters compare whole components of recorded paths; the host
 home is used only for `~/`. Observe commits to every table read by search,
 including edits that change only event text. Refresh the same query and offset
-with at most one query running and one pending refresh.
+with at most one query running and one pending refresh. Transcript navigation
+uses the same filter snapshot as the result list. Resolve the preferred hit,
+ordinal and neighboring keys in one scoped read, ordered by sequence and
+row ID. Search refreshes retain valid selected events and only reseek the
+transcript when the selected event changes.

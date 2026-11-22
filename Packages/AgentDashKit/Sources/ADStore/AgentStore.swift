@@ -368,15 +368,32 @@ public final class AgentStore: Sendable {
     }
 
     private static func save(_ value: EventRecord, db: Database) throws {
+        let ownerID = try sessionID(value.session, db: db)
         try db.cachedStatement(sql: """
             INSERT INTO events(session_id,seq,ts,kind,tool_name,text,meta_json,dedupe_key) VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(dedupe_key) DO UPDATE SET session_id=excluded.session_id,seq=excluded.seq,ts=excluded.ts,
             kind=excluded.kind,tool_name=excluded.tool_name,text=excluded.text,meta_json=excluded.meta_json
             WHERE (events.session_id=excluded.session_id AND NOT ?)
                 OR (events.session_id<>excluded.session_id AND ?)
-            """).execute(arguments: [try sessionID(value.session, db: db), value.sequence, value.timestamp, value.kind.rawValue,
+            """).execute(arguments: [ownerID, value.sequence, value.timestamp, value.kind.rawValue,
                               value.toolName, value.text, value.metadataJSON, value.dedupeKey,
                               value.recordedOwnership == .inherited, value.recordedOwnership != nil])
+        // A same-owner Claude copy cannot replace an earlier event. It can
+        // supply a missing message ID for the same producer record UUID.
+        // The file/sequence fallback does not identify a stable producer record.
+        guard db.changesCount == 0, value.recordedOwnership == .inherited,
+              value.session.agent == .claudeCode, value.kind == .assistant,
+              !value.dedupeKey.hasPrefix("claude:event:file:"), let metadata = value.metadataJSON,
+              let fields = try? JSONDecoder().decode([String: String].self, from: Data(metadata.utf8)),
+              let messageID = fields["claude_message_id"], !messageID.isEmpty else { return }
+        try db.cachedStatement(sql: """
+            UPDATE events SET meta_json=json_set(coalesce(meta_json,'{}'),'$.claude_message_id',?)
+            WHERE dedupe_key=? AND session_id=? AND kind='assistant' AND CASE
+                WHEN meta_json IS NULL THEN 1
+                WHEN length(CAST(meta_json AS BLOB))<=4096 AND json_valid(meta_json)
+                THEN json_type(meta_json)='object' AND json_type(meta_json,'$.claude_message_id') IS NULL
+                ELSE 0 END
+            """).execute(arguments: [messageID, value.dedupeKey, ownerID])
     }
 
     private static func save(_ value: TokenEvent, db: Database) throws {

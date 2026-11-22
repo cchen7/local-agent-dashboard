@@ -22,10 +22,10 @@ enum SourceAccessProbe {
         }
         let root = URL(fileURLWithPath: home, isDirectory: true)
         return [
-            Source(agent: .claudeCode, label: "Claude Code", rootURL: root.appendingPathComponent(".claude")),
-            Source(agent: .codex, label: "Codex", rootURL: root.appendingPathComponent(".codex")),
-            Source(agent: .copilot, label: "Copilot CLI", rootURL: root.appendingPathComponent(".copilot")),
-            Source(agent: .grokBuild, label: "Grok Build", rootURL: root.appendingPathComponent(".grok"))
+            Source(agent: .claudeCode, label: "Claude Code", rootURL: root.appendingPathComponent(AgentKind.claudeCode.defaultSourceDirectoryName)),
+            Source(agent: .codex, label: "Codex", rootURL: root.appendingPathComponent(AgentKind.codex.defaultSourceDirectoryName)),
+            Source(agent: .copilot, label: "Copilot CLI", rootURL: root.appendingPathComponent(AgentKind.copilot.defaultSourceDirectoryName)),
+            Source(agent: .grokBuild, label: "Grok Build", rootURL: root.appendingPathComponent(AgentKind.grokBuild.defaultSourceDirectoryName))
         ]
     }
 
