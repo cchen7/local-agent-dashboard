@@ -192,6 +192,10 @@ final class DashboardModel {
         }
     }
 
+    func searchFromTopic(_ term: String) {
+        sessionSearchText = SearchQuery.quotedLiteral(term)
+    }
+
     nonisolated private static func seedSessions(_ store: AgentStore, in directory: URL) throws {
         let sourceID = try store.upsertSource(.init(agent: .codex, label: "Synthetic",
             rootURL: directory.appendingPathComponent("unused-source"), environment: "Synthetic"))
@@ -220,6 +224,16 @@ final class DashboardModel {
             records.append(.event(.init(session: primary, sequence: Int64(i), timestamp: now - 60_000 + Int64(i),
                                        kind: i.isMultiple(of: 2) ? .user : .assistant,
                                        text: text, dedupeKey: "preview:import:\(i)")))
+        }
+        if CommandLine.arguments.contains("--synthetic-overview") ||
+            ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_OVERVIEW"] == "1" {
+            records.append(contentsOf: [
+                .event(.init(session: primary, sequence: 1000, timestamp: now - 60_000, kind: .summary,
+                             text: "Synthetic checkpoint verified", dedupeKey: "preview:overview:summary")),
+                .event(.init(session: primary, sequence: 1001, timestamp: now - 4_000, kind: .toolResult,
+                             toolName: "Synthetic check", text: "OVERVIEW_TOKEN=synthetic-overview-only",
+                             dedupeKey: "preview:overview:tool")),
+            ])
         }
         try store.write(records)
     }

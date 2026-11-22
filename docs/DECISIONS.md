@@ -124,6 +124,24 @@ an empty marker that v2 would have emitted for the same committed file prefix.
 Carry that boundary in decoder state until replay reaches it. The replacement
 and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 
+## DEV-046 — Read the Overview from the owned index
+
+A session Overview observes one bounded database snapshot. Prefer the
+recorded summary, prompt, reply, file touches and command results. Rebuild
+Claude assistant text by producer message ID across physical records when
+available, and otherwise from the same physical record, before masking and
+making an excerpt. Replaying a retained resume copy can fill a missing
+message ID on a matching record UUID and owner without changing any other
+stored event fields. The v5 replay also repairs files already read by v4.
+Use the newest actions across structured and normalized records.
+Each structured row replaces at most one call by timestamp, exact payload
+and tool kind so repeat calls and tool results survive.
+Omit oversized fields rather than clipping before masking. Catalog topic
+terms must occur in the masked sample and match this session via the same
+literal query the chip starts. Searching still opens the
+transcript, and the Overview does not read working directories or execute
+commands.
+
 ## DEV-028 — No session export (owner confirmed 2026-11-20)
 
 The owner removed Markdown/JSON session export from the product scope. Full

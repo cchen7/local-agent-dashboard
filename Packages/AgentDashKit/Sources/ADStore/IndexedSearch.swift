@@ -53,6 +53,23 @@ public extension AgentStore {
             .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
     }
 
+    /// Use the search box's literal query and eligibility rules. Restrict the
+    /// FTS posting scan to the selected session's row ID range.
+    internal static func overviewSearchableTopics(_ terms: [String], in sessionID: Int64, db: Database) throws -> [String] {
+        guard !terms.isEmpty,
+              let bounds = try Row.fetchOne(db, sql: "SELECT min(id),max(id) FROM events WHERE session_id=?",
+                                            arguments: [sessionID]),
+              let first = bounds[0] as Int64?, let last = bounds[1] as Int64? else { return [] }
+        return try terms.filter { term in
+            guard let query = try? SearchQuery.parse(SearchQuery.quotedLiteral(term)) else { return false }
+            var statement = try SearchStatement(query, scope: .init(now: 0, timeZone: .gmt))
+            guard statement.usesFTS else { return false }
+            statement.restrictFTS(to: sessionID, eventIDs: first...last)
+            return try Bool.fetchOne(db, sql: "SELECT EXISTS(\(statement.sql))",
+                                     arguments: .init(statement.arguments)) == true
+        }
+    }
+
     /// Find and group normalized index records in one read snapshot. The database
     /// returns full display candidates for the selected groups only.
     func searchIndex(_ query: SearchQuery, scope: IndexedSearchScope,
@@ -290,6 +307,11 @@ private struct SearchStatement {
     private static func literal(_ term: SearchQuery.Term) -> String {
         // Quoting each operand leaves FTS operators entirely under our control.
         "\"" + term.text.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    mutating func restrictFTS(to sessionID: Int64, eventIDs: ClosedRange<Int64>) {
+        add("e.session_id=? AND events_fts.rowid BETWEEN ? AND ?", sessionID.databaseValue,
+            eventIDs.lowerBound.databaseValue, eventIDs.upperBound.databaseValue)
     }
 
     private mutating func add(_ predicate: String, _ values: DatabaseValue...) {

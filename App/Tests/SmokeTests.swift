@@ -76,6 +76,21 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(pending.waitForNonExistence(timeout: 5))
     }
 
+    func testSessionOverviewShowsProgressAndMasksToolOutput() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_OVERVIEW"] = "1"
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        XCTAssertTrue(element("session.transcript").waitForExistence(timeout: 5))
+        let tabs = element("session.details.tabs")
+        let overview = tabs.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Overview")).firstMatch
+        XCTAssertTrue(overview.waitForExistence(timeout: 5))
+        overview.click()
+        XCTAssertTrue(element("session.overview").waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["Synthetic checkpoint verified"].waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["OVERVIEW_TOKEN=••••••"].exists)
+        XCTAssertFalse(window.staticTexts["OVERVIEW_TOKEN=synthetic-overview-only"].exists)
+    }
+
     func testNativeWindowGeometry() throws {
         for appearance in ["dark", "light"] {
             for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
