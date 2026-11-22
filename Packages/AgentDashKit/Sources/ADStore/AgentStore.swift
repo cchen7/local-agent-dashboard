@@ -15,6 +15,10 @@ public enum CustomSourceRegistration: Equatable, Sendable {
     case pathConflict
 }
 
+public enum SourceAccessRenewal: Equatable, Sendable {
+    case renewed, wrongDirectory, pathConflict
+}
+
 /// App-owned WAL database. The caller must supply a URL in its own container (or a
 /// synthetic test directory), never an agent database. No source URL is opened here.
 /// All SQL and GRDB types stay inside ADStore; synchronous calls belong off the UI actor.
@@ -90,6 +94,43 @@ public final class AgentStore: Sendable {
         return try saveSource(source, registration: (identity, existing, occupiedPath))
     }
 
+    /// Refresh an existing source by ID and directory identity. The caller
+    /// reads filesystem metadata and supplies an opaque read-only bookmark.
+    /// Legacy custom rows need independent evidence from their old bookmark.
+    public func renewSourceAccess(_ source: Source, selectedRoot: URL, identity: SourceRootIdentity,
+                                  bookmark: Data, legacyBookmarkIdentity: SourceRootIdentity? = nil)
+    throws -> SourceAccessRenewal {
+        guard Source.isLocalRoot(selectedRoot) else { throw StoreError.invalidLocation }
+        guard !bookmark.isEmpty else { throw StoreError.invalidCustomSource }
+        let root = selectedRoot.standardizedFileURL.path
+        return try databasePool.write { db in
+            let id = try Self.validateObservedSource(source, for: source.agent, db: db)
+            let storedMatch = try Bool.fetchOne(db, sql: """
+                SELECT volume=? AND inode=? AND birth_seconds=? AND birth_nanoseconds=?
+                FROM source_root_identities WHERE source_id=?
+                """, arguments: [identity.volume.uuidString, identity.inode,
+                                  identity.birthSeconds, identity.birthNanoseconds, id])
+            let matches: Bool
+            if let storedMatch {
+                matches = storedMatch
+            } else {
+                switch source.access {
+                case .defaultLocation: matches = root.utf8.elementsEqual(source.rootURL.standardizedFileURL.path.utf8)
+                case .bookmark: matches = legacyBookmarkIdentity == identity
+                }
+            }
+            guard matches else { return .wrongDirectory }
+            if try Int.fetchOne(db, sql: "SELECT 1 FROM sources WHERE agent=? AND root_path=? AND id<>?",
+                                arguments: [source.agent.rawValue, root, id]) != nil { return .pathConflict }
+            try db.execute(sql: "UPDATE sources SET root_path=?, access_kind='bookmark', bookmark=? WHERE id=?",
+                           arguments: [root, bookmark, id])
+            // The general permission-change trigger invalidates old identity
+            // metadata. Restore the verified identity in the same transaction.
+            try Self.saveRootIdentity(identity, for: id, db: db)
+            return .renewed
+        }
+    }
+
     private func saveSource(_ source: Source, registration: (identity: SourceRootIdentity, existing: Source?, occupiedPath: Source?)?)
     throws -> CustomSourceRegistration {
         guard source.rootURL.isFileURL else { throw StoreError.invalidLocation }
@@ -138,13 +179,18 @@ public final class AgentStore: Sendable {
                 throw StoreError.invalidStoredValue
             }
             if let identity = registration?.identity {
-                try db.execute(sql: """
-                    INSERT INTO source_root_identities(source_id,volume,inode,birth_seconds,birth_nanoseconds)
-                    VALUES(?,?,?,?,?)
-                    """, arguments: [id, identity.volume.uuidString, identity.inode, identity.birthSeconds, identity.birthNanoseconds])
+                try Self.saveRootIdentity(identity, for: id, db: db)
             }
             return .added(id)
         }
+    }
+
+    private static func saveRootIdentity(_ identity: SourceRootIdentity, for id: Int64, db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO source_root_identities(source_id,volume,inode,birth_seconds,birth_nanoseconds)
+            VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET volume=excluded.volume, inode=excluded.inode,
+                birth_seconds=excluded.birth_seconds, birth_nanoseconds=excluded.birth_nanoseconds
+            """, arguments: [id, identity.volume.uuidString, identity.inode, identity.birthSeconds, identity.birthNanoseconds])
     }
 
     private static func validateObservedSource(_ source: Source, for agent: AgentKind, db: Database) throws -> Int64 {

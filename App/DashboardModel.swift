@@ -269,26 +269,41 @@ final class DashboardModel {
     }
 
     func grantAccess(to source: Source) async {
-        guard let store else { return }
+        guard store != nil else { return }
         let panel = Self.sourceFolderPanel()
         panel.directoryURL = source.rootURL
         guard await panel.begin() == .OK, let url = panel.url else { return }
-        guard url.standardizedFileURL == source.rootURL.standardizedFileURL else {
-            if let id = source.id { access[id] = .wrongDirectory }
-            return
-        }
         do {
-            var updated = source
-            updated.rootURL = url
-            updated.access = .bookmark(try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-                                                           includingResourceValuesForKeys: nil, relativeTo: nil))
-            _ = try await Task.detached { [updated] in try store.upsertSource(updated) }.value
-            sources = try await Task.detached { try store.sources() }.value
-            await verifyAccess()
+            let bookmark = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                                includingResourceValuesForKeys: nil, relativeTo: nil)
+            await applySourceGrant(to: source, selectedRoot: url, bookmark: bookmark)
         } catch {
             if let id = source.id { access[id] = .denied }
         }
     }
+
+    func applySourceGrant(to source: Source, selectedRoot: URL, bookmark: Data) async {
+        guard let store, let id = source.id else { return }
+        do {
+            let (result, snapshot) = try await Task.detached {
+                let identity = try SourceFileReader.directoryIdentity(root: selectedRoot)
+                let legacyIdentity: SourceRootIdentity?
+                if case .bookmark = source.access { legacyIdentity = SourceAccessProbe.directoryIdentity(source) }
+                else { legacyIdentity = nil }
+                let result = try store.renewSourceAccess(source, selectedRoot: selectedRoot, identity: identity,
+                                                         bookmark: bookmark, legacyBookmarkIdentity: legacyIdentity)
+                return (result, result == .renewed ? try store.sources() : [])
+            }.value
+            switch result {
+            case .renewed:
+                sources = snapshot
+                await verifyAccess()
+            case .wrongDirectory: access[id] = .wrongDirectory
+            case .pathConflict: access[id] = .pathConflict
+            }
+        } catch { access[id] = .denied }
+    }
+
     private static func sourceFolderPanel() -> NSOpenPanel {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true

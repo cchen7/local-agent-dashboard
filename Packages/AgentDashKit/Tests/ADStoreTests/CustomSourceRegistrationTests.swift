@@ -251,3 +251,91 @@ func customSourceDistinguishesReusedAPFSPath(useDataAliasFirst: Bool) throws {
     #expect(try store.checkpoint(for: fileID) == checkpoint)
     #expect(try store.events(in: session).first?.text == "archived synthetic history")
 }
+
+@Test("FR-SRC-2: renewing accepts a renamed APFS source and rejects the replacement at its old path")
+func renewAccessFollowsTheOriginalDirectory() throws {
+    let box = try RegistrationFixture()
+    defer { box.remove() }
+    let old = box.directory.appendingPathComponent("Original", isDirectory: true)
+    let moved = box.directory.appendingPathComponent("Moved", isDirectory: true)
+    let files = FileManager.default
+    try files.createDirectory(at: old, withIntermediateDirectories: false)
+    let original = try SourceFileReader.directoryIdentity(root: old)
+    var source = box.custom(.codex, label: "Original", environment: "Work")
+    source.rootURL = old
+    source.enabled = false
+    source.pathMappings = [.init(from: "/workspace", to: "/synthetic/project")]
+    guard case .added(let id) = try box.store.registerCustomSource(source, identity: original) else {
+        Issue.record("Expected a new source"); return
+    }
+    let before = try #require(try box.store.sources().first)
+    let checkpoint = Checkpoint(inode: 11, size: 20, offset: 15, parserVersion: 3, sequence: 2, previousTimestamp: 4)
+    let fileID = try box.store.upsertFile(.init(sourceID: id, relativePath: "sessions/synthetic.jsonl", role: .session),
+                                         checkpoint: checkpoint)
+    let session = SessionKey(agent: .codex, nativeID: "synthetic-history")
+    let event = EventRecord(session: session, sequence: 2, timestamp: 4, kind: .assistant,
+                            text: "Synthetic reply", dedupeKey: "synthetic:old:2")
+    try box.store.write([.session(.init(key: session, sourceID: id, fileID: fileID, environment: "Work")), .event(event)])
+    try files.moveItem(at: old, to: moved)
+    try files.createDirectory(at: old, withIntermediateDirectories: false)
+    let replacement = try SourceFileReader.directoryIdentity(root: old)
+    let relocated = try SourceFileReader.directoryIdentity(root: moved)
+    #expect(relocated == original && replacement != original)
+    let newBookmark = Data([0x34, 0x57])
+    #expect(try box.store.renewSourceAccess(before, selectedRoot: old, identity: replacement,
+                                            bookmark: newBookmark, legacyBookmarkIdentity: replacement) == .wrongDirectory)
+    #expect(try box.store.sources() == [before])
+    #expect(try box.store.checkpoint(for: fileID) == checkpoint)
+    #expect(try box.store.renewSourceAccess(before, selectedRoot: moved, identity: relocated,
+                                            bookmark: newBookmark) == .renewed)
+
+    let reopened = try AgentStore(databaseURL: box.index)
+    let renewed = try #require(try reopened.sources().first)
+    #expect(renewed.rootURL.standardizedFileURL.path == moved.standardizedFileURL.path)
+    var expected = before
+    expected.rootURL = renewed.rootURL
+    expected.access = .bookmark(newBookmark)
+    #expect(try reopened.sources() == [expected])
+    #expect(try reopened.checkpoint(for: fileID) == checkpoint)
+    #expect(try reopened.events(in: session) == [event])
+    #expect(try reopened.registerCustomSource(source, identity: original) == .alreadyRegistered(id))
+    #expect(throws: StoreError.invalidCustomSource) {
+        try reopened.renewSourceAccess(before, selectedRoot: moved, identity: relocated, bookmark: Data([0x11]))
+    }
+    #expect(try reopened.sources() == [expected])
+}
+
+@Test("FR-SRC-2: legacy custom permissions require an independent live bookmark match")
+func renewAccessRequiresLegacyBookmarkEvidence() throws {
+    let box = try RegistrationFixture()
+    defer { box.remove() }
+    let source = box.custom(.codex, label: "Legacy", environment: "Synthetic")
+    let id = try box.store.upsertSource(source)
+    let pending = try #require(try box.store.sources().first)
+    let moved = box.directory.appendingPathComponent("moved")
+    let bookmark = Data([0x12, 0x34])
+    #expect(try box.store.renewSourceAccess(pending, selectedRoot: source.rootURL, identity: box.identity,
+                                            bookmark: bookmark) == .wrongDirectory)
+    #expect(try box.store.sources() == [pending])
+    #expect(try box.store.renewSourceAccess(pending, selectedRoot: moved, identity: box.identity,
+                                            bookmark: bookmark, legacyBookmarkIdentity: box.identity) == .renewed)
+    #expect(try box.store.registerCustomSource(source, identity: box.identity) == .alreadyRegistered(id))
+}
+
+@Test("FR-SRC-2: a default source can receive its first bookmark only at its configured path")
+func renewDefaultSourceUsesConfiguredPathForInitialGrant() throws {
+    let box = try RegistrationFixture()
+    defer { box.remove() }
+    var source = box.custom(.codex, label: "Default", environment: "Synthetic")
+    source.access = .defaultLocation
+    let id = try box.store.upsertSource(source)
+    let pending = try #require(try box.store.sources().first)
+    let bookmark = Data([0x56])
+    #expect(try box.store.renewSourceAccess(pending, selectedRoot: box.directory, identity: box.identity,
+                                            bookmark: bookmark) == .wrongDirectory)
+    #expect(try box.store.sources() == [pending])
+    #expect(try box.store.renewSourceAccess(pending, selectedRoot: pending.rootURL, identity: box.identity,
+                                            bookmark: bookmark) == .renewed)
+    #expect(try box.store.sources().first?.id == id)
+    #expect(try box.store.sources().first?.access == .bookmark(bookmark))
+}

@@ -107,6 +107,14 @@ the saved bookmark so aliases of the replacement also report a conflict.
 Both outcomes leave the existing permission, configuration, checkpoint and
 history intact. Registration does not read session files or start indexing.
 
+Grant access again uses the same directory identity. Update a renamed
+original in place and keep its identity, checkpoints and session history.
+For a legacy custom source, require the old bookmark to resolve without
+staleness to the same directory; a path match alone does not prove that.
+A default source with no prior bookmark remains defined by its configured
+path. The write checks that the source's saved path and permission still
+match the snapshot used to grant access.
+
 ## DEV-038 — Commit JSONL batches against the expected checkpoint
 
 Read the expected checkpoint before opening the pinned, read-only source

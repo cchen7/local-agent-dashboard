@@ -3,7 +3,7 @@ import Foundation
 import ADCore
 
 enum SourceAccessStatus: Equatable, Sendable {
-    case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory
+    case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
 }
 
 /// M0 access verification reads directory entry metadata only, never file contents.

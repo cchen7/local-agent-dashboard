@@ -851,19 +851,36 @@
         }
       }
     },
-    "Choose the directory shown above.": {
+    "Could not verify the original source folder. Access was left unchanged.": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choose the directory shown above."
+            "value": "Could not verify the original source folder. Access was left unchanged."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请选择上方显示的目录。"
+            "value": "无法确认所选目录是原目录。访问权限未更改。"
+          }
+        }
+      }
+    },
+    "This path is registered to a different source.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This path is registered to a different source."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此路径已登记给另一个来源。"
           }
         }
       }

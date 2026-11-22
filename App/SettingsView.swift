@@ -68,7 +68,8 @@ struct SettingsView: View {
         case .missing: Text("Directory not found").foregroundStyle(.secondary)
         case .denied: Text("Access denied. Grant access again.").foregroundStyle(.red)
         case .staleBookmark: Text("Bookmark is stale. Grant access again.").foregroundStyle(.red)
-        case .wrongDirectory: Text("Choose the directory shown above.").foregroundStyle(.red)
+        case .wrongDirectory: Text("Could not verify the original source folder. Access was left unchanged.").foregroundStyle(.red)
+        case .pathConflict: Text("This path is registered to a different source.").foregroundStyle(.red)
         }
     }
 }
