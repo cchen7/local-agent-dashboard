@@ -688,6 +688,8 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 - Opening a session scrolls the transcript to the first match. The up/down buttons move between matching events in that session using transcript order and show the current position. Only a bounded transcript page is loaded at each match. When the index changes, keep the current event if it still matches; otherwise restart at the first match.
 - Sort: relevance (default) / most recent / token volume.
   Sort matching sessions before paging. Token volume includes cached input and output; changing sort does not change match order inside a transcript.
+- Keep the result list in place while a new query loads. Hide stale rows while waiting.
+  Adjacent pages can share a ranked snapshot; continue checking the displayed page against new commits.
 - A query can be saved as a "Smart Group" in the sidebar.
   Save the validated query as entered with its sort order, then run it against the current index whenever the group is opened. Removing a group removes only the saved query.
 
@@ -1102,7 +1104,7 @@ admission or removal. Clearing rules can recover only available source files.
 | NFR-1 | Cold start to showing existing data | < 1 s |
 | NFR-2 | File write → UI update | ≤ 2 s |
 | NFR-3 | First full index | ≥ 50 MB/s of raw logs on Apple silicon; 5 GB of raw logs in < 3 min |
-| NFR-4 | Search latency at 1M events | P95 < 150 ms |
+| NFR-4 | Search latency at 1M events | P95 < 150 ms after excluding only §9.1's 150 ms typing debounce. Report full edit-to-result timing too; page changes have no typing debounce. |
 | NFR-5 | Switching Token Usage periods | < 100 ms |
 | NFR-6 | Memory with 1M events | < 400 MB with the window open; < 150 MB menu-bar only |
 | NFR-7 | Idle CPU | < 1% average (no polling when nothing changes) |

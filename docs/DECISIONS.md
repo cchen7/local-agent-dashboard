@@ -807,3 +807,28 @@ and flush the last revision at completion. Explicit period selections
 still read the current index. The worker uses bounded 2,048-row
 transactions and yields between writes; hidden or unchanged pages do
 not start a polling loop.
+
+## DEV-092 — Measure and reuse adjacent search pages (FR-SR, NFR-4)
+
+Start the 150 ms deadline at the edit itself. Keep the native list mounted
+during queries but hide its stale rows and controls. Rank and count in one
+committed read, then retain at most two pages of masked result rows for that
+query, sort, filter and privacy revision. When the user opens a retained page,
+the normal search observation still revalidates it against the index.
+
+Export the same million-event workload used by the search package benchmark,
+then measure the actual result list in the signed, optimized SyntheticQA app:
+
+```sh
+fixture=$(uuidgen)
+AGENTDASH_NATIVE_SEARCH_EXPORT="$fixture" \
+  swift test --package-path Packages/AgentDashKit -c release \
+  --filter exportNativeSearchFixture
+python3 Tools/measure-synthetic-native-search.py /path/to/AgentDashboard.app --export "$fixture"
+```
+
+The runner prepopulates the search binding, invokes the same page action as
+the Next button, and measures through the first visible result row draw.
+It checks exact counts, disjoint pages and the refreshed count at the same
+offset after a synthetic commit. The timing reports both the full duration
+and the duration excluding only the prescribed debounce. No keyboard is used.

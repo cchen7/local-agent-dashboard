@@ -121,6 +121,8 @@ final class DashboardModel {
     private(set) var store: AgentStore?
     var usageStore: AgentStore? { store }
     private(set) var searchField = SearchFieldQuery()
+    @ObservationIgnored private var lastQueryEdit: ContinuousClock.Instant?
+    @ObservationIgnored private var pairedSearchPage: SearchPagePair?
     var sessionSearchText: String { searchField.query }
 
     func editSearchText(_ text: String) { installSearchField(searchField.editingText(text)) }
@@ -137,7 +139,11 @@ final class DashboardModel {
 
     private func installSearchField(_ replacement: SearchFieldQuery) {
         guard searchField != replacement else { return }
-        if !sessionSearchText.utf8.elementsEqual(replacement.query.utf8) { sessionSearchOffset = 0 }
+        if !sessionSearchText.utf8.elementsEqual(replacement.query.utf8) {
+            sessionSearchOffset = 0
+            lastQueryEdit = .now
+            pairedSearchPage = nil
+        }
         searchField = replacement
     }
     var groupSessionsByProject = false {
@@ -175,6 +181,11 @@ final class DashboardModel {
             searchForOrder == sessionSearchOrder && searchForFilter == libraryFilter ? lastSearchState : .waiting
     }
 
+    var lastNonemptySearchPage: SessionSearchResults? {
+        guard case .results(let results) = lastSearchState, !results.hits.isEmpty else { return nil }
+        return results
+    }
+
     var selectedTranscriptSearch: SessionTranscriptSearch? {
         guard isSearchingSessions, case .results(let results) = sessionSearchState, let scope = lastSearchScope,
               let hit = results.hits.first(where: { $0.id == selectedSessionID }) else { return nil }
@@ -199,8 +210,13 @@ final class DashboardModel {
                 let transcript = try SyntheticLongTranscript.request()
                 let periods = try SyntheticUsagePeriod.request()
                 let repricing = try SyntheticRepricing.request()
-                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil && periods == nil && repricing == nil
-                if let repricing {
+                let nativeSearch = try SyntheticNativeSearch.request()
+                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil && periods == nil && repricing == nil && nativeSearch == nil
+                if let nativeSearch {
+                    guard startup == nil && live == nil && resources == nil && transcript == nil && periods == nil && repricing == nil
+                    else { throw StoreError.invalidLocation }
+                    directory = try nativeSearch.openMeasurementDirectory()
+                } else if let repricing {
                     guard startup == nil && live == nil && resources == nil && transcript == nil && periods == nil else {
                         throw StoreError.invalidLocation
                     }
@@ -355,6 +371,9 @@ final class DashboardModel {
             if ProcessInfo.processInfo.environment[SyntheticRepricing.environmentKey] != nil {
                 SyntheticRepricing.report("fixture unavailable")
             }
+            if ProcessInfo.processInfo.environment[SyntheticNativeSearch.environmentKey] != nil {
+                SyntheticNativeSearch.report("fixture unavailable")
+            }
             #endif
         }
     }
@@ -502,25 +521,56 @@ final class DashboardModel {
             selectVisibleSession()
             searchForText = nil
             lastSearchState = .waiting
+            pairedSearchPage = nil
             return
         }
         do {
-            if searchForText?.utf8.elementsEqual(text.utf8) != true { try await Task.sleep(for: .milliseconds(150)) }
+            let debouncing = searchForText?.utf8.elementsEqual(text.utf8) != true
+            let debounceStart = lastQueryEdit ?? .now
+            if debouncing {
+                // Measure the pause from the actual edit, not from the
+                // later render pass that started this observation.
+                let deadline = debounceStart.advanced(by: .milliseconds(150))
+                if deadline > .now { try await Task.sleep(until: deadline, clock: .continuous) }
+            }
+            #if AGENTDASH_SYNTHETIC_ONLY
+            let measuredSearch = SyntheticNativeSearch.measuring
+            let waiting = debounceStart.duration(to: .now).components
+            let debounceMS = measuredSearch && debouncing
+                ? Double(waiting.seconds) * 1_000 + Double(waiting.attoseconds) / 1e15 : 0
+            #endif
             for try await _ in store.searchIndexChanges(order: order) {
                 guard privacyRevision == revision, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
+                pairedSearchPage = nil
                 let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
                                                timeZone: .current, hostHome: searchHome, libraryFilter: filter)
-                let limit = Self.sessionSearchPageSize
+                let size = Self.sessionSearchPageSize
+                let windowStart = offset - offset % (2 * size)
                 let work = Task.detached(priority: .userInitiated) {
-                    try SessionSearch.run(text, in: store, scope: scope, order: order, limit: limit, offset: offset,
-                                          maskSecrets: masking)
+                    #if AGENTDASH_SYNTHETIC_ONLY
+                    let queryStart = measuredSearch ? DispatchTime.now().uptimeNanoseconds : 0
+                    #endif
+                    let result = try SessionSearch.run(text, in: store, scope: scope, order: order,
+                                                       limit: 2 * size, offset: windowStart, maskSecrets: masking)
+                    #if AGENTDASH_SYNTHETIC_ONLY
+                    return (result, measuredSearch
+                            ? Double(DispatchTime.now().uptimeNanoseconds - queryStart) / 1_000_000 : 0)
+                    #else
+                    return result
+                    #endif
                 }
-                let found = try await withTaskCancellationHandler {
+                let response = try await withTaskCancellationHandler {
                     try await work.value
                 } onCancel: {
                     work.cancel()
                 }
+                #if AGENTDASH_SYNTHETIC_ONLY
+                let (window, queryMS) = response
+                #else
+                let window = response
+                #endif
                 guard privacyRevision == revision, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
+                let found = window.page(offset: offset - windowStart, limit: size)
                 if offset > 0 && found.hits.isEmpty {
                     sessionSearchOffset = 0
                     return
@@ -531,7 +581,15 @@ final class DashboardModel {
                 searchForFilter = filter
                 lastSearchScope = scope
                 lastSearchState = .results(found)
+                pairedSearchPage = .init(text: text, order: order, filter: filter, revision: revision,
+                                         start: windowStart, results: window)
                 selectSearchHit(found)
+                #if AGENTDASH_SYNTHETIC_ONLY
+                if measuredSearch {
+                    SyntheticNativeSearchRun.shared.didPublish(text: text, offset: offset,
+                                                               matches: found.matchCount, debounce: debounceMS, query: queryMS)
+                }
+                #endif
                 // At most one query runs at a time. While it runs or cools
                 // down, the stream retains one wakeup for all pending writes.
                 try await Task.sleep(for: .milliseconds(150))
@@ -542,6 +600,7 @@ final class DashboardModel {
             searchForOffset = offset
             searchForOrder = order
             searchForFilter = filter
+            pairedSearchPage = nil
             lastSearchState = error is SearchQuery.Failure || (error as? IndexedSearchFailure) == .invalidFilter
                 ? .invalid : .failed
         }
@@ -697,6 +756,7 @@ final class DashboardModel {
         searchForText = nil
         lastSearchScope = nil
         lastSearchState = .waiting
+        pairedSearchPage = nil
         privacyRevision &+= 1
     }
 
@@ -709,6 +769,31 @@ final class DashboardModel {
         } else {
             sessionSearchOffset = max(0, sessionSearchOffset - size)
         }
+        // Keep the adjacent page on the same committed ordering. The normal
+        // new page observation independently checks for newer commits.
+        if let pair = pairedSearchPage, pair.text.utf8.elementsEqual(sessionSearchText.utf8),
+           pair.order == sessionSearchOrder, pair.filter == libraryFilter, pair.revision == privacyRevision,
+           sessionSearchOffset >= pair.start, sessionSearchOffset - pair.start < pair.results.hits.count {
+            let page = pair.results.page(offset: sessionSearchOffset - pair.start, limit: size)
+            searchForOffset = sessionSearchOffset
+            lastSearchState = .results(page)
+            selectSearchHit(page)
+            #if AGENTDASH_SYNTHETIC_ONLY
+            if SyntheticNativeSearch.measuring {
+                SyntheticNativeSearchRun.shared.didPublish(text: sessionSearchText, offset: sessionSearchOffset,
+                                                           matches: page.matchCount, debounce: 0, query: 0)
+            }
+            #endif
+        }
+    }
+
+    private struct SearchPagePair {
+        let text: String
+        let order: SessionSearchOrder
+        let filter: SessionLibraryFilter?
+        let revision: UInt64
+        let start: Int
+        let results: SessionSearchResults
     }
 
     private func selectSearchHit(_ results: SessionSearchResults) {

@@ -224,11 +224,12 @@ public extension AgentStore {
                 if $0.activity != $1.activity { return $0.activity > $1.activity }
                 return $0.id > $1.id
             }
-        let groups = try ranked.dropFirst(offset).prefix(limit).map { session -> IndexedSearchGroup in
-            guard let row = try Row.fetchOne(db, sql: """
+        let snippets = try db.cachedStatement(sql: """
                 SELECT first.dedupe_key, best.text, best.tool_name
                 FROM events first JOIN events best ON best.id=? WHERE first.id=?
-                """, arguments: [session.tally.best.id, session.tally.first.id])
+                """)
+        let groups = try ranked.dropFirst(offset).prefix(limit).map { session -> IndexedSearchGroup in
+            guard let row = try Row.fetchOne(snippets, arguments: [session.tally.best.id, session.tally.first.id])
             else { throw StoreError.invalidStoredValue }
             return .init(session: session.session, matchCount: session.tally.count,
                          firstMatchKey: row["dedupe_key"], bestText: row["text"], bestTool: row["tool_name"])

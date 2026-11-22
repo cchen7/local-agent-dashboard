@@ -116,6 +116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--synthetic-reprice-fixture") {
             Darwin.exit(SyntheticRepricing.runFixtureCommand())
         }
+        if CommandLine.arguments.contains("--synthetic-native-search-fixture") {
+            Darwin.exit(SyntheticNativeSearch.runFixtureCommand())
+        }
         return AppDelegate.self
     }
     #endif

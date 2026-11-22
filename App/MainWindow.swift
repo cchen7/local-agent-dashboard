@@ -186,73 +186,102 @@ struct MainWindow: View {
 
     @ViewBuilder private var sessionColumnContent: some View {
         if model.isSearchingSessions {
-            switch model.sessionSearchState {
-            case .waiting:
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .invalid:
-                EmptyPanel(title: "Check the search query", symbol: "magnifyingglass",
-                           message: "Check quoted phrases and filter values.")
-            case .failed:
-                EmptyPanel(title: "Could not search sessions", symbol: "exclamationmark.triangle",
-                           message: "Edit the query to try again.")
-            case .results(let results):
-                searchResults(results)
+            let state = model.sessionSearchState
+            let presentation = searchPresentation(state)
+            // Keep the existing native list mounted when replacing a result
+            // page, but never expose stale rows or controls as current.
+            if let presentation {
+                searchResults(presentation.results, pending: presentation.pending)
+            } else {
+                switch state {
+                case .waiting:
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .invalid:
+                    EmptyPanel(title: "Check the search query", symbol: "magnifyingglass",
+                               message: "Check quoted phrases and filter values.")
+                case .failed:
+                    EmptyPanel(title: "Could not search sessions", symbol: "exclamationmark.triangle",
+                               message: "Edit the query to try again.")
+                case .results:
+                    EmptyPanel(title: "No search matches", symbol: "magnifyingglass",
+                               message: "Try a different word or filter.")
+                }
             }
         } else {
             sessionList
         }
     }
 
-    @ViewBuilder private func searchResults(_ results: SessionSearchResults) -> some View {
-        if results.hits.isEmpty {
-            EmptyPanel(title: "No search matches", symbol: "magnifyingglass",
-                       message: "Try a different word or filter.")
-        } else {
-            let sessions = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0) })
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 6) {
-                    Text("Matches: \(results.matchCount) · Sessions: \(results.sessionCount)")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer(minLength: 4)
-                    Picker("Search Sort", selection: $model.sessionSearchOrder) {
-                        Text("Relevance").tag(SessionSearchOrder.relevance)
-                        Text("Most Recent").tag(SessionSearchOrder.recent)
-                        Text("Token Volume").tag(SessionSearchOrder.tokens)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .controlSize(.small)
-                    .accessibilityIdentifier("search.sort")
-                }
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                if results.sessionCount > DashboardModel.sessionSearchPageSize {
-                    HStack(spacing: 8) {
-                        Text("Sessions \(model.sessionSearchOffset + 1)–\(model.sessionSearchOffset + results.hits.count)")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Button { model.pageSessionSearch(forward: false) } label: {
-                            Label("Earlier Results", systemImage: "chevron.left").labelStyle(.iconOnly)
-                        }
-                        .disabled(model.sessionSearchOffset == 0)
-                        Button { model.pageSessionSearch(forward: true) } label: {
-                            Label("Later Results", systemImage: "chevron.right").labelStyle(.iconOnly)
-                        }
-                        .disabled(model.sessionSearchOffset + results.hits.count >= results.sessionCount)
-                    }
-                    .padding(.horizontal, 12).padding(.bottom, 8)
-                }
-                List(selection: $model.selectedSessionID) {
-                    rows(results.hits.filter { sessions[$0.id] != nil }) { hit, name in
-                        if let session = sessions[hit.id] {
-                            SessionListCell(session: session, snippet: hit.snippet, projectName: name,
-                                            currency: model.pricing.currency).tag(hit.id)
-                        }
-                    }
-                }
-                .environment(\.defaultMinListRowHeight, 72)
-            }
-            .accessibilityIdentifier("sessions.searchResults")
+    private func searchPresentation(_ state: SessionSearchState) -> (results: SessionSearchResults, pending: Bool)? {
+        switch state {
+        case .results(let results) where !results.hits.isEmpty: (results, false)
+        case .waiting: model.lastNonemptySearchPage.map { ($0, true) }
+        default: nil
         }
+    }
+
+    private func searchResults(_ results: SessionSearchResults, pending: Bool) -> some View {
+        let sessions = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0) })
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text("Matches: \(results.matchCount) · Sessions: \(results.sessionCount)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Picker("Search Sort", selection: $model.sessionSearchOrder) {
+                    Text("Relevance").tag(SessionSearchOrder.relevance)
+                    Text("Most Recent").tag(SessionSearchOrder.recent)
+                    Text("Token Volume").tag(SessionSearchOrder.tokens)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .accessibilityIdentifier("search.sort")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            if results.sessionCount > DashboardModel.sessionSearchPageSize {
+                HStack(spacing: 8) {
+                    Text("Sessions \(model.sessionSearchOffset + 1)–\(model.sessionSearchOffset + results.hits.count)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button { model.pageSessionSearch(forward: false) } label: {
+                        Label("Earlier Results", systemImage: "chevron.left").labelStyle(.iconOnly)
+                    }
+                    .disabled(model.sessionSearchOffset == 0)
+                    Button { model.pageSessionSearch(forward: true) } label: {
+                        Label("Later Results", systemImage: "chevron.right").labelStyle(.iconOnly)
+                    }
+                    .disabled(model.sessionSearchOffset + results.hits.count >= results.sessionCount)
+                }
+                .padding(.horizontal, 12).padding(.bottom, 8)
+            }
+            List(selection: $model.selectedSessionID) {
+                rows(results.hits.filter { sessions[$0.id] != nil }) { hit, name in
+                    if let session = sessions[hit.id] {
+                        SessionListCell(session: session, snippet: hit.snippet, projectName: name,
+                                        currency: model.pricing.currency).tag(hit.id)
+                            #if AGENTDASH_SYNTHETIC_ONLY
+                            .background {
+                                if SyntheticNativeSearch.measuring, !pending, hit.id == results.hits.first?.id,
+                                   let marker = SyntheticNativeSearchRun.shared.marker(model: model, results: results) {
+                                    SyntheticRowDrawMarker(event: marker) { window in
+                                        SyntheticNativeSearchRun.shared.resultsDidDraw(marker, model: model, results: results,
+                                                                                       window: window)
+                                    }
+                                }
+                            }
+                            #endif
+                    }
+                }
+            }
+            .environment(\.defaultMinListRowHeight, 72)
+        }
+        .opacity(pending ? 0 : 1)
+        .allowsHitTesting(!pending)
+        .accessibilityHidden(pending)
+        .overlay {
+            if pending { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
+        }
+        .accessibilityIdentifier(pending ? "sessions.searchPending" : "sessions.searchResults")
     }
 
     @ViewBuilder private var sessionList: some View {
@@ -278,6 +307,10 @@ struct MainWindow: View {
                             if let event = SyntheticStartupFixture.marker(for: session)
                                 ?? SyntheticLiveUpdateFixture.current?.marker(for: session) {
                                 SyntheticRowDrawMarker(event: event)
+                            } else if SyntheticNativeSearch.measuring, session.id == model.visibleSessions.first?.id {
+                                SyntheticRowDrawMarker(event: "synthetic-search library") { window in
+                                    SyntheticNativeSearchRun.shared.libraryDidDraw(model: model, window: window)
+                                }
                             }
                         }
                         #endif

@@ -20,6 +20,12 @@ public struct SessionSearchResults: Equatable, Sendable {
     public let hits: [SessionSearchHit]
     public let matchCount: Int
     public let sessionCount: Int
+
+    /// Select part of an already ranked result without changing its exact totals.
+    public func page(offset: Int, limit: Int) -> Self {
+        .init(hits: Array(hits.dropFirst(max(0, offset)).prefix(max(0, limit))),
+              matchCount: matchCount, sessionCount: sessionCount)
+    }
 }
 
 public enum SessionSearch {
