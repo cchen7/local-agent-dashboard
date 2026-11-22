@@ -67,14 +67,16 @@ struct UsageView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(model.usageMetric == .cost ? "Estimated spend" : "Token throughput")
-                    .font(.title3.weight(.semibold)).lineLimit(1)
-                Spacer(minLength: 4)
-                Picker("Period", selection: Binding(get: { model.usagePeriod }, set: model.selectPeriod)) {
-                    ForEach(UsagePeriod.allCases, id: \.self) { Text($0.displayLabel).tag($0) }
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    usageTitle.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 4)
+                    periodPicker.fixedSize()
                 }
-                .labelsHidden().pickerStyle(.segmented).fixedSize()
+                VStack(alignment: .leading, spacing: 8) {
+                    usageTitle
+                    periodPicker
+                }
             }
             HStack {
                 Spacer(minLength: 0)
@@ -105,6 +107,18 @@ struct UsageView: View {
                 .environment(\.locale, clock.locale)
             }
         }
+    }
+
+    private var usageTitle: some View {
+        Text(model.usageMetric == .cost ? "Estimated spend" : "Token throughput")
+            .font(.title3.weight(.semibold))
+    }
+
+    private var periodPicker: some View {
+        Picker("Period", selection: Binding(get: { model.usagePeriod }, set: model.selectPeriod)) {
+            ForEach(UsagePeriod.allCases, id: \.self) { Text($0.displayLabel).tag($0) }
+        }
+        .labelsHidden().pickerStyle(.segmented)
     }
 
     private func rangeLabel(_ snapshot: UsagePageSnapshot) -> some View {
@@ -609,7 +623,7 @@ struct UsageChart: View, Equatable {
     private struct CurveLane: Identifiable {
         let agent: AgentKind?
         let points: [CurvePoint]
-        var id: String { agent?.rawValue ?? "" }
+        var id: String { agent.map { "agent:\($0.rawValue)" } ?? "combined" }
     }
 
     private var longPeriod: Bool { request.period == .month || request.period == .quarter }
@@ -707,14 +721,17 @@ struct UsageChart: View, Equatable {
             } else {
                 AreaPlot(area, x: .value("Time", \.time), y: .value("Combined", \.value))
                     .interpolationMethod(.monotone).foregroundStyle(Color.primary.opacity(0.06))
+                // Separate series preserve each line's path, color and stroke.
                 ForEach(lanes) { lane in
-                    LinePlot(lane.points, x: .value("Time", \.time), y: .value("Throughput", \.value))
+                    LinePlot(lane.points, x: .value("Time", \.time), y: .value("Throughput", \.value),
+                             series: .value("Series", lane.id))
                         .interpolationMethod(.monotone).foregroundStyle(lane.agent?.badge.color ?? Color.primary)
                         .lineStyle(StrokeStyle(lineWidth: lane.agent == nil ? 2.2 : 1.4))
                 }
             }
-            LinePlot(cumulative, x: .value("Time", \.time), y: .value("Cumulative", \.value))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(.secondary)
+            LinePlot(cumulative, x: .value("Time", \.time), y: .value("Cumulative", \.value),
+                     series: .value("Series", "cumulative"))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.secondary)
             ForEach(guides) { guide in
                 ForEach(guide.segments) { segment in
                     RuleMark(xStart: .value("Time", usageDate(segment.start)),

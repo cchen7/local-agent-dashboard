@@ -888,3 +888,12 @@ own window.
 Verify geometry without input. Verify drag and relaunch with the
 explicit native visual review handoff; a skip outside that handoff
 does not attest pointer behavior or persistence.
+
+## DEV-097 — Keep Token Usage chart series distinct (FR-TK-1, §11.4)
+
+Give vectorized plots explicit identities for each agent, combined
+throughput and cumulative usage. Implicit grouping on macOS 27 joined
+these paths and discarded the agent strokes and the cumulative dash.
+Keep the selected metric and periods together when their intrinsic
+width fits; move periods below the heading when it does not.
+Verify the native strokes and heading at three sizes in both appearances.
