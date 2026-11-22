@@ -192,6 +192,17 @@ final class DashboardModel {
             let result = try await Task.detached {
                 let directory: URL
                 let synthetic = CommandLine.arguments.contains("--synthetic")
+                #if AGENTDASH_SYNTHETIC_ONLY
+                let startup = try SyntheticStartupFixture.request()
+                if let startup {
+                    directory = try startup.openDirectory()
+                } else if synthetic {
+                    directory = FileManager.default.temporaryDirectory.appendingPathComponent("AgentDashboard-\(UUID().uuidString)")
+                } else {
+                    throw StoreError.invalidLocation
+                }
+                let standardFixtures = startup == nil
+                #else
                 if synthetic {
                     directory = FileManager.default.temporaryDirectory.appendingPathComponent("AgentDashboard-\(UUID().uuidString)")
                 } else {
@@ -199,54 +210,31 @@ final class DashboardModel {
                                                             appropriateFor: nil, create: true)
                         .appendingPathComponent("AgentDashboard", isDirectory: true)
                 }
+                let standardFixtures = true
+                #endif
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let store = try AgentStore(databaseURL: directory.appendingPathComponent("index.sqlite"))
-                let previewUsage = CommandLine.arguments.contains("--synthetic") &&
-                    (CommandLine.arguments.contains("--synthetic-usage") ||
-                     ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_USAGE"] == "1")
                 let defaults = synthetic ? [] : try SourceAccessProbe.defaultSources()
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
                 let externalDirectory = synthetic ? syntheticPricingDirectory : home.map {
                     URL(fileURLWithPath: $0).appendingPathComponent(".config/agent-dashboard", isDirectory: true)
                 }
-                let bundled = !synthetic || previewUsage || syntheticPricingDirectory != nil
+                let previewUsage = standardFixtures && synthetic &&
+                    (CommandLine.arguments.contains("--synthetic-usage") ||
+                     ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_USAGE"] == "1")
+                let bundled = !synthetic || !standardFixtures || previewUsage || syntheticPricingDirectory != nil
                     ? Bundle.main.url(forResource: "pricing", withExtension: "json") : nil
                 let runtime = LocalPricingRuntime(external: externalDirectory?.appendingPathComponent("pricing.json"),
                                                   bundled: bundled, store: store)
                 let initialPricing = await runtime.refresh()
-                if previewUsage { try Self.prepareUsageFixture(in: directory, store: store) }
-                if CommandLine.arguments.contains("--synthetic"),
-                   CommandLine.arguments.contains("--synthetic-indexing-source") ||
-                   ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] == "1" {
-                    try Self.prepareIndexingFixture(in: directory, store: store)
-                }
-                if CommandLine.arguments.contains("--synthetic"),
-                   CommandLine.arguments.contains("--synthetic-indexing-codex") ||
-                   ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_CODEX_SOURCE"] == "1" {
-                    try Self.prepareCodexIndexingFixture(in: directory, store: store)
-                }
-                if synthetic && CommandLine.arguments.contains("--synthetic-indexing-copilot") {
-                    try Self.prepareCopilotIndexingFixture(in: directory, store: store)
-                }
                 // This writes only app-owned configuration. No source directory is read at launch.
                 if !defaults.isEmpty { try store.installDefaultSources(defaults) }
-                if Self.syntheticActivity {
-                    try Self.seedSessionActivity(store, in: directory)
-                } else if synthetic && ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOOL_PAIR"] == "1" {
-                    try Self.seedTranscriptToolPair(store, in: directory)
-                } else if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
-                    try Self.seedProjects(store, fixtureRoot: directory)
-                } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
-                    try Self.seedSessions(store, in: directory)
+                if synthetic && standardFixtures {
+                    try Self.installSyntheticFixtures(in: directory, store: store, previewUsage: previewUsage)
                 }
-                if synthetic && (CommandLine.arguments.contains("--synthetic-index-status") ||
-                    ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEX_STATUS"] == "1") {
-                    try Self.seedIndexStatus(store, in: directory)
-                }
-                if synthetic && ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_FILTERS"] == "1" {
-                    try store.saveSessionSearch(name: "Synthetic filtered group", query: #" 登录 role:"assistant" agent:codex "#,
-                                                order: .recent, libraryFilter: .agent(.codex))
-                }
+                #if AGENTDASH_SYNTHETIC_ONLY
+                if startup?.preparesIndex == true { try SyntheticStartupFixture.seed(in: directory, store: store) }
+                #endif
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
                                            : needsOnboarding
@@ -302,7 +290,46 @@ final class DashboardModel {
                     } catch { self?.statusPipeline = nil }
                 }
             }
-        } catch { storageFailed = true }
+        } catch {
+            storageFailed = true
+            #if AGENTDASH_SYNTHETIC_ONLY
+            if ProcessInfo.processInfo.environment[SyntheticStartupFixture.environmentKey] != nil {
+                FileHandle.standardOutput.write(Data("synthetic-startup: fixture unavailable\n".utf8))
+            }
+            #endif
+        }
+    }
+
+    nonisolated private static func installSyntheticFixtures(in directory: URL, store: AgentStore,
+                                                              previewUsage: Bool) throws {
+        let args = CommandLine.arguments
+        let env = ProcessInfo.processInfo.environment
+        if previewUsage { try prepareUsageFixture(in: directory, store: store) }
+        if args.contains("--synthetic-indexing-source") || env["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] == "1" {
+            try prepareIndexingFixture(in: directory, store: store)
+        }
+        if args.contains("--synthetic-indexing-codex") || env["AGENTDASH_SYNTHETIC_CODEX_SOURCE"] == "1" {
+            try prepareCodexIndexingFixture(in: directory, store: store)
+        }
+        if args.contains("--synthetic-indexing-copilot") {
+            try prepareCopilotIndexingFixture(in: directory, store: store)
+        }
+        if syntheticActivity {
+            try seedSessionActivity(store, in: directory)
+        } else if env["AGENTDASH_SYNTHETIC_TOOL_PAIR"] == "1" {
+            try seedTranscriptToolPair(store, in: directory)
+        } else if args.contains("--synthetic-projects") {
+            try seedProjects(store, fixtureRoot: directory)
+        } else if args.contains("--synthetic-sessions") {
+            try seedSessions(store, in: directory)
+        }
+        if args.contains("--synthetic-index-status") || env["AGENTDASH_SYNTHETIC_INDEX_STATUS"] == "1" {
+            try seedIndexStatus(store, in: directory)
+        }
+        if env["AGENTDASH_SYNTHETIC_SEARCH_FILTERS"] == "1" {
+            try store.saveSessionSearch(name: "Synthetic filtered group", query: #" 登录 role:"assistant" agent:codex "#,
+                                        order: .recent, libraryFilter: .agent(.codex))
+        }
     }
 
     deinit {
@@ -1237,6 +1264,62 @@ final class DashboardModel {
         return panel
     }
 }
+
+#if AGENTDASH_SYNTHETIC_ONLY
+struct SyntheticStartupFixture: Sendable {
+    static let environmentKey = "AGENTDASH_SYNTHETIC_STARTUP"
+    static let firstSession = SessionKey(agent: .codex, nativeID: "startup-preview-0")
+    static let firstTitle = "Prepared synthetic session"
+
+    let preparesIndex: Bool
+    let id: UUID
+
+    static func request() throws -> Self? {
+        guard let value = ProcessInfo.processInfo.environment[environmentKey] else { return nil }
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard CommandLine.arguments.contains("--synthetic"), parts.count == 2,
+              parts[0] == "prepare" || parts[0] == "reopen", let id = UUID(uuidString: String(parts[1]))
+        else { throw StoreError.invalidLocation }
+        return .init(preparesIndex: parts[0] == "prepare", id: id)
+    }
+
+    func openDirectory() throws -> URL {
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent("AgentDashboard-startup-\(id.uuidString)", isDirectory: true)
+        if preparesIndex {
+            // A prepare request must own a freshly created directory.
+            try files.createDirectory(at: directory, withIntermediateDirectories: false)
+        } else {
+            guard try directory.resourceValues(forKeys: [.fileResourceTypeKey]).fileResourceType == .directory,
+                  try directory.appendingPathComponent("index.sqlite")
+                    .resourceValues(forKeys: [.fileResourceTypeKey]).fileResourceType == .regular
+            else { throw StoreError.invalidLocation }
+        }
+        return directory
+    }
+
+    static func seed(in directory: URL, store: AgentStore) throws {
+        let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic startup",
+            rootURL: directory.appendingPathComponent("unused-source"), environment: "Synthetic"))
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        var records: [NormalizedRecord] = []
+        for row in 0..<1_000 {
+            let key = row == 0 ? firstSession : SessionKey(agent: .codex, nativeID: "startup-preview-\(row)")
+            let timestamp = now - Int64(row) * 10_000
+            records.append(.session(.init(key: key, sourceID: source, environment: "Synthetic",
+                cwd: "/synthetic/startup", title: row == 0 ? firstTitle : "Synthetic session \(row)",
+                startedAt: timestamp, lastEventAt: timestamp)))
+            for event in 0..<10 {
+                records.append(.event(.init(session: key, sequence: Int64(event), timestamp: timestamp,
+                    kind: event.isMultiple(of: 2) ? .user : .assistant,
+                    text: "合成启动样例 · Synthetic startup fixture \(row):\(event)",
+                    dedupeKey: "startup-preview:\(row):\(event)")))
+            }
+        }
+        try store.write(records)
+    }
+}
+#endif
 
 enum PrivacyPolicyChangeFailure: Error { case busy }
 enum SourceSettingsCommitFailure: Error { case indexing }

@@ -267,7 +267,16 @@ struct MainWindow: View {
         } else {
             List(selection: $model.selectedSessionID) {
                 rows(model.visibleSessions) { session, name in
-                    SessionListCell(session: session, projectName: name, currency: model.pricing.currency).tag(session.id)
+                    SessionListCell(session: session, projectName: name, currency: model.pricing.currency)
+                        #if AGENTDASH_SYNTHETIC_ONLY
+                        .background {
+                            if session.id == SyntheticStartupFixture.firstSession,
+                               session.title == SyntheticStartupFixture.firstTitle {
+                                SyntheticStartupDrawMarker()
+                            }
+                        }
+                        #endif
+                        .tag(session.id)
                 }
             }
             // A newly indexed row can enter an already visible List before the
@@ -430,6 +439,33 @@ struct MainWindow: View {
         .accessibilityIdentifier(identifier)
     }
 }
+
+#if AGENTDASH_SYNTHETIC_ONLY
+/// Probe the first real list row when AppKit draws it in the shown QA window.
+/// No accessibility access, screenshot capture, or injected input is needed.
+private struct SyntheticStartupDrawMarker: NSViewRepresentable {
+    func makeNSView(context: Context) -> Marker { Marker() }
+    func updateNSView(_ nsView: Marker, context: Context) {}
+
+    final class Marker: NSView {
+        private static var reported = false
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            guard !Self.reported, !dirtyRect.isEmpty, window?.isVisible == true,
+                  let fixture = try? SyntheticStartupFixture.request() else { return }
+            Self.reported = true
+            // Emit after this draw pass has returned to the main queue.
+            DispatchQueue.main.async {
+                let mode = fixture.preparesIndex ? "prepared" : "reopened"
+                FileHandle.standardOutput.write(Data("synthetic-startup: \(mode) row drawn\n".utf8))
+            }
+        }
+    }
+}
+#endif
 
 private extension SessionStatus {
     var sidebarSymbol: String {

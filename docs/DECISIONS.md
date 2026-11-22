@@ -664,3 +664,19 @@ prompt fallback skips slash commands and recognized injected context. The
 app masks complete bounded values before shortening them for display, and
 stored overrides follow index redaction both on write and during a scrub.
 No added source discovery is needed for this projection.
+
+## DEV-085 — Measure startup against a previously prepared QA index
+
+Run `python3 Tools/measure-synthetic-startup.py /path/to/AgentDashboard.app`
+against the signed SyntheticQA bundle. The tool verifies that bundle before
+launching it, creates a UUID-scoped index with 1,000 sessions and 10,000
+events in a separate prepare launch, then measures fresh processes reopening
+that same index. Reopen rejects a missing index, and prepare rejects an
+already used identity. The path comes from the app's temporary directory and
+the UUID, never from an external database path.
+
+The clock starts just before spawning each process and stops at a QA marker
+from the known first session row after its AppKit draw pass. This includes
+spawn and pipe overhead; it measures process startup with a recent disk
+cache, without capture or keyboard automation. It does not measure WindowServer
+presentation, normal Release startup, or a production-sized library.
