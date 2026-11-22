@@ -36,7 +36,10 @@ public final class AgentStore: Sendable {
         guard databaseURL.isFileURL else { throw StoreError.invalidLocation }
         var config = Configuration()
         config.foreignKeysEnabled = true
-        config.prepareDatabase { db in db.add(tokenizer: AgentDashTokenizer.self) }
+        config.prepareDatabase { db in
+            db.add(tokenizer: AgentDashTokenizer.self)
+            db.add(function: SessionTitleRules.meaningfulPrompt)
+        }
         databasePool = try DatabasePool(path: databaseURL.path, configuration: config)
         guard let url = Bundle.module.url(forResource: "v1", withExtension: "sql") else {
             throw StoreError.missingMigration
@@ -193,6 +196,12 @@ public final class AgentStore: Sendable {
         }
         migrator.registerMigration("inherited_transcript") { db in
             guard let resource = Bundle.module.url(forResource: "inherited_transcript", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
+        migrator.registerMigration("session_titles") { db in
+            guard let resource = Bundle.module.url(forResource: "session_titles", withExtension: "sql") else {
                 throw StoreError.missingMigration
             }
             try db.execute(sql: String(contentsOf: resource, encoding: .utf8))

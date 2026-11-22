@@ -15,6 +15,40 @@ final class SmokeTests: XCTestCase {
     }
     override func tearDown() async throws { app.terminate() }
 
+    func testSessionTitleCanBeRenamedAndRestoredToFirstPrompt() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_SESSION_TITLE"] = "1"
+        let window = try launch(size: CGSize(width: 960, height: 600), appearance: "dark", populated: true)
+        func titleText(_ id: String, _ expected: String) -> XCUIElement {
+            window.staticTexts.matching(identifier: id)
+                .matching(NSPredicate(format: "label == %@ OR value == %@", expected, expected)).firstMatch
+        }
+        let prompt = titleText("session.title.header", "排查合成会话的问题")
+        let promptSource = titleText("session.title.source", "From first prompt")
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        XCTAssertTrue(promptSource.waitForExistence(timeout: 5))
+        let rename = window.buttons["session.title.rename"]
+        rename.click()
+        let field = app.textFields["session.title.edit"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "自定义会话示例")
+        app.buttons["session.title.save"].click()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(titleText("session.title.header", "自定义会话示例").waitForExistence(timeout: 5))
+        XCTAssertTrue(titleText("session.title.source", "Custom title").waitForExistence(timeout: 5))
+
+        rename.click()
+        let reset = app.buttons["session.title.reset"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 5))
+        reset.click()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        XCTAssertTrue(promptSource.waitForExistence(timeout: 5))
+        let shot = XCTAttachment(screenshot: window.screenshot())
+        shot.name = "session-title-restored-minimum-window"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testStorageRebuildKeepsSyntheticSearchResult() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true, query: "登录")
         waitForSyntheticChineseSearch()
@@ -842,7 +876,20 @@ final class SmokeTests: XCTestCase {
         let choose = app.buttons["onboarding.chooseSources"]
         XCTAssertTrue(choose.waitForExistence(timeout: 5))
         choose.click()
-        XCTAssertTrue(app.staticTexts["Discovered session files: 1"].waitForExistence(timeout: 5))
+        // The native Toggle can expose its preview as part of the row's
+        // label instead of a separate static text accessibility element.
+        let countPattern = "(?s).*Discovered session files: 1(?![0-9]).*"
+        let count = element("onboarding.sources").descendants(matching: .any)
+            .matching(NSPredicate(format: "label MATCHES %@ OR value MATCHES %@", countPattern, countPattern))
+            .firstMatch
+        guard count.waitForExistence(timeout: 5) else {
+            let shot = XCTAttachment(screenshot: window.screenshot())
+            shot.name = "onboarding-count-synthetic"
+            shot.lifetime = .keepAlways
+            add(shot)
+            XCTFail("The onboarding sheet did not expose one synthetic session file.")
+            return
+        }
         let start = app.buttons["onboarding.startIndexing"]
         XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
         start.click()

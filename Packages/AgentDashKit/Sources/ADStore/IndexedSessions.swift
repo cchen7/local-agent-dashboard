@@ -5,6 +5,7 @@ import GRDB
 public struct IndexedSession: Identifiable, Equatable, Sendable {
     public let id: SessionKey
     public let title: String?
+    public let titleSource: SessionTitleSource?
     public let workspace: String?
     public let branch: String?
     public let environment: String
@@ -21,6 +22,7 @@ public struct IndexedSession: Identifiable, Equatable, Sendable {
         else { throw StoreError.invalidStoredValue }
         id = .init(agent: agent, nativeID: row["native_id"])
         title = row["title"]
+        titleSource = title == nil ? nil : SessionTitleSource(rawValue: row["title_source"])
         workspace = row["cwd"]
         branch = row["git_branch"]
         environment = row["environment"]
@@ -39,11 +41,12 @@ public extension AgentStore {
     func indexedSessionUpdates() -> some AsyncSequence<[IndexedSession], any Error> & Sendable {
         ValueObservation.tracking { db in
             try Row.fetchAll(db, sql: """
-                SELECT s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.status_reason,s.started_at,
+                SELECT s.agent,s.native_id,s.display_title AS title,s.display_title_source AS title_source,
+                       s.cwd,s.git_branch,s.environment,s.status,s.status_reason,s.started_at,
                        coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,
                        u.session_id AS usage_session_id,u.input_fresh,u.cache_read,u.cache_write,u.cache_write_1h,
                        u.output,u.reasoning,u.cost_micro_usd,u.unpriced_tokens,u.records,u.approximate_records
-                FROM sessions s LEFT JOIN session_usage_rollup u ON u.session_id=s.id
+                FROM titled_sessions s LEFT JOIN session_usage_rollup u ON u.session_id=s.id
                 ORDER BY activity DESC,s.id DESC
                 """).map { row in
                     let usage = IndexedSessionUsageSummary((row["usage_session_id"] as Int64?) == nil ? nil : row)

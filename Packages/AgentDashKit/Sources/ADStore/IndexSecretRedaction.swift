@@ -69,16 +69,18 @@ enum IndexSecretRedaction {
                                arguments: [cleanMetadata, cleanAction, id])
             }
         }
-        try pages("SELECT id,title,first_prompt,latest_summary FROM sessions", db: db) { row in
+        try pages("SELECT id,title,user_title,first_prompt,latest_summary FROM sessions", db: db) { row in
             let title: String? = row["title"]
+            let custom: String? = row["user_title"]
             let prompt: String? = row["first_prompt"]
             let summary: String? = row["latest_summary"]
             let cleanTitle = title.map(IndexSecretMasker.text)
+            let cleanCustom = custom.map(IndexSecretMasker.text)
             let cleanPrompt = prompt.map(IndexSecretMasker.text)
             let cleanSummary = summary.map(IndexSecretMasker.text)
-            if cleanTitle != title || cleanPrompt != prompt || cleanSummary != summary {
-                try db.execute(sql: "UPDATE sessions SET title=?,first_prompt=?,latest_summary=? WHERE id=?",
-                               arguments: [cleanTitle, cleanPrompt, cleanSummary, row["id"] as Int64])
+            if cleanTitle != title || cleanCustom != custom || cleanPrompt != prompt || cleanSummary != summary {
+                try db.execute(sql: "UPDATE sessions SET title=?,user_title=?,first_prompt=?,latest_summary=? WHERE id=?",
+                               arguments: [cleanTitle, cleanCustom, cleanPrompt, cleanSummary, row["id"] as Int64])
             }
         }
         try pages("SELECT id,command FROM commands", db: db) { row in

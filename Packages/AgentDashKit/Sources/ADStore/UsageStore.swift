@@ -160,10 +160,11 @@ public extension AgentStore {
                     SELECT session_id,sum(input_fresh+cache_read+cache_write+cache_write_1h+output) AS tokens
                     FROM token_events WHERE ts>=? AND ts<? AND precision='call' GROUP BY session_id
                 )
-                SELECT s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.status_reason,
+                SELECT s.agent,s.native_id,s.display_title AS title,s.display_title_source AS title_source,
+                       s.cwd,s.git_branch,s.environment,s.status,s.status_reason,
                        s.started_at,coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,
                        p.display_name,coalesce(r.tokens,0) AS tokens
-                FROM sessions s LEFT JOIN projects p ON p.id=s.project_id
+                FROM titled_sessions s LEFT JOIN projects p ON p.id=s.project_id
                 LEFT JOIN source_files f ON f.id=s.file_id LEFT JOIN recent r ON r.session_id=s.id
                 WHERE s.status IN ('running','waiting') AND s.source_deleted_at IS NULL AND f.role IS NOT 'prompt_history'
                 ORDER BY activity DESC,s.id DESC LIMIT 6

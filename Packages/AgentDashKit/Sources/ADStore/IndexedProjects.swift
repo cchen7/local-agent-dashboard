@@ -130,11 +130,12 @@ public extension AgentStore {
         }, by: { $0.0 }).compactMapValues { claims in claims.count == 1 ? claims.first?.1 : nil }
 
         let rows = try Row.fetchCursor(db, sql: """
-            SELECT s.id,s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.status_reason,s.started_at,
+            SELECT s.id,s.agent,s.native_id,s.display_title AS title,s.display_title_source AS title_source,
+                   s.cwd,s.git_branch,s.environment,s.status,s.status_reason,s.started_at,
                    coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,s.source_id,s.project_id,
                    source.label AS source_label,source.environment AS source_environment,
                    source.agent AS source_agent,source.root_path AS source_root,source.path_mappings_json,source.removed
-            FROM sessions AS s JOIN sources AS source ON source.id=s.source_id
+            FROM titled_sessions AS s JOIN sources AS source ON source.id=s.source_id
             LEFT JOIN source_files AS file ON file.id=s.file_id
             WHERE file.role IS NULL OR file.role<>?
             ORDER BY activity DESC,s.id DESC
@@ -236,10 +237,10 @@ public extension AgentStore {
             } else { action = nil }
             guard let row = try Row.fetchOne(db, sql: """
                 SELECT e.dedupe_key,e.kind,s.agent,s.native_id,
-                    CASE WHEN length(CAST(s.title AS BLOB))<=16384 THEN s.title END AS title,
+                    s.display_title AS title,
                     CASE WHEN length(CAST(e.tool_name AS BLOB))<=16384 THEN e.tool_name END AS tool_name,
                     CASE WHEN ? AND length(CAST(e.text AS BLOB))<=1048576 THEN e.text END AS text
-                FROM events e JOIN sessions s ON s.id=e.session_id WHERE e.id=?
+                FROM events e JOIN titled_sessions s ON s.id=e.session_id WHERE e.id=?
                 """, arguments: [action == nil, candidate.id]),
                 let agent = AgentKind(rawValue: row["agent"]), let kind = EventKind(rawValue: row["kind"])
             else { throw StoreError.invalidStoredValue }

@@ -654,3 +654,13 @@ Bind the transcript's match scroll position before laying out a new page.
 An immediate scroll call after creating the scroll view could be dropped on
 a fresh launch, even though the right match page had loaded. Keep a manual
 scroll position when unrelated changes refresh the same page.
+
+## DEV-084 — Keep user session titles separate from imported metadata
+
+Write the optional override to the owned index; clear it explicitly to
+resume automatic titles. Resolve the title and its origin once in the shared
+session projection, using indexed user/summary lookups only. The first
+prompt fallback skips slash commands and recognized injected context. The
+app masks complete bounded values before shortening them for display, and
+stored overrides follow index redaction both on write and during a scrub.
+No added source discovery is needed for this projection.

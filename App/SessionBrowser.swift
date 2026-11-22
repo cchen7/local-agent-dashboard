@@ -132,6 +132,7 @@ struct SessionTranscript: View {
     let contextWindowRules: [ModelContextWindow]
     let displayCurrency: PriceDisplayCurrency
     @State private var activity: SessionActivityDisplay?
+    @State private var editingTitle = false
     private var running: Bool { session.status == .running && !session.archived }
     @State private var indexedContext: IndexedSessionContext?
     @State private var usage: IndexedSessionUsage?
@@ -177,7 +178,22 @@ struct SessionTranscript: View {
                 HStack(alignment: .top, spacing: 10) {
                     SessionAgentMark(agent: session.id.agent)
                     VStack(alignment: .leading, spacing: 4) {
-                        SessionTitle(title: session.title).font(.title3.weight(.semibold))
+                        HStack(spacing: 4) {
+                            SessionTitle(title: session.title).font(.title3.weight(.semibold))
+                                .accessibilityIdentifier("session.title.header")
+                            Button { editingTitle = true } label: {
+                                Image(systemName: "pencil")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Rename Session")
+                            .accessibilityIdentifier("session.title.rename")
+                            .help("Rename Session")
+                        }
+                        if let source = session.titleSource {
+                            Text(source.label).font(.caption2).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("session.title.source")
+                        }
                         Text(verbatim: [session.id.agent.sessionName, session.path, session.branch, session.environment]
                             .compactMap { $0 }.joined(separator: " · "))
                             .font(.subheadline).foregroundStyle(.secondary)
@@ -266,6 +282,9 @@ struct SessionTranscript: View {
             }
             Divider()
             SessionActionFooter(session: session.id, store: store, hostHome: hostHome)
+        }
+        .sheet(isPresented: $editingTitle) {
+            SessionTitleEditor(session: session, store: store)
         }
         .task(id: running) { await observeActivity() }
         .task(id: session.id) { await observeContext() }
@@ -546,8 +565,8 @@ private struct InheritedTranscriptSection: View {
             } label: {
                 HStack {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    if let title = summary.originalTitle, !title.isEmpty {
-                        Text("Continued from \(maskSecrets ? SecretMasker.mask(title) : title)")
+                    if let title = displayedSessionTitle(summary.originalTitle, maskSecrets: maskSecrets) {
+                        Text("Continued from \(title)")
                             .lineLimit(2)
                     } else {
                         Text("Inherited conversation")
@@ -1021,6 +1040,89 @@ private enum TranscriptFormatting {
             if safe != visible { return AttributedString(safe) }
         }
         return result
+    }
+}
+
+nonisolated func displayedSessionTitle(_ text: String?, maskSecrets: Bool) -> String? {
+    guard let text else { return nil }
+    // Mask the whole bounded title before flattening or taking a prefix.
+    let safe = maskSecrets ? SecretMasker.mask(text) : text
+    let line = safe.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    return line.isEmpty ? nil : String(line.prefix(SessionTitleRules.maximumCharacters))
+}
+
+private extension SessionTitleSource {
+    var label: LocalizedStringResource {
+        switch self {
+        case .user: "Custom title"
+        case .agent: "From agent"
+        case .firstPrompt: "From first prompt"
+        }
+    }
+}
+
+private struct SessionTitleEditor: View {
+    let id: SessionKey
+    let store: AgentStore
+    let hasCustomTitle: Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var saving = false
+    @State private var failed = false
+
+    init(session: SessionListItem, store: AgentStore) {
+        id = session.id
+        self.store = store
+        hasCustomTitle = session.titleSource == .user
+        #if AGENTDASH_SYNTHETIC_ONLY
+        let fixture = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SESSION_TITLE"] == "1"
+            ? "自定义会话示例" : nil
+        _title = State(initialValue: fixture ?? session.title ?? "")
+        #else
+        _title = State(initialValue: session.title ?? "")
+        #endif
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename Session").font(.headline)
+            TextField("Session Title", text: $title)
+                .accessibilityIdentifier("session.title.edit")
+            Text("The title is stored in the local index.").font(.caption).foregroundStyle(.secondary)
+            if failed { Text("Could not save the session title.").foregroundStyle(.red) }
+            HStack {
+                if hasCustomTitle {
+                    Button("Use Automatic Title") { Task { await save(nil) } }
+                        .accessibilityIdentifier("session.title.reset")
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    guard let value = SessionTitleRules.validatedCustomTitle(title) else { return }
+                    Task { await save(value) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("session.title.save")
+                .disabled(SessionTitleRules.validatedCustomTitle(title) == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+    }
+
+    private func save(_ title: String?) async {
+        guard !saving else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            try await store.setCustomSessionTitle(title, for: id)
+            dismiss()
+        } catch {
+            failed = true
+        }
     }
 }
 

@@ -674,7 +674,7 @@ private struct DisplayProjectActivity: Identifiable, Sendable {
         session = event.session
         timestamp = event.timestamp
         kind = event.kind
-        title = event.sessionTitle.flatMap { $0.isEmpty ? nil : display($0) }
+        title = displayedSessionTitle(event.sessionTitle, maskSecrets: maskSecrets)
         toolName = event.toolName.map(display)
         switch event.action {
         case .command(let value):

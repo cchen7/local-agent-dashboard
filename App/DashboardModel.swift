@@ -738,6 +738,19 @@ final class DashboardModel {
         let primary = SessionKey(agent: .codex, nativeID: "preview-import")
         let other = SessionKey(agent: .codex, nativeID: "preview-docs")
         let realNow = Int64(Date().timeIntervalSince1970 * 1000)
+        #if AGENTDASH_SYNTHETIC_ONLY
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SESSION_TITLE"] == "1" {
+            try store.write([
+                .session(.init(key: primary, sourceID: sourceID, environment: "Synthetic",
+                               cwd: "/synthetic/title", startedAt: realNow, lastEventAt: realNow)),
+                .event(.init(session: primary, sequence: 0, timestamp: realNow, kind: .user,
+                             text: "/clear", dedupeKey: "preview:title:command")),
+                .event(.init(session: primary, sequence: 1, timestamp: realNow, kind: .user,
+                             text: "排查合成会话的问题", dedupeKey: "preview:title:prompt")),
+            ])
+            return
+        }
+        #endif
         let knownClock = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PRESENTATION_ID"] != nil
             ? Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 12, hour: 17, minute: 4)) : nil
         let now = knownClock.map { Int64($0.timeIntervalSince1970 * 1000) + 900_000 } ?? realNow
@@ -1252,6 +1265,7 @@ enum SessionSearchState: Equatable {
 struct SessionListItem: Identifiable, Sendable {
     let id: SessionKey
     let title: String?
+    let titleSource: SessionTitleSource?
     let path: String?
     let branch: String?
     let environment: String
@@ -1266,7 +1280,8 @@ struct SessionListItem: Identifiable, Sendable {
     nonisolated init(_ row: IndexedSession, maskSecrets: Bool = true) {
         func visible(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
         id = row.id
-        title = row.title.flatMap { $0.isEmpty ? nil : visible($0) }
+        title = displayedSessionTitle(row.title, maskSecrets: maskSecrets)
+        titleSource = title == nil ? nil : row.titleSource
         path = row.workspace.map(visible)
         branch = row.branch.map(visible)
         environment = visible(row.environment)

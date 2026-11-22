@@ -723,6 +723,13 @@ words, repeated filters and a Smart Group’s sidebar scope retain their meaning
 
 Priority: title set by the user in this app → title/summary provided by the agent (Codex metadata DB title, Copilot `workspace.yaml` title, Claude `summary` record, Grok Build `summary.json` title) → first meaningful user prompt (skip slash commands, injected context, empty messages), truncated to 80 characters. `title_source` records the origin; the UI notes "from agent" or "from first prompt" in small text.
 
+Manual titles live in the app index and are not overwritten by source replay.
+Reset the override to use the indexed agent title or, if available, a Claude
+summary; otherwise use the first eligible indexed user prompt in file order.
+Only bounded title fields are read for display. Mask the whole field before
+flattening or shortening it. Use the same resolved title in session,
+project and menu views.
+
 ### 10.2 Main topics (keywords)
 
 - Corpus: user prompts (weight 2), assistant text (weight 1), touched file names (weight 1.5).

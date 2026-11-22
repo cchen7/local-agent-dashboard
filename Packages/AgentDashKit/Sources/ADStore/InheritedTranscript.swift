@@ -40,8 +40,7 @@ public extension AgentStore {
                 WHERE child_id=? AND file_id=? ORDER BY owner_id DESC LIMIT 1
                 """, arguments: [scope.childID, scope.fileID])
             let title = first == last ? try String.fetchOne(db, sql: """
-                SELECT CASE WHEN trim(coalesce(title,''))<>'' THEN title ELSE native_id END
-                FROM sessions WHERE id=?
+                SELECT coalesce(display_title, native_id) FROM titled_sessions WHERE id=?
                 """, arguments: [first]) : nil
             return InheritedTranscriptSummary(originalTitle: title)
         }
