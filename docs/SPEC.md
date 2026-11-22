@@ -617,8 +617,8 @@ pricing/
 └── UPDATE_PLAYBOOK.md     # instructions for the agent that updates prices
 Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 ├── validate               # schema, effective dates, match conflicts; prints the impact on historical cost
-├── models-seen            # scan local agent records; list model IDs seen, their token volume, priced or not
-└── install                # after validation, copy to ~/.config/agent-dashboard/pricing.json
+├── models-seen            # list model IDs and priced/unpriced volume from an approved standalone app index copy
+└── install                # with --apply, validate and atomically set ~/.config/agent-dashboard/pricing.json
 ```
 
 **Format** (all prices in the example are 0 — **not real prices; do not copy**):
@@ -668,7 +668,7 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 
 **`UPDATE_PLAYBOOK.md` must describe these steps** (for the agent that updates prices):
 
-1. Run `Tools/pricing/models-seen` to get the models actually used on this Mac.
+1. Run `Tools/pricing/models-seen --index-snapshot COPY` on an approved standalone app index copy to get the models actually indexed on this Mac. The developer tool reads only accounting columns; it does not read a live WAL database.
 2. Take prices only from official vendor pricing pages (Anthropic, OpenAI, xAI; for Copilot, the underlying model's vendor). No third-party aggregators.
 3. Price changed → append a new `prices` entry (`effectiveFrom` = the vendor's effective date, or today if unknown). New model → add a `models` entry.
 4. Update `updatedAt`; update `displayCurrencies` static rates and dates if needed.

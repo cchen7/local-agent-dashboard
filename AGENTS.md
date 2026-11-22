@@ -74,8 +74,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tools/tests -v
 
 # Price table
 Tools/pricing/validate pricing/pricing.json
-Tools/pricing/models-seen
-Tools/pricing/install
+Tools/pricing/models-seen --index-snapshot /path/to/approved-index-copy.sqlite
+Tools/pricing/install --apply
 ```
 
 For local ad-hoc App validation, follow the build/re-sign/test-without-building

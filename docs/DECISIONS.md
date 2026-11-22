@@ -847,3 +847,18 @@ large index reads can reuse mapped file pages. Tally consecutive hits
 locally, merging by session when the rows are interleaved. Keep the same
 BM25 ordering, exact totals, and masking before highlighting; reuse the
 last snippet only for byte-identical input within that read.
+
+## DEV-094 — Restore the offline pricing maintenance commands (FR-COST, SEC-7)
+
+Keep the developer executable out of the App target. It uses the existing
+ADPricing decoder and cost estimator, and emits only accounting summaries.
+Inventory and historical preview require an explicit standalone index copy;
+they reject WAL format before opening SQLite to avoid touching an active
+database or its sidecars. A preview reports hypothetical quotes separately
+from stored quotes and possible fills of previously unpriced events.
+
+Installation is explicit and append-only against both bundled and installed
+tables. It stages in the destination directory and atomically replaces only
+the external pricing file. Reject an unreadable or symlinked destination
+instead of silently overwriting evidence. No user price file is written by
+validation or inventory.

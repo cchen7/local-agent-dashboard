@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+scripts=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$#" -eq 0 ]; then
+    repo=$(CDPATH= cd -- "$scripts/../.." && pwd)
+    set -- "$repo/pricing/pricing.json"
+fi
+exec "$scripts/run" validate "$@"

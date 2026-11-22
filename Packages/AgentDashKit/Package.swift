@@ -8,7 +8,8 @@ let package = Package(
         .library(name: "AgentDashKit", targets: [
             "ADCore", "ADAdapters", "ADStore", "ADIngest", "ADSearch",
             "ADInsights", "ADPrivacy", "ADPricing", "ADZstd"
-        ])
+        ]),
+        .executable(name: "AgentDashPricingTool", targets: ["ADPriceTool"])
     ],
     dependencies: [.package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1")],
     targets: [
@@ -24,6 +25,8 @@ let package = Package(
                 resources: [.process("Resources")], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADPrivacy", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .target(name: "ADPricing", dependencies: ["ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
+        .executableTarget(name: "ADPriceTool", dependencies: ["ADCore", "ADPricing", "ADPrivacy",
+                                                             .product(name: "GRDB", package: "GRDB.swift")]),
         .testTarget(name: "ADPricingTests", dependencies: ["ADPricing", "ADCore"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADSearchTests", dependencies: ["ADSearch", "ADStore", "ADCore", .product(name: "GRDB", package: "GRDB.swift")], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
         .testTarget(name: "ADPrivacyTests", dependencies: ["ADPrivacy"], swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
