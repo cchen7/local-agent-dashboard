@@ -25,6 +25,7 @@ struct AgentDashboardApp: App {
 
         MenuBarExtra("Agent Dashboard", systemImage: "gauge.with.needle") {
             MenuBarPanel(model: model)
+                .id(model.privacyRevision)
         }
         .menuBarExtraStyle(.window)
 

@@ -29,6 +29,40 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(element("transcript.match.position").wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
     }
 
+    func testStorageClearEverythingRequiresConfirmation() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        let original = window.staticTexts["API_TOKEN=••••••"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5))
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Storage"].click()
+        let everything = settings.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Everything")).firstMatch
+        XCTAssertTrue(everything.waitForExistence(timeout: 5))
+        everything.click()
+        let review = settings.buttons["storage.clear.review"]
+        XCTAssertTrue(review.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        review.click()
+        let confirm = app.buttons["Clear Indexed Data"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        let count = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@",
+                                                       "Sessions to clear: 2.", "Sessions to clear: 2.")).firstMatch
+        XCTAssertTrue(count.exists)
+        app.buttons["Cancel"].firstMatch.click()
+        XCTAssertTrue(confirm.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(original.exists)
+        review.click()
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        let finished = element("storage.clear.result")
+        XCTAssertTrue(finished.waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.staticTexts["Cleared 2 sessions from the local index."].exists)
+        settings.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(original.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(element("empty.detail").waitForExistence(timeout: 5))
+    }
+
     func testIndexedProjectsTimelineOpensLatestSession() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
         app.typeKey("2", modifierFlags: .command)
@@ -284,6 +318,31 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(settings.staticTexts["source.index.sessions.1"].label, "Indexed sessions: 1")
         XCTAssertEqual(settings.staticTexts["source.index.unknown.1"].label, "Unknown records: 3")
         XCTAssertTrue(settings.staticTexts["Partial files: 1"].exists)
+    }
+
+    func testPrivacyDisplayAndIndexControlsAreIndependent() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        let masked = window.staticTexts["API_TOKEN=••••••"]
+        let raw = window.staticTexts["API_TOKEN=synthetic-preview-only"]
+        XCTAssertTrue(masked.waitForExistence(timeout: 5))
+        XCTAssertFalse(raw.exists)
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Privacy"].click()
+        XCTAssertTrue(element("settings.privacy").waitForExistence(timeout: 5))
+        let display = element("privacy.maskDisplay")
+        XCTAssertTrue(display.waitForExistence(timeout: 5))
+        display.click()
+        XCTAssertTrue(raw.waitForExistence(timeout: 5))
+        let redact = element("privacy.redactIndex")
+        XCTAssertTrue(redact.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        redact.click()
+        let confirm = app.buttons["Remove Indexed Credentials"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        XCTAssertTrue(raw.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(masked.waitForExistence(timeout: 5))
     }
 
     func testIndexedSessionsKeepCredentialsMaskedAndPageWithinSelection() throws {

@@ -198,8 +198,8 @@ struct MenuBarPanel: View {
     }
 
     private func sessionRow(_ row: MenuUsageSession, measuredAt: Int64) -> some View {
-        let session = SessionListItem(row.session)
-        let project = row.project.map(SecretMasker.mask) ?? session.path?.split(separator: "/").last.map(String.init)
+        let session = SessionListItem(row.session, maskSecrets: model.maskSecrets)
+        let project = row.project.map(model.displayText) ?? session.path?.split(separator: "/").last.map(String.init)
         return HStack(spacing: 6) {
             SessionAgentMark(agent: session.id.agent)
             VStack(alignment: .leading, spacing: 2) {

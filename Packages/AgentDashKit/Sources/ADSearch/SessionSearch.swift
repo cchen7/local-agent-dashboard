@@ -25,14 +25,17 @@ public struct SessionSearchResults: Equatable, Sendable {
 public enum SessionSearch {
     /// Search the raw index; mask complete display text before cutting or highlighting it.
     public static func run(_ raw: String, in store: AgentStore, scope: IndexedSearchScope,
-                           order: SessionSearchOrder = .relevance, limit: Int = 50, offset: Int = 0) throws -> SessionSearchResults {
+                           order: SessionSearchOrder = .relevance, limit: Int = 50, offset: Int = 0,
+                           maskSecrets: Bool = true) throws -> SessionSearchResults {
         let query = try SearchQuery.parse(raw)
         let snapshot = try store.searchIndex(query, scope: scope, order: order, limit: limit, offset: offset)
         let terms = query.groups.flatMap(\.positive).map(\.text)
         let hits = try snapshot.groups.map { group in
             try Task.checkCancellation()
-            let body = SecretMasker.mask(group.bestText ?? "")
-            let tool = SecretMasker.mask(group.bestTool ?? "")
+            let rawBody = group.bestText ?? ""
+            let rawTool = group.bestTool ?? ""
+            let body = maskSecrets ? SecretMasker.mask(rawBody) : rawBody
+            let tool = maskSecrets ? SecretMasker.mask(rawTool) : rawTool
             let text = containsAny(body, terms: terms) || tool.isEmpty ? body :
                 ([tool, body].filter { !$0.isEmpty }.joined(separator: " · "))
             return SessionSearchHit(id: group.session, firstMatchKey: group.firstMatchKey,

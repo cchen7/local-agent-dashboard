@@ -124,7 +124,7 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 |---|---|---|
 | `ADCore` | Domain models (`Source`, `Session`, `Event`, `TokenEvent`, `AgentKind`, `SessionStatus`, …), time and path utilities | — |
 | `ADAdapters` | Discovery rules and parsers per agent; emit normalized records | ADCore |
-| `ADStore` | Database, migrations, writes, queries, rollups, archive | ADCore, GRDB |
+| `ADStore` | Database, migrations, writes, queries, rollups, archive | ADCore, ADPrivacy, GRDB |
 | `ADIngest` | Source lifecycle, FSEvents, tailer, checkpoints, scheduling | ADCore, ADAdapters, ADStore |
 | `ADSearch` | Grouped search and masked, highlighted snippets | ADCore, ADStore, ADPrivacy |
 | `ADInsights` | Titles, keywords, latest progress, status inference | ADCore, ADStore |
@@ -232,7 +232,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | ⚠️ Trap 2 | **Resuming a session copies the whole previous conversation into the new file.** Dedupe events globally by `uuid` and tokens by `message.id`. Use a valid recorded `sessionId` in primary transcripts to assign copied rows to the original, independent of scan order. Mark the new session "continued from <original>" and collapse the inherited part in the transcript. |
 | ⚠️ Trap 3 | Timestamps are not guaranteed to be in order (see ADP-5). |
 | ⚠️ Trap 4 | **Claude Code deletes transcripts older than 30 days by default** (`cleanupPeriodDays`). The app must archive (§6.4). |
-| Thinking | Not indexed by default (Settings toggle). |
+| Thinking | Default off. Privacy can opt into complete nonempty Claude plaintext `thinking` blocks of at most 8 KiB on the next scan. Opaque or oversized blocks are omitted. Thinking is distinct from replies and never changes token accounting, status, topics or latest progress. Turning the option off removes all indexed thinking, including archived copies. |
 | Status signals | `stop_reason = tool_use` with no later matching `tool_result` → tool running or waiting for approval; `end_turn` → turn finished; API-error records → failed. |
 | Resume command | `cd "<cwd>" && claude --resume <sessionId>` |
 
@@ -507,6 +507,13 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);   -- incl. pricing_has
   Confirm absence below the pinned, accessible source parent. An unavailable parent or a symlink is insufficient. If the file returns, replay it and clear the archive marker only for sessions found in that file.
 - Retention setting: forever (default) / 365 / 180 / 90 days. Expired sessions are deleted with their events and token records; rollup tables are kept so long-range charts stay continuous.
 - Settings shows the database size and offers: "Clear a project's data", "Clear a source's data", "Clear everything".
+  Each clear previews a scope and requires confirmation with active indexing stopped.
+  Project scope uses the current Projects membership. Clear removes selected
+  transcripts and attributable usage; unrelated records and source grants,
+  saved searches, prices and settings remain. Clear everything also removes
+  agent-wide readouts and aggregate-only legacy usage. The next independently
+  requested scan may restore data from original files that are still present.
+  Archived sessions without an original file cannot be restored.
 
 ### 6.5 Two kinds of rebuild
 
@@ -988,14 +995,19 @@ All user-facing strings go through a String Catalog (`Localizable.xcstrings`). S
 
 ### 12.2 Secret masking (default on)
 
-Mask common secret formats at display time (e.g. `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox[bp]-…`, `-----BEGIN … PRIVATE KEY-----`, and `.env`-style assignments to variables whose names end in KEY, TOKEN, SECRET or PASSWORD) as `••••••`; click to reveal temporarily. Rules live in `ADPrivacy` with unit tests. v1 masks only in the UI and keeps the original text in the index (so users can still search their own config keys); "also strip at index time" is a setting.
+Mask common secret formats at display time (e.g. `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox[bp]-…`, `-----BEGIN … PRIVATE KEY-----`, and `.env`-style assignments to variables whose names end in KEY, TOKEN, SECRET or PASSWORD) as `••••••`; click to reveal temporarily. Rules live in `ADPrivacy` with unit tests. By default only the display is masked and the index remains searchable by its original text. A separate default-off control removes recognized credentials from current and newly indexed text.
 
 Apply the display projection to raw text before rendering Markdown or snippets.
 Keep dotenv names and trailing comments visible. Single quotes, double
 quotes and backticks can enclose multiline values and embedded hashes. When a
 quoted secret or private-key block is truncated, hide its remaining content.
-The projection leaves the stored transcript untouched and is not a data
-sanitization tool.
+Display masking leaves the stored transcript untouched. Opt-in index redaction
+updates stored session text, free-form metadata, and search in a single
+transaction. It keeps routing identities and token accounting intact. If
+opaque decoder state contains a recognized credential, omit it and replay the
+file at the next open. Turning off index redaction does not restore removed
+values; an explicit future import can read the original files again. This
+cleans the live index; it is not physical erasure of historical disk bytes.
 Reveal applies to one entry and ends after ten seconds, when the entry leaves
 the view, or when the app loses focus.
 
@@ -1016,6 +1028,14 @@ components without accessing the filesystem. With active rules, a relative path,
 an implementation-defined `//` prefix, NUL or a `..` component is indeterminate.
 Defer indexing when the workspace is indeterminate; only a confirmed match
 triggers removal. With no exclusion rules, no path is excluded.
+
+Match both recorded and mapped workspaces. Stop active indexing before
+applying a new rule set. Applying rules atomically removes matches from the
+local library, including derived search and usage, without touching original
+files. Affected files are reconsidered on their next scan. A previously
+withheld prefix with missing workspace metadata is replayed when the same
+session supplies a trustworthy path. A malformed path alone does not prove
+admission or removal. Clearing rules can recover only available source files.
 
 ### 12.4 Proving zero network
 

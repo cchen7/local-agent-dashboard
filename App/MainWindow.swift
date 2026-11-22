@@ -45,6 +45,7 @@ struct MainWindow: View {
                                 selection: $model.selectedProjectID, openSession: model.openProjectSession) {
                     sidebar
                 }
+                .id(model.privacyRevision)
             } else {
                 GeometryReader { geometry in
                     NavigationSplitView {
@@ -60,7 +61,8 @@ struct MainWindow: View {
                             SessionTranscript(session: session, store: store, search: search,
                                               contextWindowRules: model.contextWindowRules,
                                               displayCurrency: model.pricing.currency)
-                                .id(TranscriptSelection(session: session.id, query: search?.query))
+                                .id(TranscriptSelection(session: session.id, query: search?.query,
+                                                         privacyRevision: model.privacyRevision))
                         } else {
                             emptyDetail
                         }
@@ -70,7 +72,7 @@ struct MainWindow: View {
                 .task(id: SearchInput(text: model.sessionSearchText, offset: model.sessionSearchOffset,
                                        order: model.sessionSearchOrder,
                                        filter: model.libraryFilter,
-                                       ready: model.store != nil)) { [text = model.sessionSearchText,
+                                       ready: model.store != nil, privacyRevision: model.privacyRevision)) { [text = model.sessionSearchText,
                                                                     offset = model.sessionSearchOffset,
                                                                     order = model.sessionSearchOrder,
                                                                     filter = model.libraryFilter] in
@@ -78,7 +80,10 @@ struct MainWindow: View {
                 }
             }
         }
-        .task(id: model.store != nil) { await model.observeSessionIndex() }
+        .task(id: LibraryInput(ready: model.store != nil, privacyRevision: model.privacyRevision)) {
+            await model.observeSessionIndex()
+        }
+        .environment(\.secretMaskingEnabled, model.maskSecrets)
         .task(id: model.store != nil) { await model.observeSmartGroups() }
         .environment(\.sessionOverviewOptions,
                      .init(enabled: !model.isSearchingSessions, searchTopic: { term in
@@ -271,7 +276,7 @@ struct MainWindow: View {
                 Section("Smart Groups") {
                     ForEach(model.smartGroups) { group in
                         Button { model.openSmartGroup(group) } label: {
-                            Label { Text(verbatim: SecretMasker.mask(group.name)) } icon: {
+                            Label { Text(verbatim: model.displayText(group.name)) } icon: {
                                 Image(systemName: "bookmark")
                             }
                         }
@@ -375,11 +380,18 @@ private struct SearchInput: Equatable {
     let order: SessionSearchOrder
     let filter: SessionLibraryFilter?
     let ready: Bool
+    let privacyRevision: UInt64
+}
+
+private struct LibraryInput: Equatable {
+    let ready: Bool
+    let privacyRevision: UInt64
 }
 
 private struct TranscriptSelection: Hashable {
     let session: SessionKey
     let query: String?
+    let privacyRevision: UInt64
 }
 
 struct EmptyPanel: View {

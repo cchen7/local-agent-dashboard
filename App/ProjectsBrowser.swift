@@ -10,6 +10,7 @@ struct ProjectsBrowser<Sidebar: View>: View {
     @Binding var selection: IndexedProject.ID?
     let openSession: (SessionKey) -> Void
     @ViewBuilder let sidebar: () -> Sidebar
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
     @State private var projects: [DisplayProject] = []
     @State private var loaded = false
     @State private var failed = false
@@ -55,9 +56,10 @@ struct ProjectsBrowser<Sidebar: View>: View {
 
     private func observeProjects() async {
         guard let store else { return }
+        let masking = maskSecrets
         do {
             for try await rows in store.indexedProjectUpdates(hostHome: hostHome) {
-                let display = await Task.detached { rows.map(DisplayProject.init) }.value
+                let display = await Task.detached { rows.map { DisplayProject($0, maskSecrets: masking) } }.value
                 guard !Task.isCancelled else { return }
                 projects = display
                 if !display.contains(where: { $0.id == selection }) { selection = display.first?.id }
@@ -230,6 +232,7 @@ private struct ProjectTimeline: View {
     let store: AgentStore
     let scope: IndexedProjectActivityScope
     let openSession: (SessionKey) -> Void
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
     @State private var entries: [DisplayProjectActivity] = []
     @State private var loaded = false
     @State private var failed = false
@@ -279,9 +282,10 @@ private struct ProjectTimeline: View {
         loaded = false
         failed = false
         entries = []
+        let masking = maskSecrets
         do {
             for try await rows in try store.indexedProjectActivityUpdates(requested) {
-                let display = await Task.detached { rows.map(DisplayProjectActivity.init) }.value
+                let display = await Task.detached { rows.map { DisplayProjectActivity($0, maskSecrets: masking) } }.value
                 guard !Task.isCancelled else { return }
                 entries = display
                 loaded = true
@@ -310,16 +314,17 @@ private struct DisplayProject: Identifiable, Sendable {
     let activityScope: IndexedProjectActivityScope
     var lastActivity: Int64? { sessions.first?.session.lastActivity }
 
-    nonisolated init(_ project: IndexedProject) {
+    nonisolated init(_ project: IndexedProject, maskSecrets: Bool) {
+        func display(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
         id = project.id
-        name = SecretMasker.mask(project.name)
-        path = project.path.map(SecretMasker.mask)
-        location = project.location.map(SecretMasker.mask)
+        name = display(project.name)
+        path = project.path.map(display)
+        location = project.location.map(display)
         repository = project.repositoryURL.flatMap(Self.displayRepository)
         agents = project.agents
-        branches = project.branches.map(SecretMasker.mask)
+        branches = project.branches.map(display)
         sessions = project.sessions.map {
-            .init(session: SessionListItem($0.session), worktree: $0.worktree.map(SecretMasker.mask))
+            .init(session: SessionListItem($0.session, maskSecrets: maskSecrets), worktree: $0.worktree.map(display))
         }
         activityScope = project.activityScope
     }
@@ -345,16 +350,17 @@ private struct DisplayProjectActivity: Identifiable, Sendable {
     let toolName: String?
     let text: String?
 
-    nonisolated init(_ event: IndexedProjectActivity) {
+    nonisolated init(_ event: IndexedProjectActivity, maskSecrets: Bool) {
+        func display(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
         id = event.id
         session = event.session
         timestamp = event.timestamp
         kind = event.kind
-        title = event.sessionTitle.flatMap { $0.isEmpty ? nil : SecretMasker.mask($0) }
-        toolName = event.toolName.map(SecretMasker.mask)
+        title = event.sessionTitle.flatMap { $0.isEmpty ? nil : display($0) }
+        toolName = event.toolName.map(display)
         // Mask the complete value before shortening it for the timeline.
         text = event.text.flatMap {
-            let masked = SecretMasker.mask($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            let masked = display($0).trimmingCharacters(in: .whitespacesAndNewlines)
             return masked.isEmpty ? nil : String(masked.prefix(200))
         }
     }

@@ -17,14 +17,16 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
     private let file: SourceFile
     private let environment: String
     private let input: ClaudeInput
+    private let includeThinking: Bool
     private let fractionalDate = ISO8601DateFormatter()
     private let plainDate = ISO8601DateFormatter()
     private var cachedMetadata: (Data, Metadata)?
 
-    init(file: SourceFile, environment: String, input: ClaudeInput) {
+    init(file: SourceFile, environment: String, input: ClaudeInput, includeThinking: Bool) {
         self.file = file
         self.environment = environment
         self.input = input
+        self.includeThinking = includeThinking
         fractionalDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         plainDate.formatOptions = [.withInternetDateTime]
     }
@@ -129,8 +131,15 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                         records.append(event(.toolResult, Self.bounded(Self.contentText(block["content"]), bytes: 2048),
                                              index: index, metadata: Self.toolMetadata(block["tool_use_id"],
                                                  isError: (block["is_error"] as? Bool) == true)))
-                    case "thinking", "redacted_thinking":
-                        break
+                    case "thinking":
+                        // Do not split a credential at a byte limit. Only keep
+                        // complete readable blocks, separately from replies.
+                        if includeThinking, !isUser, let text = block["thinking"] as? String,
+                           text.utf8.count <= EventKind.maximumThinkingBytes,
+                           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            records.append(event(.thinking, text, index: index))
+                        }
+                    case "redacted_thinking": break
                     default:
                         unknown = true
                     }

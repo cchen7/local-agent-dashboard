@@ -391,3 +391,44 @@ uses the same filter snapshot as the result list. Resolve the preferred hit,
 ordinal and neighboring keys in one scoped read, ordered by sequence and
 row ID. Search refreshes retain valid selected events and only reseek the
 transcript when the selected event changes.
+
+## DEV-031 — Separate display masking and live index redaction
+
+Display masking starts on and does not change stored text. Index redaction
+starts off and asks before updating existing local text; later writes use the
+same rule inside the writer. Preserve normalized identity and accounting;
+pseudonymize recognized credential-shaped call and message links consistently.
+Clear derived keywords after redacting underlying text. Preserve safe decoder
+state unchanged and replay after omitting unsafe state. The guarantee covers
+live searchable text rather than prior backups, SQLite free pages, or the
+original source files.
+
+## DEV-063 — Enforce workspace exclusions in the writer
+
+Compile rules before applying them. Compare policy revision and checkpoint
+on file commits. Match raw or mapped paths, retaining only session-key
+fingerprints and file references as exclusion bookkeeping. A copied-history
+placeholder cannot establish a workspace. Delete only confirmed matches
+and publish usage changes with the index transaction. Invalidate only affected
+checkpoints on rule changes and replay missing-workspace prefixes when trusted
+metadata arrives. Stop active indexing before changing the rules. Do not
+start stopped sources automatically.
+
+## DEV-064 — Opt in to readable Claude thinking
+
+Require explicit confirmation and stopped workers before changing the setting.
+Enable marks only still-present Claude transcript checkpoints for replay on
+the next scan; it does not start a reader. The index writer also enforces
+consent and size limits. Disabling removes indexed thinking rows, including
+archived copies. Leave source files, token usage and preserved reply rows
+unchanged. Never store signatures, opaque blocks or partial thinking text.
+
+## DEV-065 — Verify a confirmed manual clear against current index ownership
+
+Clear scopes are an app-owned transaction. Recompute project membership and
+check stable session and file identities before applying a confirmed plan.
+Keep other session data and shared references; reset only affected file
+checkpoints without starting a scanner. Scope clears subtract attributed
+usage. Clear everything also removes aggregate-only legacy history and
+rate limits. The source registry, preferences and saved searches survive.
+Manual clear is separate from expiry, which must keep aggregate history.

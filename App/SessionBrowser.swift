@@ -413,21 +413,22 @@ struct SessionTranscript: View {
 
 private struct TranscriptEventRow: View {
     let event: EventRecord
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
 
     var body: some View {
-        if event.kind == .toolCall || event.kind == .toolResult {
+        if event.kind == .toolCall || event.kind == .toolResult || event.kind == .thinking {
             DisclosureGroup {
                 ProtectedTranscriptText(raw: event.text ?? "")
                     .padding(.top, 5)
             } label: {
                 Label {
                     if let name = event.toolName {
-                        Text(verbatim: SecretMasker.mask(name)).lineLimit(1)
+                        Text(verbatim: maskSecrets ? SecretMasker.mask(name) : name).lineLimit(1)
                     } else {
                         Text(event.kind.transcriptLabel)
                     }
                 } icon: {
-                    Image(systemName: event.kind == .toolCall ? "terminal" : "doc.text")
+                    Image(systemName: event.kind == .thinking ? "text.bubble" : (event.kind == .toolCall ? "terminal" : "doc.text"))
                 }
                 .font(.callout)
             }
@@ -456,10 +457,11 @@ private struct TranscriptEventRow: View {
 private struct ProtectedTranscriptText: View {
     let raw: String
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
     @State private var revealedText: String?
 
     var body: some View {
-        let masked = SecretMasker.mask(raw)
+        let masked = maskSecrets ? SecretMasker.mask(raw) : raw
         let revealed = revealedText == raw
         let displayed = revealed ? raw : masked
         let sections = TranscriptFormatting.sections(displayed)
@@ -468,7 +470,7 @@ private struct ProtectedTranscriptText: View {
                 if section.code {
                     Text(verbatim: section.text).font(.body).monospaced()
                 } else {
-                    Text(TranscriptFormatting.inline(section.text, maskRenderedText: !revealed))
+                    Text(TranscriptFormatting.inline(section.text, maskRenderedText: maskSecrets && !revealed))
                 }
             }
             if masked != raw {
@@ -483,6 +485,7 @@ private struct ProtectedTranscriptText: View {
         }
         .textSelection(.enabled)
         .onChange(of: raw) { _, _ in revealedText = nil }
+        .onChange(of: maskSecrets) { _, _ in revealedText = nil }
         .onChange(of: scenePhase) { _, phase in if phase != .active { revealedText = nil } }
         .onDisappear { revealedText = nil }
         .task(id: revealed) {
@@ -672,6 +675,7 @@ extension EventKind {
         case .summary: "Summary"
         case .system: "System"
         case .error: "Error"
+        case .thinking: "Thinking"
         case .unknown: "Unrecognized Event"
         }
     }

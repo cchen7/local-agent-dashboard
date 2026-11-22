@@ -24,6 +24,7 @@ struct SessionOverview: View {
     let session: SessionListItem
     let store: AgentStore
     @Environment(\.sessionOverviewOptions) private var options
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
     @State private var value: SessionOverviewDisplay?
     @State private var loaded = false
     @State private var failed = false
@@ -142,10 +143,11 @@ struct SessionOverview: View {
     }
 
     private func observe() async {
+        let masking = maskSecrets
         do {
             for try await raw in store.sessionOverviewUpdates(in: session.id) {
                 let safe = await Task.detached {
-                    raw.map { SessionOverviewDisplay($0, scorer: Self.scorer) }
+                    raw.map { SessionOverviewDisplay($0, scorer: Self.scorer, maskSecrets: masking) }
                 }.value
                 guard !Task.isCancelled else { return }
                 value = safe

@@ -5,7 +5,7 @@ import ADIngest
 import ADInsights
 import ADPrivacy
 
-enum SettingsPage: Hashable { case general, sources, thresholds, storage, pricing, about }
+enum SettingsPage: Hashable { case general, sources, thresholds, storage, privacy, pricing, about }
 
 struct SettingsView: View {
     @State private var indexStatus: [Int64: IndexedSourceStatus] = [:]
@@ -36,10 +36,10 @@ struct SettingsView: View {
                     let indexing = source.id.flatMap { model.sourceIndexing.progress[$0] }
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(verbatim: SecretMasker.mask(source.label)).font(.headline)
-                            Text(verbatim: SecretMasker.mask(source.rootURL.path)).font(.caption)
+                            Text(verbatim: model.displayText(source.label)).font(.headline)
+                            Text(verbatim: model.displayText(source.rootURL.path)).font(.caption)
                                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            Text(verbatim: sourceAgentName(source.agent) + " · " + SecretMasker.mask(source.environment))
+                            Text(verbatim: sourceAgentName(source.agent) + " · " + model.displayText(source.environment))
                                 .font(.caption).foregroundStyle(.secondary)
                             status(model.access[source.id ?? -1] ?? .notChecked)
                             if let indexing { indexingStatus(indexing) }
@@ -123,6 +123,10 @@ struct SettingsView: View {
             StorageSettingsPane(model: model)
                 .tabItem { Label("Storage", systemImage: "internaldrive") }
                 .tag(SettingsPage.storage)
+
+            PrivacySettingsPane(model: model)
+                .tabItem { Label("Privacy", systemImage: "lock.shield") }
+                .tag(SettingsPage.privacy)
 
             PricingSettingsPane(model: model.pricing, store: model.store)
                 .tabItem { Label("Pricing", systemImage: "tag") }
@@ -485,7 +489,7 @@ private struct StorageSettingsPane: View {
                 Text("Rebuilds search, topics and usage from the local database without rereading source files.")
                     .foregroundStyle(.secondary)
                 Button("Rebuild Index") { Task { await rebuild() } }
-                    .disabled(store == nil || rebuilding)
+                    .disabled(store == nil || rebuilding || model.clearingIndex)
                     .accessibilityIdentifier("rebuildLocalIndex")
                 if rebuilding { ProgressView("Rebuilding index…") }
                 switch outcome {
@@ -507,9 +511,14 @@ private struct StorageSettingsPane: View {
                     .disabled(!model.canRescanSources)
                     .accessibilityIdentifier("rescanAllSources")
             }
+            IndexClearSettingsSection(model: model)
+                .disabled(rebuilding)
         }
         .formStyle(.grouped)
         .task(id: store != nil) { await readSize() }
+        .onChange(of: model.clearingIndex) { _, active in
+            if !active { Task { await readSize() } }
+        }
     }
 
     private func readSize() async {
@@ -519,7 +528,7 @@ private struct StorageSettingsPane: View {
     }
 
     private func rebuild() async {
-        guard let store, !rebuilding else { return }
+        guard let store, !rebuilding, !model.clearingIndex else { return }
         rebuilding = true
         defer { rebuilding = false }
         outcome = nil
@@ -594,7 +603,7 @@ struct SourceOnboardingView: View {
                     return model.sourceIndexing.progress[id] != nil
                 }) { source in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(verbatim: SecretMasker.mask(source.label))
+                        Text(verbatim: model.displayText(source.label))
                         if let id = source.id, let progress = model.sourceIndexing.progress[id] {
                             scanProgress(progress)
                         }
@@ -619,8 +628,8 @@ struct SourceOnboardingView: View {
                     model.setOnboardingSource(id, selected: $0)
                 })) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(verbatim: SecretMasker.mask(source.label))
-                        Text(verbatim: "\(SecretMasker.mask(source.environment)) · \(SecretMasker.mask(source.rootURL.path))")
+                        Text(verbatim: model.displayText(source.label))
+                        Text(verbatim: "\(model.displayText(source.environment)) · \(model.displayText(source.rootURL.path))")
                             .lineLimit(1).truncationMode(.middle)
                             .font(.caption).foregroundStyle(.secondary)
                         previewLabel(model.sourcePreviews[id])

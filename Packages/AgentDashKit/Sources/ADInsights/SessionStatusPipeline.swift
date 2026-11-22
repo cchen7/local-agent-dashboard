@@ -164,7 +164,7 @@ private enum ActivityProjection {
                     }
                 default: break
                 }
-            case .promptHistory, .unknown: break
+            case .promptHistory, .thinking, .unknown: break
             }
             if let kind { result.append(.init(sequence: event.sequence, timestampMilliseconds: event.timestamp, kind: kind)) }
         }

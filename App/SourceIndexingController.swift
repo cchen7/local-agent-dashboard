@@ -47,7 +47,8 @@ final class SourceIndexingController {
                 let report: @Sendable (SourceIndexUpdate) -> Void = { updates.continuation.yield($0) }
                 switch source.agent {
                 case .claudeCode:
-                    try await JSONLSourceIndexing.run(source: source, authorizedRoot: root, adapter: ClaudeCodeAdapter(),
+                    let adapter = ClaudeCodeAdapter(includeThinking: try store.indexThinkingBlocksEnabled())
+                    try await JSONLSourceIndexing.run(source: source, authorizedRoot: root, adapter: adapter,
                                                      store: store, mode: mode, rescans: requests.stream, onUpdate: report)
                 case .codex:
                     try await JSONLSourceIndexing.run(source: source, authorizedRoot: root, adapter: CodexAdapter(),

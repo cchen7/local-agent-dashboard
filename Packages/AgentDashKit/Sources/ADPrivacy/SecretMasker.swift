@@ -2,7 +2,7 @@ import Foundation
 
 /// SEC-8 / SPEC §12.2: make a display copy of text with common credentials hidden.
 public enum SecretMasker {
-    private static let replacement = "••••••"
+    static let placeholder = "••••••"
     private static let tokens = try? NSRegularExpression(
         pattern: #"(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{16,}|(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}(?![A-Za-z0-9_])|xox[bp]-[A-Za-z0-9-]{12,})"#
     )
@@ -18,7 +18,7 @@ public enum SecretMasker {
     /// or changed. Callers should apply this to raw text before formatting it.
     public static func mask(_ text: String) -> String {
         guard !text.isEmpty else { return text }
-        guard let tokens, let assignments, let privateKeyMarkers else { return replacement }
+        guard let tokens, let assignments, let privateKeyMarkers else { return placeholder }
         let utf16 = text as NSString
         let whole = NSRange(location: 0, length: utf16.length)
         var matches = tokens.matches(in: text, range: whole).map(\.range)
@@ -59,7 +59,7 @@ public enum SecretMasker {
         for match in matches {
             if match.location >= end {
                 output += utf16.substring(with: NSRange(location: end, length: match.location - end))
-                output += replacement
+                output += placeholder
             }
             end = max(end, NSMaxRange(match))
         }

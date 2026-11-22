@@ -333,3 +333,14 @@ session discovery or parser/accounting accuracy. No session contents were opened
 The Grok default directory was absent; the owner confirmed Grok is not installed
 and asked to ignore it for now (DEV-008). No Grok fixture or compatibility result
 is claimed.
+
+## Optional Claude thinking blocks
+
+A bounded schema-only inventory found `message.content[].type = thinking` in
+Claude Code project JSONL and subagent files. The sampled `thinking` text was
+empty. A real sanitized capture preserved the empty string and its record
+shape; no sample content was retained in this repository. Nonempty, oversized,
+and opaque cases are exercised with synthetic fixtures. The adapter accepts
+only a complete nonempty text field in a Claude assistant thinking block.
+Signatures and opaque/redacted data are ignored. The sampled Codex and Copilot
+files did not provide a verified nonempty counterpart for this feature.

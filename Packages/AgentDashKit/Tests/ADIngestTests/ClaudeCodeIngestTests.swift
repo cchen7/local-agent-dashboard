@@ -482,3 +482,69 @@ private struct ClaudeFixture {
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
+
+@Test("ADP-CC / SEC-7: thinking is opt-in, bounded, independent of billing, and purged when disabled")
+func claudeThinkingPreferenceReplaysAndPurgesIndex() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("thinking-\(UUID())")
+    let root = folder.appendingPathComponent("synthetic-source")
+    let projects = root.appendingPathComponent("projects/synthetic")
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let id = "00000000-0000-0000-0000-000000000035"
+    let input = projects.appendingPathComponent(id + ".jsonl")
+    let word = "visiblethinkingfixture"
+    let opaque = "opaquethinkingfixture"
+    let overLimit = "oversizethinkingfixture" + String(repeating: "x", count: 8_192)
+    let workspace = "/synthetic/allowed"
+    let stamp: Int64 = 1_770_000_000_000
+    let usage: [String: Int] = ["input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 4]
+    func line(_ suffix: String, content: [[String: String]]) throws -> Data {
+        let object: [String: Any] = ["type": "assistant", "uuid": "synthetic-" + suffix, "sessionId": id, "cwd": workspace,
+             "timestamp": stamp, "message": ["id": "synthetic-response", "model": "synthetic-model", "usage": usage, "content": content]]
+        return try JSONSerialization.data(withJSONObject: object) + Data([0x0A])
+    }
+    let bytes = try line("thinking", content: [
+        ["type": "thinking", "thinking": "Checked " + word, "signature": "synthetic-signature"],
+        ["type": "thinking", "thinking": " \n"],
+        ["type": "redacted_thinking", "data": opaque],
+        ["type": "thinking", "thinking": overLimit],
+    ]) + line("reply", content: [["type": "text", "text": "synthetic reply"]])
+    try bytes.write(to: input)
+    let index = folder.appendingPathComponent("index.sqlite")
+    let store = try AgentStore(databaseURL: index)
+    var source = Source(agent: .claudeCode, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let key = SessionKey(agent: .claudeCode, nativeID: id)
+    let file = try #require(try ClaudeCodeAdapter().discover(in: source, authorizedRoot: root).first)
+    let scope = IndexedSearchScope(now: stamp + 60_000, timeZone: .gmt)
+    let window = try UsageWindow.make(.hour, now: stamp + 60_000, timeZone: .gmt)
+    func importWith(_ adapter: ClaudeCodeAdapter, into store: AgentStore) throws -> JSONLImportResult {
+        try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    }
+    #expect(try !store.indexThinkingBlocksEnabled())
+    // An opt-in decoder is insufficient to bypass the persisted writer policy.
+    _ = try importWith(ClaudeCodeAdapter(includeThinking: true), into: store)
+    #expect(try store.events(in: key).map(\.kind) == [.assistant])
+    #expect(try store.usage(window: window).totals.counts.total == 9)
+
+    #expect(try store.setIndexThinkingBlocksEnabled(true))
+    let reopened = try AgentStore(databaseURL: index)
+    #expect(try reopened.indexThinkingBlocksEnabled())
+    let run = try importWith(ClaudeCodeAdapter(includeThinking: true), into: reopened)
+    #expect(run.bytesRead == bytes.count)
+    #expect(try reopened.events(in: key).map(\.kind) == [.thinking, .assistant])
+    #expect(try reopened.events(in: key).first?.text == "Checked " + word)
+    #expect(try reopened.searchIndex(SearchQuery.parse(word), scope: scope).matchCount == 1)
+    #expect(try reopened.searchIndex(SearchQuery.parse(opaque), scope: scope).matchCount == 0)
+    #expect(try reopened.statusWork(at: stamp).flatMap(\.events).allSatisfy { $0.kind != .thinking })
+    #expect(try reopened.usage(window: window).totals.counts.total == 9)
+
+    try reopened.databasePool.write { db in
+        try db.execute(sql: "UPDATE sessions SET source_deleted_at=? WHERE native_id=?", arguments: [stamp + 1, id])
+    }
+    #expect(try reopened.setIndexThinkingBlocksEnabled(false))
+    #expect(try reopened.searchIndex(SearchQuery.parse(word), scope: scope).matchCount == 0)
+    #expect(try reopened.events(in: key).map(\.text) == ["synthetic reply"])
+    #expect(try reopened.usage(window: window).totals.counts.total == 9)
+    #expect(try Data(contentsOf: input) == bytes)
+}

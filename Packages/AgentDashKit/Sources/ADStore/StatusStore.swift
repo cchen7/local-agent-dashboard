@@ -80,7 +80,7 @@ public extension AgentStore {
                     guard let agent = AgentKind(rawValue: session["agent"]) else { throw StoreError.invalidStoredValue }
                     let signals: [StatusEventMetadata] = archived ? [] : try Row.fetchAll(db, sql: """
                         SELECT seq,ts,kind,CASE WHEN length(CAST(meta_json AS BLOB))<=2048 THEN meta_json END AS meta_json
-                        FROM events WHERE session_id=? AND kind NOT IN ('unknown','prompt_history')
+                        FROM events WHERE session_id=? AND kind NOT IN ('unknown','prompt_history','thinking')
                         ORDER BY seq DESC,id DESC LIMIT 8192
                         """, arguments: [id]).map { event in
                             guard let kind = EventKind(rawValue: event["kind"]) else { throw StoreError.invalidStoredValue }

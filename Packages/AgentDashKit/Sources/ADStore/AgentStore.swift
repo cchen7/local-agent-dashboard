@@ -5,6 +5,7 @@ import Synchronization
 
 /// Store errors deliberately omit paths, record contents, and bookmark bytes.
 public enum StoreError: Error, Equatable, Sendable {
+    case exclusionPolicyChanged
     case invalidLocation, invalidRelativePath, invalidCheckpoint, invalidTokenCounts, invalidCustomSource
     case missingSession, missingFile, missingSource, invalidStoredValue, missingMigration, staleCheckpoint
     case invalidTranscriptChannel, invalidRateLimit
@@ -100,6 +101,10 @@ public final class AgentStore: Sendable {
                 ALTER TABLE saved_searches ADD COLUMN sidebar_value TEXT;
                 """)
         }
+        guard let exclusions = Bundle.module.url(forResource: "session_exclusions", withExtension: "sql")
+        else { throw StoreError.missingMigration }
+        let exclusionSQL = try String(contentsOf: exclusions, encoding: .utf8)
+        migrator.registerMigration("session_exclusions") { db in try db.execute(sql: exclusionSQL) }
         try migrator.migrate(databasePool)
     }
 
@@ -320,10 +325,12 @@ public final class AgentStore: Sendable {
     /// Usage and its estimated prices update atomically with the normalized rows.
     public func write(_ records: [NormalizedRecord], fileID: Int64? = nil, checkpoint: Checkpoint? = nil) throws {
         try databasePool.write { db in
-            try self.saveWithUsage(records, db: db)
+            let policy = try SessionExclusionPolicy.read(db)
+            let screened = try saveScreened(records, fileID: fileID, policy: policy, db: db)
             if let checkpoint {
                 guard let fileID else { throw StoreError.missingFile }
-                try Self.save(checkpoint, fileID: fileID, db: db)
+                try Self.save(checkpoint, fileID: fileID, db: db,
+                              replayWithoutDecoderState: screened.withheldInFile || screened.needsWorkspaceReplay)
             }
             try UsageChartChanges.publish(db)
         }
@@ -331,8 +338,10 @@ public final class AgentStore: Sendable {
 
     /// Commit parsed records only if the read position is still the expected
     /// one. This check is in the writer transaction to reject concurrent scans.
+    @discardableResult
     public func commitFileBatch(_ records: [NormalizedRecord], for fileID: Int64,
-                                from expected: Checkpoint?, to next: Checkpoint) throws {
+                                from expected: Checkpoint?, to next: Checkpoint,
+                                exclusionRevision: Int64? = nil) throws -> FileBatchCommit {
         try databasePool.write { db in
             guard try Bool.fetchOne(db, sql: """
                 SELECT EXISTS(SELECT 1 FROM source_files f JOIN sources s ON s.id=f.source_id
@@ -341,9 +350,13 @@ public final class AgentStore: Sendable {
             guard try Self.readCheckpoint(fileID, db: db) == expected else {
                 throw StoreError.staleCheckpoint
             }
-            try self.saveWithUsage(records, db: db)
-            try Self.save(next, fileID: fileID, db: db)
+            let policy = try SessionExclusionPolicy.read(db)
+            if let exclusionRevision, exclusionRevision != policy.revision { throw StoreError.exclusionPolicyChanged }
+            let screened = try saveScreened(records, fileID: fileID, policy: policy, db: db)
+            let persisted = try Self.save(next, fileID: fileID, db: db,
+                                          replayWithoutDecoderState: screened.withheldInFile || screened.needsWorkspaceReplay)
             try UsageChartChanges.publish(db)
+            return .init(checkpoint: persisted, needsWorkspaceReplay: screened.needsWorkspaceReplay)
         }
     }
 
@@ -373,14 +386,35 @@ public final class AgentStore: Sendable {
                           unknownRecords: row["unknown_records"], sourceFileWasMissing: (row["state"] as String) == "gone")
     }
 
+    private func saveScreened(_ records: [NormalizedRecord], fileID: Int64?,
+                              policy: SessionExclusionPolicy, db: Database) throws -> SessionExclusionGate.Screened {
+        if policy.patterns.isEmpty {
+            try saveWithUsage(records, db: db)
+            return .init(records: records, withheldInFile: false, needsWorkspaceReplay: false)
+        }
+        var gate = try SessionExclusionGate(policy: policy)
+        let screened = try gate.screen(records, fileID: fileID, db: db)
+        try saveWithUsage(screened.records, db: db)
+        try gate.finishRemovals(db: db)
+        return screened
+    }
+
     private func saveWithUsage(_ records: [NormalizedRecord], db: Database) throws {
         let quote = tokenQuoter.withLock { $0?.quote }
         var touchedUsage: Set<String> = []
         var copilotKeys: Set<CopilotAccounting.Key> = []
+        let redact = try IndexSecretRedaction.enabled(db)
+        let includeThinking = try ThinkingPrivacy.enabled(db)
         for record in records {
             switch record {
-            case .session(let session): try Self.save(session, db: db)
-            case .event(let event): try Self.save(event, db: db)
+            case .session(let session): try Self.save(redact ? IndexSecretRedaction.session(session) : session, db: db)
+            case .event(let event):
+                if event.kind == .thinking {
+                    guard includeThinking, event.session.agent == .claudeCode, let text = event.text,
+                          text.utf8.count <= EventKind.maximumThinkingBytes,
+                          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                }
+                try Self.save(redact ? IndexSecretRedaction.event(event) : event, db: db)
             case .tokens(let event):
                 try Self.save(event, db: db)
                 if db.changesCount != 0 {
@@ -601,11 +635,18 @@ public final class AgentStore: Sendable {
                               value.dedupeKey, value.sourceSequence])
     }
 
-    private static func save(_ checkpoint: Checkpoint, fileID: Int64, db: Database) throws {
+    @discardableResult
+    private static func save(_ checkpoint: Checkpoint, fileID: Int64, db: Database,
+                             replayWithoutDecoderState: Bool = false) throws -> Checkpoint {
         guard !checkpoint.sourceFileWasMissing, checkpoint.size >= 0, checkpoint.offset >= 0, checkpoint.offset <= checkpoint.size,
               checkpoint.parserVersion > 0, checkpoint.sequence >= -1, checkpoint.unknownRecords >= 0,
               (checkpoint.decoderState?.count ?? 0) <= Checkpoint.maximumDecoderStateBytes
         else { throw StoreError.invalidCheckpoint }
+        var checkpoint = try IndexSecretRedaction.enabled(db) ? IndexSecretRedaction.checkpoint(checkpoint) : checkpoint
+        if replayWithoutDecoderState {
+            checkpoint.decoderState = nil
+            checkpoint.parserVersion = 0
+        }
         try db.execute(sql: """
             UPDATE source_files SET device=?,inode=?,size=?,mtime_ns=?,read_offset=?,parser_version=?,
                 last_seq=?,previous_ts=?,decoder_state=?,unknown_records=?,
@@ -616,5 +657,6 @@ public final class AgentStore: Sendable {
                               checkpoint.previousTimestamp, checkpoint.decoderState, checkpoint.unknownRecords,
                               checkpoint.offset, checkpoint.size, fileID])
         guard db.changesCount == 1 else { throw StoreError.missingFile }
+        return checkpoint
     }
 }

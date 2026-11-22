@@ -10,7 +10,9 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     public static let kind: AgentKind = .claudeCode
     public static let parserVersion = 7
 
-    public init() {}
+    private let includeThinking: Bool
+
+    public init(includeThinking: Bool = false) { self.includeThinking = includeThinking }
 
     public func discover(in source: Source, authorizedRoot: URL) throws -> [SourceFile] {
         let id = try sourceID(source)
@@ -53,7 +55,8 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         guard try sourceID(source) == file.sourceID else { throw Failure.invalidSource }
         guard let input = ClaudeInput(relativePath: file.relativePath, role: file.role)
         else { throw Failure.unsupportedFile }
-        return ClaudeCodeDecoder(file: file, environment: source.environment, input: input)
+        return ClaudeCodeDecoder(file: file, environment: source.environment, input: input,
+                                 includeThinking: includeThinking)
     }
 
     /// Generate text for the Copy Resume Command action only.

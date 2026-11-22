@@ -35,7 +35,7 @@ public struct IndexedProjectSession: Identifiable, Equatable, Sendable {
 /// Stable membership keys from an index snapshot. The App cannot construct
 /// arbitrary row IDs or read project events outside the store.
 public struct IndexedProjectActivityScope: Equatable, Sendable {
-    fileprivate let sessionIDs: [Int64]
+    let sessionIDs: [Int64]
 }
 
 public struct IndexedProjectActivity: Identifiable, Equatable, Sendable {
@@ -75,7 +75,7 @@ public extension AgentStore {
         .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
     }
 
-    private static func projectCatalog(_ db: Database, hostHome: String?) throws -> [IndexedProject] {
+    internal static func projectCatalog(_ db: Database, hostHome: String?) throws -> [IndexedProject] {
         let catalog = try Row.fetchAll(db, sql: """
             SELECT id,display_name,root_path,repo_url FROM projects
             """).map(CatalogProject.init)

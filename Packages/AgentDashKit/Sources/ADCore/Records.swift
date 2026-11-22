@@ -59,7 +59,9 @@ public struct SessionRecord: Codable, Equatable, Sendable {
 /// Unknown records are retained by adapters as truncated metadata, never silently dropped.
 public enum EventKind: String, Codable, Sendable {
     case user, assistant, toolCall = "tool_call", toolResult = "tool_result", summary, system, error
-    case promptHistory = "prompt_history", unknown
+    case promptHistory = "prompt_history", thinking, unknown
+
+    public static let maximumThinkingBytes = 8 * 1024
 }
 
 /// A producer-supplied session identity, separate from the file being scanned.

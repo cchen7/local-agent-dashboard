@@ -30,10 +30,13 @@ public enum JSONLFileImporter {
     throws -> JSONLImportResult {
         var versioned = file
         versioned.parserVersion = A.parserVersion
-        var decoder = try adapter.makeDecoder(for: versioned, in: source)
-        return try importFile(versioned, authorizedRoot: authorizedRoot, expectedRoot: expectedRoot,
-                              encoding: adapter.storageEncoding(for: versioned), replay: replay, store: store) {
-            try decoder.decode($0, context: $1)
+        return try retrying(replay: replay) { reread in
+            var decoder = try adapter.makeDecoder(for: versioned, in: source)
+            return try importAttempt(versioned, authorizedRoot: authorizedRoot, expectedRoot: expectedRoot,
+                                     encoding: adapter.storageEncoding(for: versioned), replay: reread, store: store,
+                                     snapshot: { try $0.snapshot() }) {
+                try decoder.decode($0, context: $1)
+            }
         }
     }
 
@@ -59,12 +62,38 @@ public enum JSONLFileImporter {
                            snapshot: (SourceFileReader) throws -> SourceFileReader.Snapshot,
                            decode: (JSONLFrame, JSONLDecodeContext) throws -> DecodedJSONLFrame)
     throws -> JSONLImportResult {
+        try retrying(replay: replay) { reread in
+            try importAttempt(file, authorizedRoot: authorizedRoot, expectedRoot: expectedRoot, encoding: encoding,
+                              replay: reread, store: store, snapshot: snapshot, decode: decode)
+        }
+    }
+
+    private enum ImportControl: Error { case workspaceReplay }
+
+    private static func retrying(replay: Bool, _ body: (Bool) throws -> JSONLImportResult) throws -> JSONLImportResult {
+        var reread = replay
+        while true {
+            try Task.checkCancellation()
+            do { return try body(reread) }
+            catch ImportControl.workspaceReplay {
+                // The writer committed a newly trusted workspace and removed
+                // its deferred marker. Begin with a clean decoder on replay.
+                reread = true
+            }
+        }
+    }
+
+    private static func importAttempt(_ file: SourceFile, authorizedRoot: URL,
+                                      expectedRoot: SourceFileReader.DirectoryIdentity?, encoding: JSONLStorageEncoding,
+                                      replay: Bool, store: AgentStore, snapshot: (SourceFileReader) throws -> SourceFileReader.Snapshot,
+                                      decode: (JSONLFrame, JSONLDecodeContext) throws -> DecodedJSONLFrame) throws -> JSONLImportResult {
         guard file.parserVersion > 0 else { throw JSONLImportFailure.invalidParserVersion }
         try Task.checkCancellation()
         // The expected checkpoint must precede the source snapshot. Otherwise a
         // concurrent append can make older bytes look like a legitimate shrink.
         let fileID = try store.upsertFile(file, checkpoint: nil)
-        var saved = try store.checkpoint(for: fileID)
+        let position = try store.fileImportPosition(for: fileID)
+        var saved = position.checkpoint
         let reader = try SourceFileReader(root: authorizedRoot, relativePath: file.relativePath, expectedRoot: expectedRoot)
         let initial = try snapshot(reader)
         let sameFile = saved.flatMap { canReusePrefix($0, snapshot: initial) ? $0 : nil }
@@ -109,8 +138,10 @@ public enum JSONLFileImporter {
                     (latest.size != initial.size || latest.modificationTimeNS == initial.modificationTimeNS)
             guard unchanged
             else { throw JSONLImportFailure.sourceChanged }
-            try store.commitFileBatch(batch, for: fileID, from: saved, to: next)
-            saved = next
+            let receipt = try store.commitFileBatch(batch, for: fileID, from: saved, to: next,
+                                                    exclusionRevision: position.exclusionRevision)
+            if receipt.needsWorkspaceReplay { throw ImportControl.workspaceReplay }
+            saved = receipt.checkpoint
             batch.removeAll(keepingCapacity: true)
             batchLines = 0
             batchStarted = .now
@@ -159,7 +190,7 @@ public enum JSONLFileImporter {
             bytesRead = initial.size - startingOffset
         }
         try commit()
-        return .init(fileID: fileID, checkpoint: next, completeLines: lines, bytesRead: bytesRead)
+        return .init(fileID: fileID, checkpoint: saved ?? next, completeLines: lines, bytesRead: bytesRead)
     }
 
     private static func readChunks(_ reader: SourceFileReader, size: Int64, from start: Int64,

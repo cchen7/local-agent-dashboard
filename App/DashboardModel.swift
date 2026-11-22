@@ -30,6 +30,13 @@ enum DashboardPage: String, CaseIterable, Identifiable {
 final class DashboardModel {
     let sourceIndexing = SourceIndexingController()
     let pricing = PricingModel()
+    private(set) var maskSecrets = true
+    private(set) var redactIndexSecrets = false
+    private(set) var sessionExclusions: [String] = []
+    private(set) var indexThinkingBlocks = false
+    private(set) var privacyRevision: UInt64 = 0
+    private(set) var changingPrivacy = false
+    private(set) var clearingIndex = false
     private(set) var editingSourceIDs: Set<Int64> = []
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
@@ -154,12 +161,18 @@ final class DashboardModel {
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
                                            : needsOnboarding
-                return (store, try store.sources(), home, onboarding, runtime, initialPricing)
+                return (store, try store.sources(), home, onboarding, runtime, initialPricing,
+                        try store.displaySecretMaskingEnabled(), try store.indexSecretRedactionEnabled(),
+                        try store.sessionExclusionPatterns(), try store.indexThinkingBlocksEnabled())
             }.value
             store = result.0
             sources = result.1
             searchHome = result.2
             onboardingRequired = result.3
+            maskSecrets = result.6
+            redactIndexSecrets = result.7
+            sessionExclusions = result.8
+            indexThinkingBlocks = result.9
             pricing.attach(store: result.0, runtime: result.4, initial: result.5)
             if !synthetic, let data = UserDefaults.standard.data(forKey: Self.contextWindowPreferenceKey),
                data.count <= 131_072, let rules = try? JSONDecoder().decode([ModelContextWindow].self, from: data),
@@ -236,10 +249,12 @@ final class DashboardModel {
 
     func observeSessionIndex() async {
         guard let store else { return }
+        let revision = privacyRevision
+        let masking = maskSecrets
         do {
             for try await rows in store.indexedSessionUpdates() {
-                let snapshot = await Task.detached { SidebarLibrarySnapshot(rows) }.value
-                guard !Task.isCancelled else { return }
+                let snapshot = await Task.detached { SidebarLibrarySnapshot(rows, maskSecrets: masking) }.value
+                guard !Task.isCancelled, privacyRevision == revision else { return }
                 sessions = snapshot.sessions
                 sidebarAgents = snapshot.agents
                 sidebarEnvironments = snapshot.environments
@@ -253,13 +268,15 @@ final class DashboardModel {
                 sessionIndexFailed = false
             }
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, privacyRevision == revision else { return }
             sessionIndexFailed = true
         }
     }
 
     func observeSessionSearch(_ text: String, offset: Int, order: SessionSearchOrder = .relevance,
                               filter: SessionLibraryFilter? = nil) async {
+        let revision = privacyRevision
+        let masking = maskSecrets
         guard let store, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             selectVisibleSession()
@@ -270,19 +287,20 @@ final class DashboardModel {
         do {
             if text != searchForText { try await Task.sleep(for: .milliseconds(150)) }
             for try await _ in store.searchIndexChanges(order: order) {
-                guard searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
+                guard privacyRevision == revision, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
                 let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
                                                timeZone: .current, hostHome: searchHome, libraryFilter: filter)
                 let limit = Self.sessionSearchPageSize
                 let work = Task.detached(priority: .userInitiated) {
-                    try SessionSearch.run(text, in: store, scope: scope, order: order, limit: limit, offset: offset)
+                    try SessionSearch.run(text, in: store, scope: scope, order: order, limit: limit, offset: offset,
+                                          maskSecrets: masking)
                 }
                 let found = try await withTaskCancellationHandler {
                     try await work.value
                 } onCancel: {
                     work.cancel()
                 }
-                guard searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
+                guard privacyRevision == revision, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
                 if offset > 0 && found.hits.isEmpty {
                     sessionSearchOffset = 0
                     return
@@ -299,7 +317,7 @@ final class DashboardModel {
                 try await Task.sleep(for: .milliseconds(150))
             }
         } catch {
-            guard searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
+            guard privacyRevision == revision, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
             searchForText = text
             searchForOffset = offset
             searchForOrder = order
@@ -312,6 +330,98 @@ final class DashboardModel {
     private func searchIsCurrent(_ text: String, offset: Int, order: SessionSearchOrder, filter: SessionLibraryFilter?) -> Bool {
         !Task.isCancelled && text == sessionSearchText && offset == sessionSearchOffset && order == sessionSearchOrder
             && filter == libraryFilter
+    }
+
+    func displayText(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
+
+    var canSetIndexRedaction: Bool {
+        store != nil && !changingPrivacy && !clearingIndex && !sourceIndexing.progress.values.contains { $0.active }
+    }
+
+    func setDisplayMasking(_ enabled: Bool) async -> Bool {
+        guard let store, !changingPrivacy, !clearingIndex else { return false }
+        changingPrivacy = true
+        defer { changingPrivacy = false }
+        do {
+            try await Task.detached { try store.setDisplaySecretMaskingEnabled(enabled) }.value
+            if maskSecrets != enabled {
+                maskSecrets = enabled
+                invalidateTextPresentation()
+            }
+            return true
+        } catch { return false }
+    }
+
+    func setIndexRedaction(_ enabled: Bool) async -> Bool {
+        guard let store, canSetIndexRedaction else { return false }
+        changingPrivacy = true
+        defer { changingPrivacy = false }
+        do {
+            let changed = try await Task.detached(priority: .utility) { try store.setIndexSecretRedactionEnabled(enabled) }.value
+            redactIndexSecrets = enabled
+            if enabled && changed { invalidateTextPresentation() }
+            return true
+        } catch { return false }
+    }
+
+    func setIndexThinking(_ enabled: Bool) async -> Bool {
+        guard let store, canSetIndexRedaction else { return false }
+        changingPrivacy = true
+        defer { changingPrivacy = false }
+        do {
+            let changed = try await Task.detached(priority: .utility) {
+                try store.setIndexThinkingBlocksEnabled(enabled)
+            }.value
+            indexThinkingBlocks = enabled
+            if changed && !enabled { invalidateTextPresentation() }
+            return true
+        } catch { return false }
+    }
+
+    func validateSessionExclusions(_ patterns: [String]) throws {
+        _ = try PathExclusions(patterns, hostHome: searchHome)
+    }
+
+    func setSessionExclusions(_ patterns: [String]) async throws -> SessionExclusionUpdate {
+        guard let store, canSetIndexRedaction else { throw PrivacyPolicyChangeFailure.busy }
+        changingPrivacy = true
+        defer { changingPrivacy = false }
+        let home = searchHome
+        let update = try await Task.detached(priority: .utility) {
+            try store.replaceSessionExclusions(patterns, hostHome: home)
+        }.value
+        sessionExclusions = patterns
+        if update.removedSessions > 0 { invalidateTextPresentation() }
+        return update
+    }
+
+    var canClearIndex: Bool { canSetIndexRedaction && editingSourceIDs.isEmpty }
+
+    func planIndexClear(_ scope: IndexClearScope) async throws -> IndexClearPlan {
+        guard canClearIndex, let store else { throw IndexClearError.indexingActive }
+        let home = searchHome
+        return try await Task.detached { try store.prepareIndexClear(scope, hostHome: home) }.value
+    }
+
+    func applyIndexClear(_ plan: IndexClearPlan) async throws -> IndexClearResult {
+        guard canClearIndex, let store else { throw IndexClearError.indexingActive }
+        clearingIndex = true
+        defer { clearingIndex = false }
+        let home = searchHome
+        let result = try await Task.detached(priority: .utility) { try store.clearIndex(plan, hostHome: home) }.value
+        invalidateTextPresentation()
+        return result
+    }
+
+    private func invalidateTextPresentation() {
+        sessions = []
+        visibleSessions = []
+        sidebarEnvironments = []
+        sessionIndexLoaded = false
+        searchForText = nil
+        lastSearchScope = nil
+        lastSearchState = .waiting
+        privacyRevision &+= 1
     }
 
     func pageSessionSearch(forward: Bool) {
@@ -560,13 +670,13 @@ final class DashboardModel {
     }
 
     func startIndexing(_ selection: Source) {
-        guard !onboardingRequired, let store, let id = selection.id, !editingSourceIDs.contains(id),
+        guard !onboardingRequired, !changingPrivacy, !clearingIndex, let store, let id = selection.id, !editingSourceIDs.contains(id),
               let source = sources.first(where: { $0.id == id }) else { return }
         sourceIndexing.start(source: source, store: store)
     }
 
     func canRescan(_ source: Source) -> Bool {
-        guard !onboardingRequired, let id = source.id, store != nil, !editingSourceIDs.contains(id) else { return false }
+        guard !onboardingRequired, !changingPrivacy, !clearingIndex, let id = source.id, store != nil, !editingSourceIDs.contains(id) else { return false }
         return sourceIndexing.canRescan(source)
     }
 
@@ -661,7 +771,7 @@ final class DashboardModel {
 
     func saveSourceSettings(_ source: Source, replacement: SourceSettings) async throws {
         guard let store, let id = source.id else { throw SourceSettingsEditFailure.missingSource }
-        guard sourceIndexing.progress[id]?.active != true, editingSourceIDs.insert(id).inserted else {
+        guard !clearingIndex, sourceIndexing.progress[id]?.active != true, editingSourceIDs.insert(id).inserted else {
             throw SourceSettingsCommitFailure.indexing
         }
         defer { editingSourceIDs.remove(id) }
@@ -672,6 +782,9 @@ final class DashboardModel {
                 try store.updateSourceSettings(for: id, from: expected, to: replacement, hostHome: home)
                 return try store.sources()
             }.value
+            if !sessionExclusions.isEmpty && expected.pathMappings != replacement.pathMappings {
+                invalidateTextPresentation()
+            }
         } catch let failure as SourceSettingsEditFailure {
             if let current = try? await Task.detached(operation: { try store.sources() }).value { sources = current }
             throw failure
@@ -679,7 +792,7 @@ final class DashboardModel {
     }
 
     func removeSource(_ source: Source) async throws {
-        guard let store, let id = source.id, !verifying, !onboardingRequired,
+        guard let store, let id = source.id, !verifying, !onboardingRequired, !clearingIndex,
               sources.contains(where: { $0.id == id }), editingSourceIDs.insert(id).inserted
         else { throw SourceSettingsEditFailure.missingSource }
         defer { editingSourceIDs.remove(id) }
@@ -694,7 +807,7 @@ final class DashboardModel {
     }
 
     func grantAccess(to source: Source) async {
-        guard store != nil, let id = source.id, sourceIndexing.progress[id]?.active != true,
+        guard store != nil, let id = source.id, !clearingIndex, sourceIndexing.progress[id]?.active != true,
               editingSourceIDs.insert(id).inserted else { return }
         let panel = Self.sourceFolderPanel()
         panel.directoryURL = source.rootURL
@@ -709,7 +822,7 @@ final class DashboardModel {
     }
 
     func applySourceGrant(to source: Source, selectedRoot: URL, bookmark: Data) async {
-        guard let store, let id = source.id, sourceIndexing.progress[id]?.active != true,
+        guard let store, let id = source.id, !clearingIndex, sourceIndexing.progress[id]?.active != true,
               editingSourceIDs.insert(id).inserted else { return }
         defer { editingSourceIDs.remove(id) }
         do {
@@ -751,6 +864,7 @@ final class DashboardModel {
     }
 }
 
+enum PrivacyPolicyChangeFailure: Error { case busy }
 enum SourceSettingsCommitFailure: Error { case indexing }
 enum StatusSettingsFailure: Error { case unavailable, outOfRange }
 enum ContextWindowSettingsFailure: Error { case invalidRules }
@@ -787,12 +901,13 @@ struct SessionListItem: Identifiable, Sendable {
     let lastActivity: Int64?
     let archived: Bool
 
-    nonisolated init(_ row: IndexedSession) {
+    nonisolated init(_ row: IndexedSession, maskSecrets: Bool = true) {
+        func visible(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
         id = row.id
-        title = row.title.flatMap { $0.isEmpty ? nil : SecretMasker.mask($0) }
-        path = row.workspace.map(SecretMasker.mask)
-        branch = row.branch.map(SecretMasker.mask)
-        environment = SecretMasker.mask(row.environment)
+        title = row.title.flatMap { $0.isEmpty ? nil : visible($0) }
+        path = row.workspace.map(visible)
+        branch = row.branch.map(visible)
+        environment = visible(row.environment)
         indexedEnvironment = row.environment
         status = row.status
         statusReason = row.statusReason
@@ -818,16 +933,19 @@ private struct SidebarLibrarySnapshot: Sendable {
     let agents: [SidebarAgent]
     let environments: [SidebarEnvironment]
 
-    init(_ rows: [IndexedSession]) {
+    init(_ rows: [IndexedSession], maskSecrets: Bool) {
         var counts: [AgentKind: Int] = [:]
         var names: Set<[UInt8]> = []
         sessions = rows.map { row in
             counts[row.id.agent, default: 0] += 1
             names.insert(Array(row.environment.utf8))
-            return SessionListItem(row)
+            return SessionListItem(row, maskSecrets: maskSecrets)
         }
         agents = AgentKind.allCases.compactMap { agent in counts[agent].map { .init(id: agent, count: $0) } }
-        environments = names.map { .init(id: $0, label: SecretMasker.mask(String(decoding: $0, as: UTF8.self))) }
+        environments = names.map {
+            let text = String(decoding: $0, as: UTF8.self)
+            return .init(id: $0, label: maskSecrets ? SecretMasker.mask(text) : text)
+        }
             .sorted { $0.label == $1.label ? $0.id.lexicographicallyPrecedes($1.id) : $0.label < $1.label }
     }
 }
