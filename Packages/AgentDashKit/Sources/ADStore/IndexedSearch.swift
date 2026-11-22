@@ -3,7 +3,7 @@ import Foundation
 import GRDB
 
 /// FR-SR: inputs resolved by the caller, independent of stored event timestamps (UTC ms).
-public struct IndexedSearchScope: Sendable {
+public struct IndexedSearchScope: Equatable, Sendable {
     public let now: Int64
     public let timeZone: TimeZone
     public let hostHome: String?
@@ -32,6 +32,15 @@ public struct IndexedSearchSnapshot: Sendable {
     public let groups: [IndexedSearchGroup]
     public let sessionCount: Int
     public let matchCount: Int
+}
+
+/// A single session's active search match and adjacent keys in transcript order.
+public struct IndexedSearchMatchPosition: Equatable, Sendable {
+    public let eventKey: String
+    public let ordinal: Int
+    public let count: Int
+    public let previousKey: String?
+    public let nextKey: String?
 }
 
 public extension AgentStore {
@@ -66,6 +75,77 @@ public extension AgentStore {
             // Do not surface SQLite errors containing raw query arguments.
             throw IndexedSearchFailure.unavailable
         }
+    }
+
+    /// Resolve a preferred match in a single committed snapshot. If it is no
+    /// longer a hit (or belongs to another session), start at the first one.
+    func searchMatchPosition(_ query: SearchQuery, scope: IndexedSearchScope,
+                             in session: SessionKey, around preferred: String? = nil) throws -> IndexedSearchMatchPosition? {
+        guard !query.groups.isEmpty || !query.filters.isEmpty else { return nil }
+        let queryStatement = try SearchStatement(query, scope: scope)
+        do {
+            return try databasePool.read { db in
+                guard let sessionID = try Int64.fetchOne(db, sql: """
+                    SELECT id FROM sessions WHERE agent=? AND native_id=?
+                    """, arguments: [session.agent.rawValue, session.nativeID]) else { return nil }
+                var statement = queryStatement
+                statement.restrict(to: sessionID)
+                return try Self.matchPosition(statement, sessionID: sessionID, preferred: preferred, db: db)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw IndexedSearchFailure.unavailable
+        }
+    }
+
+    private static func matchPosition(_ statement: SearchStatement, sessionID: Int64, preferred: String?,
+                                      db: Database) throws -> IndexedSearchMatchPosition? {
+        let anchor = try preferred.flatMap { key in
+            try Row.fetchOne(db, sql: "SELECT id,seq FROM events WHERE dedupe_key=? AND session_id=?",
+                             arguments: [key, sessionID]).map(MatchOrder.init)
+        }
+        let rows = try Row.fetchCursor(db, sql: statement.selecting("e.id,e.seq"),
+                                       arguments: .init(statement.arguments))
+        var first: MatchOrder?
+        var second: MatchOrder?
+        var previous: MatchOrder?
+        var next: MatchOrder?
+        var count = 0
+        var earlier = 0
+        var foundAnchor = false
+        // Stream only positions. Sorting or materializing an entire large
+        // transcript would be unnecessary just to find two adjacent hits.
+        try rows.forEach { row in
+            if count.isMultiple(of: 1024) { try Task.checkCancellation() }
+            count += 1
+            let hit = MatchOrder(row)
+            if first.map({ hit < $0 }) ?? true {
+                second = first
+                first = hit
+            } else if second.map({ hit < $0 }) ?? true {
+                second = hit
+            }
+            if let anchor {
+                if hit == anchor {
+                    foundAnchor = true
+                } else if hit < anchor {
+                    earlier += 1
+                    if previous.map({ $0 < hit }) ?? true { previous = hit }
+                } else if next.map({ hit < $0 }) ?? true {
+                    next = hit
+                }
+            }
+        }
+        try Task.checkCancellation()
+        guard let current = foundAnchor ? anchor : first else { return nil }
+        func key(_ order: MatchOrder?) throws -> String? {
+            guard let order else { return nil }
+            return try String.fetchOne(db, sql: "SELECT dedupe_key FROM events WHERE id=?", arguments: [order.id])
+        }
+        guard let eventKey = try key(current) else { throw StoreError.invalidStoredValue }
+        return try .init(eventKey: eventKey, ordinal: foundAnchor ? earlier + 1 : 1, count: count,
+                         previousKey: key(foundAnchor ? previous : nil), nextKey: key(foundAnchor ? next : second))
     }
 
     private static func search(_ statement: SearchStatement, now: Int64,
@@ -113,6 +193,15 @@ public extension AgentStore {
     }
 }
 
+private struct MatchOrder: Comparable {
+    let id: Int64
+    let seq: Int64
+
+    init(_ row: Row) { id = row[0]; seq = row[1] }
+
+    static func < (lhs: Self, rhs: Self) -> Bool { (lhs.seq, lhs.id) < (rhs.seq, rhs.id) }
+}
+
 private struct EventRank {
     let id: Int64
     let sequence: Int64
@@ -154,6 +243,10 @@ private struct SearchStatement {
 
     var sql: String {
         let rank = fts ? "-events_fts.rank" : "0.0"
+        return selecting("e.id,e.session_id,e.seq,e.ts,\(rank) AS score")
+    }
+
+    func selecting(_ columns: String) -> String {
         let projects = project ? "LEFT JOIN projects p ON p.id=s.project_id" : ""
         let base: String
         if fts {
@@ -165,8 +258,12 @@ private struct SearchStatement {
         } else {
             base = "events e"
         }
-        return "SELECT e.id,e.session_id,e.seq,e.ts,\(rank) AS score FROM \(base)"
+        return "SELECT \(columns) FROM \(base)"
             + (predicates.isEmpty ? "" : " WHERE " + predicates.joined(separator: " AND "))
+    }
+
+    mutating func restrict(to sessionID: Int64) {
+        add("e.session_id=?", sessionID.databaseValue)
     }
 
     init(_ query: SearchQuery, scope: IndexedSearchScope) throws {

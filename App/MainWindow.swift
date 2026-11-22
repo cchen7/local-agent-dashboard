@@ -37,11 +37,11 @@ struct MainWindow: View {
                             .navigationSplitViewColumnWidth(min: 300, ideal: preferredListWidth(geometry.size.width), max: 420)
                             .navigationTitle("Sessions")
                     } detail: {
+                        let search = model.selectedTranscriptSearch
                         if let session = model.selectedSession, let store = model.store,
-                           !model.isSearchingSessions || model.selectedMatchKey != nil {
-                            let match = model.selectedMatchKey
-                            SessionTranscript(session: session, store: store, openingMatch: match)
-                                .id(TranscriptSelection(session: session.id, match: match))
+                           !model.isSearchingSessions || search != nil {
+                            SessionTranscript(session: session, store: store, search: search)
+                                .id(TranscriptSelection(session: session.id, query: search?.query))
                         } else {
                             emptyDetail
                         }
@@ -183,7 +183,7 @@ private struct SearchInput: Equatable {
 
 private struct TranscriptSelection: Hashable {
     let session: SessionKey
-    let match: String?
+    let query: String?
 }
 
 struct EmptyPanel: View {
