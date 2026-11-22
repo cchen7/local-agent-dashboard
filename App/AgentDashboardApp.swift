@@ -1,10 +1,16 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
 struct AgentDashboardApp: App {
+    #if AGENTDASH_SYNTHETIC_ONLY
+    @NSApplicationDelegateAdaptor(AppDelegate.syntheticLaunchType) private var appDelegate
+    @Environment(\.openWindow) private var openSyntheticWindow
+    #else
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = DashboardModel()
+    #endif
+    private var model: DashboardModel { appDelegate.model }
 
     var body: some Scene {
         Window("Agent Dashboard", id: "dashboard") {
@@ -23,16 +29,41 @@ struct AgentDashboardApp: App {
             }
         }
 
-        MenuBarExtra("Agent Dashboard", systemImage: "gauge.with.needle") {
+        MenuBarExtra {
             MenuBarPanel(model: model)
                 .id(model.privacyRevision)
+        } label: {
+            DashboardStatusLabel(model: model)
         }
         .menuBarExtraStyle(.window)
+        #if AGENTDASH_SYNTHETIC_ONLY
+        .onChange(of: model.syntheticQALaunchReady, initial: true) { _, ready in
+            if ready { openSyntheticWindow(id: "dashboard") }
+        }
+        #endif
 
         Settings {
             SettingsView(model: model)
                 .background(WindowConfigurationView(identifier: "settingsWindow"))
                 .task { await model.load() }
+        }
+    }
+}
+
+private struct DashboardStatusLabel: View {
+    let model: DashboardModel
+
+    var body: some View {
+        if let tokens = model.menuBarTokensPerMinute {
+            Label("\(tokens.formatted(.number.notation(.compactName))) tok/min", systemImage: "gauge.with.needle")
+                .labelStyle(.titleAndIcon)
+                .accessibilityLabel("Agent Dashboard")
+                .accessibilityValue(Text("\(tokens.formatted()) tok/min"))
+                .accessibilityIdentifier("dashboard.statusItem")
+        } else {
+            Label("Agent Dashboard", systemImage: "gauge.with.needle")
+                .labelStyle(.iconOnly)
+                .accessibilityIdentifier("dashboard.statusItem")
         }
     }
 }
@@ -44,6 +75,7 @@ private struct DashboardWindowContent: View {
 
     var body: some View {
         MainWindow(model: model)
+            .environment(\.dashboardClockFormat, model.clockFormat)
             .frame(minWidth: contentMinimum.width, minHeight: contentMinimum.height)
             .background(WindowConfigurationView(identifier: "dashboardWindow", size: SyntheticLaunchOptions.current?.windowSize,
                                                 minimumOuterSize: CGSize(width: 960, height: 600),
@@ -61,10 +93,33 @@ private struct DashboardWindowContent: View {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    #if AGENTDASH_SYNTHETIC_ONLY
+    static var syntheticLaunchType: AppDelegate.Type {
+        // Evaluate the argument check before SwiftUI creates the delegate or model.
+        guard CommandLine.arguments.dropFirst().contains("--synthetic") else {
+            let message = "AgentDashboard SyntheticQA refuses to start without --synthetic."
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            Darwin.exit(EX_USAGE)
+        }
+        return AppDelegate.self
+    }
+    #endif
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         if let appearance = SyntheticLaunchOptions.current?.appearance {
             NSApp.appearance = NSAppearance(named: appearance)
         }
+    }
+
+    let model = DashboardModel()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        #if AGENTDASH_SYNTHETIC_ONLY
+        DispatchQueue.main.async {
+            self.model.syntheticQALaunchReady = true
+        }
+        #endif
+        if model.showsMenuBarThroughput { Task { await model.load() } }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

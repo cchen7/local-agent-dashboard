@@ -1,4 +1,6 @@
+import AppKit
 import ADCore
+import ADInsights
 import ADPrivacy
 import ADSearch
 import ADStore
@@ -9,6 +11,13 @@ struct MainWindow: View {
     @Environment(\.openSettings) private var openSettings
     @State private var searchToSave: SearchToSave?
     @State private var removalFailed = false
+    @State private var sessionGrouping: SessionProjectGrouping?
+    @State private var groupingFor: SessionGroupingInput?
+
+    private var groupingInput: SessionGroupingInput {
+        .init(enabled: model.groupSessionsByProject, ready: model.store != nil,
+              hostHome: model.projectPathHome, privacyRevision: model.privacyRevision)
+    }
 
     private struct SearchToSave: Identifiable {
         let id = UUID()
@@ -69,7 +78,17 @@ struct MainWindow: View {
                         }
                     }
                 }
-                .searchable(text: $model.sessionSearchText, prompt: Text("Search Sessions"))
+                .searchable(text: Binding(get: { model.searchField.text }, set: model.editSearchText),
+                            tokens: Binding(get: { model.searchField.tokens }, set: model.editSearchTokens),
+                            prompt: Text("Search Sessions")) { token in
+                    Text(verbatim: model.displayText(token.spelling))
+                        .accessibilityIdentifier("search.filter.token.\(token.id)")
+                }
+                .onSubmit(of: .search) {
+                    guard !hasMarkedSearchText else { return }
+                    model.commitSearchFilters()
+                }
+                .task(id: groupingInput) { [request = groupingInput] in await observeGrouping(request) }
                 .task(id: SearchInput(text: model.sessionSearchText, offset: model.sessionSearchOffset,
                                        order: model.sessionSearchOrder,
                                        filter: model.libraryFilter,
@@ -99,15 +118,6 @@ struct MainWindow: View {
         .toolbar {
             if model.page == .sessions, model.isSearchingSessions {
                 ToolbarItem {
-                    Picker("Search Sort", selection: $model.sessionSearchOrder) {
-                        Text("Relevance").tag(SessionSearchOrder.relevance)
-                        Text("Most Recent").tag(SessionSearchOrder.recent)
-                        Text("Token Volume").tag(SessionSearchOrder.tokens)
-                    }
-                    .pickerStyle(.menu)
-                    .accessibilityIdentifier("search.sort")
-                }
-                ToolbarItem {
                     Button("Save Search…", systemImage: "bookmark") {
                         searchToSave = .init(query: model.sessionSearchText, order: model.sessionSearchOrder, filter: model.libraryFilter)
                     }
@@ -128,12 +138,48 @@ struct MainWindow: View {
         .alert("Could not remove the smart group.", isPresented: $removalFailed) {}
     }
 
+    private var hasMarkedSearchText: Bool {
+        (NSApp.keyWindow?.firstResponder as? any NSTextInputClient)?.hasMarkedText() ?? false
+    }
+
     private var canSaveSearch: Bool {
         if case .results = model.sessionSearchState { return model.store != nil }
         return false
     }
 
-    @ViewBuilder private var sessionColumn: some View {
+    private var searchFilterMenu: some View {
+        Menu {
+            ForEach(model.searchField.tokens) { token in
+                Button("Remove \(model.displayText(token.spelling))", systemImage: "xmark.circle") {
+                    guard !hasMarkedSearchText else { return }
+                    model.removeSearchFilter(token)
+                }
+                .accessibilityIdentifier("search.filter.remove.\(token.id)")
+            }
+        } label: {
+            Label("Search Filters", systemImage: "line.3.horizontal.decrease.circle")
+        }
+        .controlSize(.small)
+        .accessibilityIdentifier("search.filters.menu")
+    }
+
+    private var sessionColumn: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Toggle("Group by Project", isOn: $model.groupSessionsByProject)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("sessions.groupByProject")
+                Spacer(minLength: 0)
+                if !model.searchField.tokens.isEmpty { searchFilterMenu }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            Divider()
+            sessionColumnContent
+        }
+    }
+
+    @ViewBuilder private var sessionColumnContent: some View {
         if model.isSearchingSessions {
             switch model.sessionSearchState {
             case .waiting:
@@ -159,9 +205,21 @@ struct MainWindow: View {
         } else {
             let sessions = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0) })
             VStack(alignment: .leading, spacing: 0) {
-                Text("Matches: \(results.matchCount) · Sessions: \(results.sessionCount)")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
+                HStack(spacing: 6) {
+                    Text("Matches: \(results.matchCount) · Sessions: \(results.sessionCount)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Picker("Search Sort", selection: $model.sessionSearchOrder) {
+                        Text("Relevance").tag(SessionSearchOrder.relevance)
+                        Text("Most Recent").tag(SessionSearchOrder.recent)
+                        Text("Token Volume").tag(SessionSearchOrder.tokens)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("search.sort")
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
                 if results.sessionCount > DashboardModel.sessionSearchPageSize {
                     HStack(spacing: 8) {
                         Text("Sessions \(model.sessionSearchOffset + 1)–\(model.sessionSearchOffset + results.hits.count)")
@@ -179,12 +237,14 @@ struct MainWindow: View {
                     .padding(.horizontal, 12).padding(.bottom, 8)
                 }
                 List(selection: $model.selectedSessionID) {
-                    ForEach(results.hits) { hit in
+                    rows(results.hits.filter { sessions[$0.id] != nil }) { hit, name in
                         if let session = sessions[hit.id] {
-                            SessionListCell(session: session, snippet: hit.snippet).tag(hit.id)
+                            SessionListCell(session: session, snippet: hit.snippet, projectName: name,
+                                            currency: model.pricing.currency).tag(hit.id)
                         }
                     }
                 }
+                .environment(\.defaultMinListRowHeight, 72)
             }
             .accessibilityIdentifier("sessions.searchResults")
         }
@@ -206,11 +266,63 @@ struct MainWindow: View {
                 .accessibilityIdentifier("empty.sessionFilter")
         } else {
             List(selection: $model.selectedSessionID) {
-                ForEach(model.visibleSessions) { session in
-                    SessionListCell(session: session).tag(session.id)
+                rows(model.visibleSessions) { session, name in
+                    SessionListCell(session: session, projectName: name, currency: model.pricing.currency).tag(session.id)
                 }
             }
+            // A newly indexed row can enter an already visible List before the
+            // outline has measured its content. Reserve the standard row height.
+            .environment(\.defaultMinListRowHeight, 72)
             .accessibilityIdentifier("sessions.list")
+        }
+    }
+
+    @ViewBuilder private func rows<Item: Identifiable, Row: View>(_ items: [Item], @ViewBuilder row: @escaping (Item, String?) -> Row)
+    -> some View where Item.ID == SessionKey {
+        if model.groupSessionsByProject, groupingFor == groupingInput, let sessionGrouping {
+            let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+            ForEach(sessionGrouping.sections(for: items.map(\.id))) { section in
+                Section {
+                    ForEach(section.sessions, id: \.self) { id in
+                        if let item = byID[id] { row(item, section.group.name) }
+                    }
+                } header: {
+                    HStack(spacing: 6) {
+                        if let title = section.group.name { Text(verbatim: title) }
+                        else if section.id == .ungrouped { Text("Ungrouped") }
+                        else { Text("Project") }
+                        if let context = section.group.context {
+                            Text(verbatim: context).fontWeight(.regular).truncationMode(.middle)
+                        }
+                    }
+                    .lineLimit(1)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("sessions.project.section")
+                }
+            }
+        } else {
+            ForEach(items) { item in row(item, nil) }
+        }
+    }
+
+    private func observeGrouping(_ input: SessionGroupingInput) async {
+        guard !Task.isCancelled, groupingInput == input else { return }
+        sessionGrouping = nil
+        groupingFor = nil
+        guard input.enabled, let store = model.store else { return }
+        let masking = model.maskSecrets
+        do {
+            for try await projects in store.indexedProjectUpdates(hostHome: input.hostHome) {
+                let grouping = await Task.detached {
+                    SessionProjectGrouping(projects: projects, maskSecrets: masking)
+                }.value
+                guard !Task.isCancelled, groupingInput == input else { return }
+                sessionGrouping = grouping
+                groupingFor = input
+            }
+        } catch {
+            // Fall back to the flat list instead of losing available sessions.
+            if !Task.isCancelled, groupingInput == input { sessionGrouping = nil }
         }
     }
 
@@ -284,6 +396,7 @@ struct MainWindow: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("search.smartGroup")
                         .contextMenu {
                             Button("Remove Smart Group", role: .destructive) {
                                 Task {
@@ -377,6 +490,13 @@ private struct SmartGroupSaveSheet: View {
     }
 }
 
+private struct SessionGroupingInput: Equatable, Sendable {
+    let enabled: Bool
+    let ready: Bool
+    let hostHome: String?
+    let privacyRevision: UInt64
+}
+
 private struct SearchInput: Equatable {
     let text: String
     let offset: Int
@@ -384,6 +504,12 @@ private struct SearchInput: Equatable {
     let filter: SessionLibraryFilter?
     let ready: Bool
     let privacyRevision: UInt64
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.offset == rhs.offset && lhs.order == rhs.order && lhs.filter == rhs.filter &&
+            lhs.ready == rhs.ready && lhs.privacyRevision == rhs.privacyRevision &&
+            lhs.text.utf8.elementsEqual(rhs.text.utf8)
+    }
 }
 
 private struct LibraryInput: Equatable {

@@ -146,6 +146,7 @@ struct SessionOverview: View {
 }
 
 private struct OverviewRowView: View {
+    @DashboardClock private var clock
     let row: SessionOverviewDisplay.Row
 
     var body: some View {
@@ -155,7 +156,7 @@ private struct OverviewRowView: View {
                 if let detail = row.detail { Text(verbatim: detail).lineLimit(1) }
                 Spacer(minLength: 4)
                 if row.timestamp > 0 {
-                    Text(Date(timeIntervalSince1970: Double(row.timestamp) / 1000), style: .time)
+                    Text(verbatim: Date(timeIntervalSince1970: Double(row.timestamp) / 1000).formatted(clock.hour().minute()))
                 }
             }
             .foregroundStyle(.secondary)

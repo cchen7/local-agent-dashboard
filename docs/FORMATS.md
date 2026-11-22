@@ -286,6 +286,15 @@ resume copy can backfill a missing ID on a matching assistant record UUID
 for the same owner, even if the original file is no longer present. The
 backfill leaves the stored text, order, event keys and token accounting intact.
 
+For inherited transcript display, parser v11 records references only from
+complete Claude primary rows with a recorded owner different from the file UUID
+and a valid producer event UUID. The destination's physical record/block order
+is separate from the original's event sequence. In an ordinary sanitized local
+primary file, 680 of 1,616 rows had both valid UUID fields. The bounded
+52-file sample did not contain a matched resume copy. Copy cases use synthetic
+fixtures for the SPEC §5.4 contract. A filename, parent hint or timestamp alone
+does not identify copied content, and subagent linkage is not inheritance.
+
 Codex context samples use cache-inclusive `last_token_usage.input_tokens`
 and `info.model_context_window` for the sampled model. A subsequent
 different model starts with no inherited capacity. Claude context samples

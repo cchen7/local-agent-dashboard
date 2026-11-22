@@ -81,6 +81,8 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
 
         func fileEventID() -> String { "file:\(file.sourceID):\(file.relativePath):\(frame.sequence)" }
         let eventID = Self.id(row["uuid"]) ?? fileEventID()
+        let confirmsCopy = ownership == .inherited && !frame.isTruncated &&
+            Self.id(row["uuid"]).flatMap(UUID.init(uuidString:)) != nil
         let assistantCounts = !frame.isTruncated && type == "assistant"
             ? (message["usage"] as? [String: Any]).flatMap(Self.counts) : nil
         let contextInput = ownership != .inherited ? assistantCounts.flatMap(Self.contextInput) : nil
@@ -101,6 +103,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             .event(.init(session: owner, sequence: frame.sequence, timestamp: time ?? 0, kind: kind,
                          toolName: tool, text: body, metadataJSON: metadata,
                          dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership,
+                         inheritedLocation: confirmsCopy && kind != .unknown ? .init(child: key, block: index) : nil,
                          toolOutput: toolOutput, toolInput: toolInput, toolAction: toolAction))
         }
 

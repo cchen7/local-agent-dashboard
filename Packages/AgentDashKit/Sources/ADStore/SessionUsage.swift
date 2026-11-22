@@ -1,10 +1,30 @@
 import ADCore
 import GRDB
 
-public struct IndexedSessionUsage: Equatable, Sendable {
-    public let turns: Int
+public struct IndexedSessionUsageSummary: Equatable, Sendable {
     public let totals: UsageTotals
     public let hasApproximateQuote: Bool
+
+    init(_ row: Row?) {
+        guard let row else {
+            totals = .empty
+            hasApproximateQuote = false
+            return
+        }
+        let counts = TokenCounts(inputFresh: row["input_fresh"], cacheRead: row["cache_read"],
+                                cacheWrite: row["cache_write"], cacheWrite1h: row["cache_write_1h"],
+                                output: row["output"], reasoning: row["reasoning"])
+        totals = .init(counts: counts, costMicroUSD: row["cost_micro_usd"],
+                       unpricedTokens: row["unpriced_tokens"], records: row["records"])
+        hasApproximateQuote = (row["approximate_records"] as Int) > 0
+    }
+}
+
+public struct IndexedSessionUsage: Equatable, Sendable {
+    public let turns: Int
+    public let summary: IndexedSessionUsageSummary
+    public var totals: UsageTotals { summary.totals }
+    public var hasApproximateQuote: Bool { summary.hasApproximateQuote }
 }
 
 public struct SessionTokenBucket: Identifiable, Equatable, Sendable {
@@ -24,22 +44,8 @@ public extension AgentStore {
             let turns = try Int.fetchOne(db, sql: """
                 SELECT count(DISTINCT seq) FROM events WHERE session_id=? AND kind='user'
                 """, arguments: [id]) ?? 0
-            guard let row = try Row.fetchOne(db, sql: """
-                SELECT coalesce(sum(input_fresh),0) AS fresh,coalesce(sum(cache_read),0) AS reads,
-                       coalesce(sum(cache_write),0) AS writes,coalesce(sum(cache_write_1h),0) AS hour_writes,
-                       coalesce(sum(output),0) AS output,coalesce(sum(reasoning),0) AS reasoning,
-                       coalesce(sum(CASE WHEN price_status<>'unpriced' THEN cost_micro_usd ELSE 0 END),0) AS cost,
-                       coalesce(sum(CASE WHEN price_status='unpriced'
-                           THEN input_fresh+cache_read+cache_write+cache_write_1h+output ELSE 0 END),0) AS unpriced,
-                       count(*) AS records,coalesce(max(price_status='approx'),0) AS approximate
-                FROM token_events WHERE session_id=?
-                """, arguments: [id]) else { return nil }
-            let counts = TokenCounts(inputFresh: row["fresh"], cacheRead: row["reads"], cacheWrite: row["writes"],
-                                     cacheWrite1h: row["hour_writes"], output: row["output"], reasoning: row["reasoning"])
-            return IndexedSessionUsage(turns: turns,
-                                       totals: .init(counts: counts, costMicroUSD: row["cost"],
-                                                     unpricedTokens: row["unpriced"], records: row["records"]),
-                                       hasApproximateQuote: row["approximate"])
+            let row = try Row.fetchOne(db, sql: "SELECT * FROM session_usage_rollup WHERE session_id=?", arguments: [id])
+            return IndexedSessionUsage(turns: turns, summary: .init(row))
         }
         .removeDuplicates()
         .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))

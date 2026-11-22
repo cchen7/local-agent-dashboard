@@ -6,6 +6,7 @@ import Charts
 import SwiftUI
 
 struct UsageView: View {
+    @DashboardClock private var clock
     @Bindable var model: TokenUsageModel
     let editRedlines: () -> Void
     let openPricing: () -> Void
@@ -84,13 +85,14 @@ struct UsageView: View {
                     DatePicker("From", selection: $model.usageCustomStart, displayedComponents: [.date, .hourAndMinute])
                     DatePicker("To", selection: $model.usageCustomEnd, displayedComponents: [.date, .hourAndMinute])
                 }
+                .environment(\.locale, clock.locale)
             }
         }
     }
 
     private func rangeLabel(_ snapshot: UsagePageSnapshot) -> some View {
         let range = snapshot.report.window.range
-        return Text("Summary window: \(usageDate(range.lowerBound), format: .dateTime.month().day().hour().minute()) – \(usageDate(range.upperBound), format: .dateTime.month().day().hour().minute())")
+        return Text("Summary window: \(usageDate(range.lowerBound).formatted(clock.month().day().hour().minute())) – \(usageDate(range.upperBound).formatted(clock.month().day().hour().minute()))")
             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
     }
 
@@ -139,7 +141,7 @@ struct UsageView: View {
                     Text("\(peak.value.formatted()) tok/min")
                 }
                 if showCaptions {
-                    Text(usageDate(peak.timestamp), format: .dateTime.hour().minute()).font(.caption).foregroundStyle(.secondary)
+                    Text(verbatim: usageDate(peak.timestamp).formatted(clock.hour().minute())).font(.caption).foregroundStyle(.secondary)
                 }
             } else if metric == .cost { Text("No priced call-level usage") }
             else { Text("No call-level usage") }
@@ -289,7 +291,7 @@ struct UsageView: View {
         }
         if columns.showPeakTime {
             cell(Width.peakTime) {
-                if let peak { Text(usageDate(peak.timestamp), format: .dateTime.hour().minute()) }
+                if let peak { Text(verbatim: usageDate(peak.timestamp).formatted(clock.hour().minute())) }
                 else { Text("—") }
             }
         }
@@ -402,6 +404,7 @@ extension PriceDisplayCurrency {
 }
 
 struct UsageHeadroomReadout: View {
+    @DashboardClock private var clock
     let model: TokenUsageModel
     let agent: AgentKind?
     let compact: Bool
@@ -453,7 +456,7 @@ struct UsageHeadroomReadout: View {
                                 Text(window.window == .primary ? "Primary" : "Secondary")
                                 Text("\((window.usedPercent / 100).formatted(.percent.precision(.fractionLength(0)))) used")
                                 if let reset = window.resetAt {
-                                    Text("Reset \(usageDate(reset), format: .dateTime.month().day().hour().minute())")
+                                    Text("Reset \(usageDate(reset).formatted(clock.month().day().hour().minute()))")
                                 }
                             }
                             .font(.caption2).foregroundStyle(.secondary)
@@ -507,6 +510,7 @@ private struct UsageTile<Value: View>: View {
 }
 
 struct UsageChart: View {
+    @DashboardClock private var clock
     let data: UsageChartSnapshot
     let plot: UsagePlot
     let request: UsageNavigationRequest
@@ -694,6 +698,7 @@ struct UsageChart: View {
             }
         }
         .onPreferenceChange(PeakOverflowKey.self) { peakOverflow = $0 }
+        .environment(\.locale, clock.locale)
     }
 
     private struct PeakOverflowKey: PreferenceKey {
@@ -816,7 +821,7 @@ struct UsageChart: View {
         let color = peak.agent?.badge.color ?? Color.primary
         return Group {
             if peak.agent == nil {
-                Text("Total peak \(axisValue(peak.value)) @ \(plottedDate(peak.timestamp), format: .dateTime.hour().minute())")
+                Text("Total peak \(axisValue(peak.value)) @ \(plottedDate(peak.timestamp).formatted(clock.hour().minute()))")
             }
             else { Text(axisValue(peak.value)) }
         }
@@ -835,7 +840,7 @@ struct UsageChart: View {
             if let agent = peak.agent { Text(agent.title).foregroundStyle(agent.badge.color) }
             else { Text("Total peak") }
             Text(axisValue(peak.value))
-            Text(plottedDate(peak.timestamp), format: .dateTime.month().day().hour().minute())
+            Text(verbatim: plottedDate(peak.timestamp).formatted(clock.month().day().hour().minute()))
         }
         .accessibilityElement(children: .combine)
     }
@@ -860,7 +865,7 @@ struct UsageChart: View {
 
     private func nowReadout(_ recent: UsageTotals) -> some View {
         HStack(spacing: 8) {
-            Text("NOW \(usageDate(data.window.range.upperBound), format: .dateTime.hour().minute())")
+            Text("NOW \(usageDate(data.window.range.upperBound).formatted(clock.hour().minute()))")
             if request.metric == .cost {
                 if recent.hasPricedUsage {
                     Text("\(currency.formattedMicroUSD(Decimal(recent.costMicroUSD) * 60)) / h")
@@ -879,7 +884,7 @@ struct UsageChart: View {
 
     private func hoverValues(_ time: Int64) -> some View {
         HStack(spacing: 8) {
-            Text(usageDate(time), format: .dateTime.month().day().hour().minute())
+            Text(verbatim: usageDate(time).formatted(clock.month().day().hour().minute()))
             ForEach(plot.samples.filter { $0.timestamp == time }) { sample in
                 if let agent = sample.agent { Text(agent.title).foregroundStyle(agent.badge.color) }
                 else { Text("All agents") }

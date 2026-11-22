@@ -11,6 +11,8 @@ import SwiftUI
 struct SessionListCell: View {
     let session: SessionListItem
     var snippet: [SearchSnippetPart] = []
+    var projectName: String? = nil
+    var currency: PriceDisplayCurrency = .usd
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
@@ -24,8 +26,7 @@ struct SessionListCell: View {
                             .font(.caption).foregroundStyle(.secondary).fixedSize()
                     }
                 }
-                if let path = session.path {
-                    let project = path.split(separator: "/").last.map(String.init) ?? path
+                if let project = projectName ?? session.path.map({ $0.split(separator: "/").last.map(String.init) ?? $0 }) {
                     Text(verbatim: [project, session.branch].compactMap { $0 }.joined(separator: " · "))
                         .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -33,17 +34,72 @@ struct SessionListCell: View {
                     Text(highlightedSnippet(snippet))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
-                HStack(spacing: 8) {
-                    SessionStatusPill(status: session.status, reason: session.statusReason)
-                    if session.archived {
-                        Image(systemName: "archivebox")
-                            .foregroundStyle(.secondary).accessibilityLabel("Archived")
+                if let usage = session.usage {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            status.fixedSize()
+                            Spacer(minLength: 4)
+                            usageLabel(usage).fixedSize()
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            status
+                            usageLabel(usage)
+                        }
                     }
-                }
+                } else { status }
             }
         }
         .padding(.vertical, 5)
         .contentShape(Rectangle())
+    }
+
+    private var status: some View {
+        HStack(spacing: 8) {
+            SessionStatusPill(status: session.status, reason: session.statusReason)
+            if session.archived {
+                Image(systemName: "archivebox")
+                    .foregroundStyle(.secondary).accessibilityLabel("Archived")
+            }
+        }
+    }
+
+    private func usageLabel(_ summary: IndexedSessionUsageSummary) -> some View {
+        let totals = summary.totals
+        let tokens = totals.counts.total
+        let cost = currency.formattedMicroUSD(Decimal(totals.costMicroUSD))
+        let markedCost = summary.hasApproximateQuote ? "≈" + cost : cost
+        let tokenLabel = String(localized: "\(tokens.formatted()) tokens")
+        let costLabel: String? = totals.hasPricedUsage
+            ? (totals.unpricedTokens > 0 ? String(localized: "Partial estimate: \(cost)")
+                                        : String(localized: "List-price estimate: \(cost)"))
+            : (totals.unpricedTokens > 0 ? String(localized: "Unpriced") : nil)
+        let approximateLabel = summary.hasApproximateQuote && totals.hasPricedUsage
+            ? String(localized: "Includes approximate quotes") : nil
+        let description = totals.records == 0 ? String(localized: "No token usage yet")
+            : [tokenLabel, costLabel, approximateLabel].compactMap { $0 }.joined(separator: " · ")
+        return HStack(spacing: 4) {
+            if totals.records == 0 {
+                Text(verbatim: "—")
+            } else {
+                Text(tokens.formatted(.number.notation(.compactName)))
+                if totals.hasPricedUsage {
+                    Text(verbatim: "·")
+                    if totals.unpricedTokens > 0 { Text("Partial estimate: \(markedCost)") }
+                    else { Text(verbatim: markedCost) }
+                } else if totals.unpricedTokens > 0 {
+                    Text(verbatim: "·")
+                    Text("Unpriced")
+                }
+            }
+        }
+        .font(.caption)
+        .monospacedDigit()
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: description))
+        .accessibilityIdentifier("session.list.usage")
+        .help(Text(verbatim: description))
     }
 }
 
@@ -61,6 +117,7 @@ private func highlightedSnippet(_ parts: [SearchSnippetPart]) -> AttributedStrin
 }
 
 struct SessionTranscript: View {
+    @DashboardClock private var clock
     @State private var section = DetailSection.transcript
     @Environment(\.sessionOverviewOptions) private var overviewOptions
     @Environment(\.secretMaskingEnabled) private var maskSessionActivity
@@ -78,11 +135,13 @@ struct SessionTranscript: View {
     private var running: Bool { session.status == .running && !session.archived }
     @State private var indexedContext: IndexedSessionContext?
     @State private var usage: IndexedSessionUsage?
+    @State private var inherited: InheritedTranscriptSummary?
     @State private var request: TranscriptPageRequest
     @State private var loading = true
     @State private var failed = false
     @State private var page: TranscriptPage?
     @State private var viewRevision = 0
+    @State private var transcriptPosition = ScrollPosition(idType: String.self)
     @State private var preferredMatchKey: String?
     @State private var match: IndexedSearchMatchPosition?
     @State private var resolvedLookup: MatchLookup?
@@ -177,30 +236,28 @@ struct SessionTranscript: View {
                            message: "Select the session again to retry.")
             } else if loading {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let page, !page.events.isEmpty {
-                ScrollViewReader { scroll in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(page.events, id: \.dedupeKey) { event in
-                                let selectedKey = highlightedMatchKey
-                                let matched = selectedKey.map(page.rowKey(forEvent:)) == event.dedupeKey
-                                TranscriptEventRow(event: event, result: page.toolResults[event.dedupeKey],
-                                                   matchKey: matched ? selectedKey : nil, store: store)
-                                    .padding(matched ? 5 : 0)
-                                    .background(matched ? Color.accentColor.opacity(0.15) : Color.clear,
-                                                in: RoundedRectangle(cornerRadius: 6))
-                                    .id(event.dedupeKey)
-                            }
+            } else if let page, !page.events.isEmpty || inherited != nil {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if let inherited, search == nil {
+                            InheritedTranscriptSection(child: session.id, summary: inherited, store: store)
                         }
-                        .padding(.horizontal, 18).padding(.vertical, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(page.events, id: \.dedupeKey) { event in
+                            let selectedKey = highlightedMatchKey
+                            let matched = selectedKey.map(page.rowKey(forEvent:)) == event.dedupeKey
+                            TranscriptEventRow(event: event, result: page.toolResults[event.dedupeKey],
+                                               matchKey: matched ? selectedKey : nil, store: store)
+                                .padding(matched ? 5 : 0)
+                                .background(matched ? Color.accentColor.opacity(0.15) : Color.clear,
+                                            in: RoundedRectangle(cornerRadius: 6))
+                                .id(event.dedupeKey)
+                        }
                     }
-                    .task(id: viewRevision) {
-                        guard let target = scrollTarget(in: page) else { return }
-                        await Task.yield()
-                        if !Task.isCancelled { scroll.scrollTo(target, anchor: .top) }
-                    }
+                    .scrollTargetLayout()
+                    .padding(.horizontal, 18).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollPosition($transcriptPosition, anchor: .top)
                 .id(viewRevision)
                 .accessibilityIdentifier("session.transcript.messages")
             } else {
@@ -213,6 +270,7 @@ struct SessionTranscript: View {
         .task(id: running) { await observeActivity() }
         .task(id: session.id) { await observeContext() }
         .task(id: session.id) { await observeUsage() }
+        .task(id: session.id) { await observeInheritedTranscript() }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.transcript")
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -244,7 +302,8 @@ struct SessionTranscript: View {
     private var startFact: some View {
         sessionFact("Started") {
             if let time = session.startedAt {
-                Text(sessionDate(time), format: .dateTime.month(.abbreviated).day().hour().minute())
+                Text(verbatim: sessionDate(time).formatted(clock.month(.abbreviated).day().hour().minute()))
+                    .accessibilityIdentifier("session.started.clock")
             } else { Text(verbatim: "—") }
         }
     }
@@ -291,6 +350,18 @@ struct SessionTranscript: View {
 
     private func breakdown(_ counts: TokenCounts) -> Text {
         Text("Fresh: \(counts.inputFresh.formatted()) · Cache read: \(counts.cacheRead.formatted()) · Cache write: \((counts.cacheWrite + counts.cacheWrite1h).formatted()) · Output: \(counts.output.formatted())")
+    }
+
+    private func observeInheritedTranscript() async {
+        guard session.id.agent == .claudeCode, search == nil else { return }
+        do {
+            for try await summary in store.inheritedTranscriptSummary(in: session.id) {
+                guard !Task.isCancelled else { return }
+                inherited = summary
+            }
+        } catch {
+            if !Task.isCancelled { inherited = nil }
+        }
     }
 
     private func observeUsage() async {
@@ -401,6 +472,7 @@ struct SessionTranscript: View {
     private func seek(_ target: TranscriptPageRequest) {
         loading = true
         page = nil
+        transcriptPosition = ScrollPosition(idType: String.self)
         viewRevision += 1
         request = target
     }
@@ -429,8 +501,16 @@ struct SessionTranscript: View {
                     seek(.first)
                     return
                 }
-                if let previous = page, let snapshot, scrollTarget(in: previous) != scrollTarget(in: snapshot) {
-                    viewRevision += 1
+                if let snapshot {
+                    let target = scrollTarget(in: snapshot)
+                    let previousTarget = page.flatMap { scrollTarget(in: $0) }
+                    if page == nil || previousTarget != target {
+                        // Bind a target before the scroll view lays out this page.
+                        // Keep a user's scroll position on unrelated index updates.
+                        if let target { transcriptPosition.scrollTo(id: target, anchor: .top) }
+                        else { transcriptPosition.scrollTo(edge: .top) }
+                        if page != nil { viewRevision += 1 }
+                    }
                 }
                 page = snapshot
                 loading = false
@@ -448,7 +528,92 @@ struct SessionTranscript: View {
     }
 }
 
+private struct InheritedTranscriptSection: View {
+    let child: SessionKey
+    let summary: InheritedTranscriptSummary
+    let store: AgentStore
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
+    @State private var expanded = false
+    @State private var request: InheritedTranscriptRequest = .first
+    @State private var page: InheritedTranscriptPage?
+    @State private var failed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                expanded.toggle()
+                if !expanded { request = .first; page = nil }
+            } label: {
+                HStack {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    if let title = summary.originalTitle, !title.isEmpty {
+                        Text("Continued from \(maskSecrets ? SecretMasker.mask(title) : title)")
+                            .lineLimit(2)
+                    } else {
+                        Text("Inherited conversation")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .font(.callout.weight(.medium))
+            .accessibilityIdentifier("transcript.inherited.toggle")
+            .accessibilityValue(expanded ? Text("Expanded") : Text("Collapsed"))
+
+            if expanded {
+                if failed {
+                    Text("Could not read the transcript").foregroundStyle(.secondary)
+                } else if let page {
+                    if page.older != nil || page.newer != nil {
+                        HStack {
+                            Button("Earlier inherited messages") { if let cursor = page.older { request = .before(cursor) } }
+                                .disabled(page.older == nil)
+                            Button("Later inherited messages") { if let cursor = page.newer { request = .after(cursor) } }
+                                .disabled(page.newer == nil)
+                        }
+                        .controlSize(.small)
+                    }
+                    ForEach(page.events, id: \.dedupeKey) { event in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(event.kind.transcriptLabel).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                            if let name = event.toolName { Text(verbatim: maskSecrets ? SecretMasker.mask(name) : name) }
+                            // The verified copy includes the stored preview only;
+                            // no actions can open the original session's raw tool records here.
+                            if let text = event.text { ProtectedTranscriptText(raw: text) }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(9)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 7))
+        .task(id: expanded ? request : nil) {
+            guard expanded else { return }
+            await observe(request)
+        }
+    }
+
+    private func observe(_ requested: InheritedTranscriptRequest) async {
+        failed = false
+        page = nil
+        do {
+            for try await result in try store.inheritedTranscriptPages(in: child, request: requested) {
+                guard !Task.isCancelled, expanded, request == requested else { return }
+                page = result
+            }
+        } catch let error as TranscriptPagingError where error == .staleCursor && requested != .first {
+            if !Task.isCancelled, request == requested { request = .first }
+        } catch {
+            if !Task.isCancelled, request == requested { failed = true }
+        }
+    }
+}
+
 private struct TranscriptEventRow: View {
+    @DashboardClock private var clock
     let event: EventRecord
     let result: EventRecord?
     let matchKey: String?
@@ -476,7 +641,7 @@ private struct TranscriptEventRow: View {
                     } else {
                         Text(event.kind.transcriptLabel).foregroundStyle(.secondary)
                     }
-                    Text(sessionDate(event.timestamp), format: .dateTime.hour().minute()).foregroundStyle(.tertiary)
+                    Text(verbatim: sessionDate(event.timestamp).formatted(clock.hour().minute())).foregroundStyle(.tertiary)
                 }
                 .font(.caption.weight(.medium))
                 if let text = event.text {

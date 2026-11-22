@@ -19,12 +19,27 @@ struct SettingsView: View {
     var body: some View {
         TabView(selection: $model.settingsPage) {
             Form {
-                Text("Zero network. Read-only sources. Everything stays on this Mac.")
-                    .accessibilityIdentifier("settingsPrivacyPromise")
-                Text("Start indexing in Settings → Sources.").foregroundStyle(.secondary)
-                LaunchAtLoginControls()
+                Section {
+                    Text("Zero network. Read-only sources. Everything stays on this Mac.")
+                        .accessibilityIdentifier("settingsPrivacyPromise")
+                    Text("Start indexing in Settings → Sources.").foregroundStyle(.secondary)
+                    LaunchAtLoginControls()
+                }
+                Section("Display") {
+                    Picker("Time Format", selection: Binding(get: { model.clockFormat }, set: model.setClockFormat)) {
+                        ForEach(DashboardClockFormat.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("settings.general.clock")
+                    Toggle("Show token rate in the menu bar", isOn: Binding(get: { model.showsMenuBarThroughput },
+                                                                              set: model.setShowsMenuBarThroughput))
+                        .toggleStyle(.switch)
+                        .accessibilityIdentifier("settings.general.menuRate")
+                }
             }
-            .padding()
+            .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
             .tag(SettingsPage.general)
 
@@ -132,12 +147,9 @@ struct SettingsView: View {
                 .tabItem { Label("Pricing", systemImage: "tag") }
                 .tag(SettingsPage.pricing)
 
-            VStack(spacing: 12) {
-                Text("Agent Dashboard").font(.title)
-                Text("Fully local. No network permission.")
-            }
-            .tabItem { Label("About", systemImage: "info.circle") }
-            .tag(SettingsPage.about)
+            AboutSettingsPane(isSelected: model.settingsPage == .about)
+                .tabItem { Label("About", systemImage: "info.circle") }
+                .tag(SettingsPage.about)
         }
         .frame(width: 680, height: 480)
     }

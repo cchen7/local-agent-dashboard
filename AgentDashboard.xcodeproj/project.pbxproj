@@ -4,6 +4,10 @@
 	classes = {};
 	objectVersion = 56;
 	objects = {
+		AD5400000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralPresentation.swift; sourceTree = "<group>"; };
+		AD5400000000000000000002 = { isa = PBXBuildFile; fileRef = AD5400000000000000000001; };
+		AD5300000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSettings.swift; sourceTree = "<group>"; };
+		AD5300000000000000000002 = { isa = PBXBuildFile; fileRef = AD5300000000000000000001; };
 		AD4300000000000000000001 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LaunchAtLogin.swift"; sourceTree = "<group>";
 		};
@@ -155,7 +159,7 @@
 				AD4700000000000000000001, AD5000000000000000000001, AD5100000000000000000001,
 				AD4800000000000000000003,
 				48B9829DDB297129458B3902,
-				03AF56BE2C9FDF9DEFBDE818,
+				03AF56BE2C9FDF9DEFBDE818, AD5300000000000000000001, AD5400000000000000000001,
 				AD4A00000000000000000007,
 				AD4300000000000000000001,
 				AD4900000000000000000005,
@@ -203,7 +207,7 @@
 				AD4700000000000000000002, AD5000000000000000000002, AD5100000000000000000002,
 				AD4800000000000000000004,
 				C497F0C95670E0D8F1966C44,
-				D2740EFD5804A93FE8C32426,
+				D2740EFD5804A93FE8C32426, AD5300000000000000000002, AD5400000000000000000002,
 				AD4A00000000000000000008,
 				AD4300000000000000000002,
 				AD4900000000000000000006,
@@ -293,6 +297,25 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 			}; name = Debug;
 		};
+		AD5500000000000000000001 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				ARCHS = "arm64";
+				SDKROOT = "macosx";
+				MACOSX_DEPLOYMENT_TARGET = "27.0";
+				SWIFT_VERSION = "6.0";
+				SWIFT_STRICT_CONCURRENCY = "complete";
+				CLANG_ENABLE_MODULES = "YES";
+				CLANG_ENABLE_OBJC_ARC = "YES";
+				GCC_C_LANGUAGE_STANDARD = "gnu17";
+				ONLY_ACTIVE_ARCH = "YES";
+				SWIFT_EMIT_LOC_STRINGS = "YES";
+				LM_SKIP_METADATA_EXTRACTION = "YES";
+				DEBUG_INFORMATION_FORMAT = "dwarf";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				ENABLE_TESTABILITY = "YES";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG AGENTDASH_SYNTHETIC_ONLY $(inherited)";
+			}; name = SyntheticQA;
+		};
 		35B1014F135DE9B45529B733 = {
 			isa = XCBuildConfiguration; buildSettings = {
 				ARCHS = "arm64";
@@ -314,6 +337,7 @@
 		B4E10CAA9C5E22150B71559C = {
 			isa = XCConfigurationList; buildConfigurations = (
 				488864B3D19480A82F7F1786,
+				AD5500000000000000000001,
 				35B1014F135DE9B45529B733,
 			); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;
 		};
@@ -337,6 +361,26 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
 			}; name = Debug;
 		};
+		AD5500000000000000000002 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				ENABLE_DEBUG_DYLIB = "NO";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard.SyntheticQA";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				CODE_SIGN_STYLE = "Automatic";
+				CODE_SIGN_ENTITLEMENTS = "App/AgentDashboard.entitlements";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = "NO";
+				ENABLE_APP_SANDBOX = "YES";
+				ENABLE_HARDENED_RUNTIME = "YES";
+				GENERATE_INFOPLIST_FILE = "YES";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_CFBundleDisplayName = "Agent Dashboard QA";
+				MARKETING_VERSION = "0.1.0";
+				CURRENT_PROJECT_VERSION = "1";
+				SUPPORTED_PLATFORMS = "macosx";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
+			}; name = SyntheticQA;
+		};
 		C4105CD76E02D5765B7DA9D2 = {
 			isa = XCBuildConfiguration; buildSettings = {
 				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard";
@@ -359,6 +403,7 @@
 		C083D18A2C4AFE9B841204B8 = {
 			isa = XCConfigurationList; buildConfigurations = (
 				03CA35BB2534EEA6D70E5210,
+				AD5500000000000000000002,
 				C4105CD76E02D5765B7DA9D2,
 			); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;
 		};
@@ -371,6 +416,16 @@
 				TEST_TARGET_NAME = "AgentDashboard";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
 			}; name = Debug;
+		};
+		AD5500000000000000000003 = {
+			isa = XCBuildConfiguration; buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboardUITests.SyntheticQA";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				CODE_SIGN_STYLE = "Automatic";
+				GENERATE_INFOPLIST_FILE = "YES";
+				TEST_TARGET_NAME = "AgentDashboard";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
+			}; name = SyntheticQA;
 		};
 		F8B3D11D88B6E73D70BF5925 = {
 			isa = XCBuildConfiguration; buildSettings = {
@@ -385,6 +440,7 @@
 		B640E943BD57DC71742C38D0 = {
 			isa = XCConfigurationList; buildConfigurations = (
 				8510D108BF38EA639E810748,
+				AD5500000000000000000003,
 				F8B3D11D88B6E73D70BF5925,
 			); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;
 		};

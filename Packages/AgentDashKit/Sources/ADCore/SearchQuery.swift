@@ -78,6 +78,19 @@ public struct SearchQuery: Equatable, Sendable {
     /// milliseconds. Temporal filters are validated independently, without a clock.
     public static func parse(_ raw: String) throws -> SearchQuery {
         var lexer = try QueryLexer(raw)
+        var ignored: [Range<Int>]?
+        return try parse(&lexer, collectingFilters: &ignored)
+    }
+
+    fileprivate static func projectFilters(_ raw: String) throws -> (text: String, spellings: [String]) {
+        var lexer = try QueryLexer(raw)
+        var ranges: [Range<Int>]? = []
+        _ = try parse(&lexer, collectingFilters: &ranges)
+        return lexer.excluding(ranges ?? [])
+    }
+
+    private static func parse(_ lexer: inout QueryLexer,
+                              collectingFilters ranges: inout [Range<Int>]?) throws -> SearchQuery {
         var groups: [Clause] = []
         var filters: [Filter] = []
         var positive: [Term] = []
@@ -90,6 +103,7 @@ public struct SearchQuery: Equatable, Sendable {
                 if excluded { negative.append(term) } else { positive.append(term) }
             case .filter(let filter):
                 filters.append(filter)
+                ranges?.append(lexer.lastRange)
             case .or:
                 guard !positive.isEmpty else { throw Failure.invalidORGroup }
                 groups.append(Clause(positive: positive, negative: negative))
@@ -121,6 +135,7 @@ private struct QueryLexer {
     private let scalars: [Unicode.Scalar]
     private var index = 0
     private var tokenCount = 0
+    private(set) var lastRange: Range<Int> = 0..<0
 
     init(_ raw: String) throws {
         // Stop counting after the first disallowed byte, before copying scalars.
@@ -138,6 +153,8 @@ private struct QueryLexer {
         guard index < scalars.count else { return nil }
         tokenCount += 1
         guard tokenCount <= SearchQuery.maximumTokens else { throw Failure.tooManyTokens }
+        let beginning = index
+        defer { lastRange = beginning..<index }
 
         let excluded = scalars[index] == "-"
         if excluded { index += 1 }
@@ -164,6 +181,19 @@ private struct QueryLexer {
         guard atBoundary else { throw Failure.invalidSyntax }
         if prefix == "OR" && !excluded { return .or }
         return .term(.init(text: prefix, isPhrase: false), excluded: excluded)
+    }
+
+    func excluding(_ ranges: [Range<Int>]) -> (text: String, spellings: [String]) {
+        guard !ranges.isEmpty else { return (text(0, scalars.count), []) }
+        var remaining = ""
+        var position = 0
+        for range in ranges {
+            remaining += text(position, range.lowerBound)
+            position = range.upperBound
+        }
+        remaining += text(position, scalars.count)
+        return (remaining.trimmingCharacters(in: .whitespacesAndNewlines),
+                ranges.map { text($0.lowerBound, $0.upperBound) })
     }
 
     private var atBoundary: Bool {
@@ -254,5 +284,76 @@ private struct QueryLexer {
               let amount = Int64(String(decoding: digits, as: UTF8.self)), amount > 0 else { return false }
         let milliseconds: Int64 = unit == 104 ? 3_600_000 : 86_400_000
         return !amount.multipliedReportingOverflow(by: milliseconds).overflow
+    }
+}
+
+/// One query viewed as an editable string and native filter tokens. Loading or
+/// committing a query only changes its presentation. It does not rewrite the
+/// query that is searched or sent to a saved group.
+public struct SearchFieldQuery: Equatable, Sendable {
+    public struct Token: Identifiable, Equatable, Sendable {
+        public let id: Int
+        public let spelling: String
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.id == rhs.id && lhs.spelling.utf8.elementsEqual(rhs.spelling.utf8)
+        }
+    }
+
+    public let query: String
+    public let text: String
+    public let tokens: [Token]
+
+    public init(query: String = "", presentingFilters: Bool = true) {
+        if presentingFilters, let projection = try? SearchQuery.projectFilters(query) {
+            self.init(query: query, text: projection.text, tokens: projection.spellings.enumerated().map {
+                Token(id: $0.offset, spelling: $0.element)
+            })
+        } else {
+            self.init(query: query, text: query, tokens: [])
+        }
+    }
+
+    private init(query: String, text: String, tokens: [Token]) {
+        self.query = query
+        self.text = text
+        self.tokens = tokens
+    }
+
+    public func editingText(_ newText: String) -> Self {
+        guard !text.utf8.elementsEqual(newText.utf8) else { return self }
+        return edited(text: newText, tokens: tokens)
+    }
+
+    public func editingTokens(_ newTokens: [Token]) -> Self {
+        guard tokens != newTokens else { return self }
+        return edited(text: text, tokens: newTokens)
+    }
+
+    public func committingFilters() -> Self {
+        guard let projection = try? SearchQuery.projectFilters(query),
+              projection.spellings.count > tokens.count else { return self }
+        var nextID = (tokens.map(\.id).max() ?? -1) + 1
+        var remaining = tokens
+        let projected = projection.spellings.map { spelling in
+            if let index = remaining.firstIndex(where: { $0.spelling.utf8.elementsEqual(spelling.utf8) }) {
+                return remaining.remove(at: index)
+            }
+            defer { nextID += 1 }
+            return Token(id: nextID, spelling: spelling)
+        }
+        return .init(query: query, text: projection.text, tokens: projected)
+    }
+
+    private func edited(text: String, tokens: [Token]) -> Self {
+        let prefix = tokens.map(\.spelling).joined(separator: " ")
+        // Filters apply globally, so the exact token spellings may be moved
+        // before the text after an edit. Keep the user's text intact.
+        let query = prefix.isEmpty ? text : text.isEmpty ? prefix : prefix + " " + text
+        return .init(query: query, text: text, tokens: tokens)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.query.utf8.elementsEqual(rhs.query.utf8) && lhs.text.utf8.elementsEqual(rhs.text.utf8) && lhs.tokens == rhs.tokens
     }
 }

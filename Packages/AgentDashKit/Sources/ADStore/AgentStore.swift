@@ -185,6 +185,18 @@ public final class AgentStore: Sendable {
             }
             try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
         }
+        migrator.registerMigration("session_usage_rollup") { db in
+            guard let resource = Bundle.module.url(forResource: "session_usage_rollup", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
+        migrator.registerMigration("inherited_transcript") { db in
+            guard let resource = Bundle.module.url(forResource: "inherited_transcript", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -423,7 +435,8 @@ public final class AgentStore: Sendable {
     @discardableResult
     public func commitFileBatch(_ records: [NormalizedRecord], for fileID: Int64,
                                 from expected: Checkpoint?, to next: Checkpoint,
-                                exclusionRevision: Int64? = nil) throws -> FileBatchCommit {
+                                exclusionRevision: Int64? = nil,
+                                startsAtBeginning: Bool = false) throws -> FileBatchCommit {
         try databasePool.write { db in
             guard try Bool.fetchOne(db, sql: """
                 SELECT EXISTS(SELECT 1 FROM source_files f JOIN sources s ON s.id=f.source_id
@@ -434,6 +447,10 @@ public final class AgentStore: Sendable {
             }
             let policy = try SessionExclusionPolicy.read(db)
             if let exclusionRevision, exclusionRevision != policy.revision { throw StoreError.exclusionPolicyChanged }
+            if startsAtBeginning {
+                try db.cachedStatement(sql: "DELETE FROM inherited_transcript_items WHERE file_id=?")
+                    .execute(arguments: [fileID])
+            }
             let screened = try saveScreened(records, fileID: fileID, checkpoint: next, policy: policy, db: db)
             let persisted = try Self.save(next, fileID: fileID, db: db,
                                           replayWithoutDecoderState: screened.withheldInFile || screened.needsWorkspaceReplay)
@@ -477,12 +494,12 @@ public final class AgentStore: Sendable {
             recordIdentity = .init(fileID: fileID, device: device, inode: inode)
         } else { recordIdentity = nil }
         if policy.patterns.isEmpty {
-            try saveWithUsage(retainedScreened, recordIdentity: recordIdentity, db: db)
+            try saveWithUsage(retainedScreened, fileID: fileID, recordIdentity: recordIdentity, db: db)
             return .init(records: retainedScreened, withheldInFile: archiveWithheld, needsWorkspaceReplay: false)
         }
         var gate = try SessionExclusionGate(policy: policy)
         let screened = try gate.screen(retainedScreened, fileID: fileID, db: db)
-        try saveWithUsage(screened.records, recordIdentity: recordIdentity, db: db)
+        try saveWithUsage(screened.records, fileID: fileID, recordIdentity: recordIdentity, db: db)
         try gate.finishRemovals(db: db)
         return .init(records: screened.records, withheldInFile: screened.withheldInFile || archiveWithheld,
                      needsWorkspaceReplay: screened.needsWorkspaceReplay)
@@ -494,10 +511,12 @@ public final class AgentStore: Sendable {
         let inode: Int64
     }
 
-    private func saveWithUsage(_ records: [NormalizedRecord], recordIdentity: RecordIdentity?, db: Database) throws {
+    private func saveWithUsage(_ records: [NormalizedRecord], fileID: Int64?,
+                               recordIdentity: RecordIdentity?, db: Database) throws {
         let quote = tokenQuoter.withLock { $0?.quote }
         var touchedUsage: Set<String> = []
         var copilotKeys: Set<CopilotAccounting.Key> = []
+        var admittedClaudeFiles: Set<SessionKey> = []
         let redact = try IndexSecretRedaction.enabled(db)
         let includeThinking = try ThinkingPrivacy.enabled(db)
         for record in records {
@@ -505,13 +524,20 @@ public final class AgentStore: Sendable {
             case .session(let session):
                 let identity = recordIdentity.flatMap { $0.fileID == session.fileID ? $0 : nil }
                 try Self.save(redact ? IndexSecretRedaction.session(session) : session, recordIdentity: identity, db: db)
+                if let fileID, session.fileID == fileID, session.key.agent == .claudeCode, session.referenceOnly != true {
+                    admittedClaudeFiles.insert(session.key)
+                }
             case .event(let event):
                 if event.kind == .thinking {
                     guard includeThinking, event.session.agent == .claudeCode, let text = event.text,
                           text.utf8.count <= EventKind.maximumThinkingBytes,
                           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 }
-                try Self.save(redact ? IndexSecretRedaction.event(event) : event, db: db)
+                let stored = redact ? IndexSecretRedaction.event(event) : event
+                try Self.save(stored, db: db)
+                if let fileID, let location = stored.inheritedLocation, admittedClaudeFiles.contains(location.child) {
+                    try Self.recordInheritedTranscript(stored, in: location, fileID: fileID, db: db)
+                }
             case .tokens(let event):
                 try Self.save(event, db: db)
                 if db.changesCount != 0 {

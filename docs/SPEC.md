@@ -702,7 +702,12 @@ FTS5's built-in `unicode61` treats a run of Chinese characters as one token, so 
 
 ### 9.3 Query syntax (full table in Appendix B)
 
-Free text plus filters; filters render as tokens in the search field (`.searchable(text:tokens:)`):
+Free text plus filters; filters render as native tokens in the search field
+(`.searchable(text:tokens:)`). Opening or submitting a valid query renders
+recognized filter clauses as removable tokens, without changing the active
+query. Leave draft text alone while the input method is composing. A mouse
+can remove a single filter from Search Filters; quoted phrases, literal
+words, repeated filters and a Smart Group’s sidebar scope retain their meaning.
 
 `agent:claude` `project:payments-api` `dir:~/code/x` `env:work` `status:running` `role:user|assistant|tool` `tool:Bash` `file:auth.ts` `model:opus` `after:2026-11-01` `before:2026-11-15` `in:7d` `"exact phrase"` `-exclude` `A OR B`
 
@@ -832,7 +837,9 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 
 ### 11.2 Sessions page
 
-**List:** each row = agent avatar (initials + agent color), title, relative time, `project · branch`, matching snippet (when searching), status badge, tokens and estimated cost. Archived sessions show a small archive icon. A "Group by project" toggle.
+**List:** each row = agent avatar (initials + agent color), title, relative time, `project · branch`, matching snippet (when searching), status badge, tokens and estimated cost. Archived sessions show a small archive icon. A "Group by project" toggle. Use canonical Projects membership, not a path label; sessions without a proven project remain in Ungrouped. Group the current visible page in first-occurrence order and preserve the existing order within each section, selected session, filters and search pagination.
+
+List rows and detail read the same committed, cache-inclusive usage summary. Show the current display currency, label partial or unpriced usage and approximate quotes, and use an empty indicator when no usage was recorded. Search order, pagination and selection are independent of the row's display currency.
 
 **Detail:**
 
@@ -845,6 +852,13 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
     Plot up to 72 buckets for the selected session; distinguish session-level estimates. Records without a timestamp still count in the total.
   - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to indexed input/output, with explicit access to a verified original when the index only has a preview; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
     Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Place a folded tool at its call, with at most one matching result preview. A search hit on the result seeks directly to the call and expands it. Original tool inputs require an unchanged recorded line and a current source grant. They are read only on request, are never added to search or archives, and are shown only if the complete input fits within 256 KiB. Only pair a unique call and following result with the same explicit ID in the same session; keep ambiguous or unscoped child records separate. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor or empties the current older/newer page.
+
+    Show confirmed Claude copies in a separate collapsed section. Page only the
+    canonical events that the destination transcript actually recorded, in its
+    physical order. No title, relationship or parent timestamp alone establishes
+    a copied range. Indexing an available pre-v11 file rebuilds its copy
+    references; do not infer missing copy evidence for an already archived
+    destination file. Search matches and token accounting remain with the original.
 - Bottom buttons:
   - **Copy Resume Command** (primary; ⇧⌘C): copies the shell-quoted command from §5 / Appendix C for a live, resumable session. Use its indexed workspace and current source mapping. Disable the action when the command cannot be formed.
   - **Show in Finder**: asks Finder to select the original record. Use the current registered source grant and verify the indexed regular file's identity, without following symlinks. Disable it for archived sessions and records without a known file; report if the original cannot be verified on click.
@@ -916,8 +930,8 @@ Per prototype `31:847`:
 - Today's mini chart + legend.
 - Active sessions (max 6, then scroll): title, project, status and duration, current rate or "Needs input". Clicking opens the main window on that session.
 - Footer: Open Dashboard ⌘D, Settings… ⌘,, Quit ⌘Q.
-- Read menu data only while the panel is visible. “Now” is rolling 60-second call-level throughput; “Today” starts at local midnight and includes all recorded precision levels.
-- MAY: option to show current tok/min next to the menu bar icon.
+- Read the full menu snapshot only while the panel is visible. “Now” is rolling 60-second call-level throughput; “Today” starts at local midnight and includes all recorded precision levels.
+- General can show the same tok/min next to the menu bar icon; default off. When enabled, read only the trailing minute of call-level usage for the icon, even with the panel closed. An idle reading waits for usage changes instead of polling the index.
 - SHOULD: local notification (UserNotifications, local only) when a session starts needing approval; off by default.
 
 ### 11.6 Settings window
@@ -930,7 +944,17 @@ Per prototype `31:847`:
 | Storage | Database size; archive retention; tool-output size limit; rebuild index; full rescan; clear by project / source / all |
 | Privacy | Secret masking (default on); index thinking blocks (default off); excluded paths or projects (globs) |
 | Pricing | Active file (external / bundled), `updatedAt`, number of model entries, validation errors; unpriced models with token volume (one-click copy, to hand to an agent); display currency |
-| About | Version; statement that the app has no network permission, listing the entitlements actually present in the signature |
+| About | Running bundle version/build; read-only display of entitlements in the running app’s signature and whether those establish no network permission |
+
+General applies the system-default, 12-hour or 24-hour clock to absolute
+times and period-entry controls. The override changes the hour cycle without
+changing the time zone, calendar boundaries, ranges or relative durations.
+Both presentation settings are kept in local app preferences.
+
+About validates its own running code offline and reads the signed entitlement
+values. An absent, unreadable or unrecognized signature does not verify the
+absence of network permission. This display does not replace the release check
+in §12.4.
 
 The Sources index counts come from committed checkpoints and session rows,
 separate from checking directory access. Show a scan time only when the
@@ -1168,17 +1192,23 @@ actually imports. Synthetic Grok samples do not replace real format capture.
 
 Launch → onboarding → sessions appear → search a Chinese word → open a session → jump to a match → Projects page → Token Usage → switch periods and metric → open the menu bar panel.
 
+The UI test scheme uses the isolated SyntheticQA bundle. It must reject a
+launch without `--synthetic` before constructing the app delegate or loading
+preferences and indexes. Verify the signed test artifact's launch guard before
+desktop QA.
+
 Unattended search and navigation smoke tests use the actual search field and
-index with prefilled synthetic text and UI controls. Native keyboard/IME
-acceptance is a separate fixed Apple input source run: ABC for ASCII and
-shortcuts, Apple Pinyin – Simplified for composing and committing Chinese.
-It never enumerates or changes the input source and must not request access.
-See the [keyboard QA matrix](reports/FIXED-INPUT-QA.md). A skipped native
-input case does not establish typing or shortcut acceptance.
+index with prefilled synthetic text and UI controls. Also type and commit a
+Chinese query in the Dashboard and menu bar search fields with the already
+selected Apple Pinyin – Simplified, then verify the indexed result. Run ASCII
+entry and shortcut acceptance separately with ABC already selected. The same
+built-in source stays fixed throughout each run; tests never enumerate or change
+sources or request input permissions. See the [input QA matrix](reports/FIXED-INPUT-QA.md).
 
 ### 15.5 Release checklist
 
 - [ ] All §14.4 checks pass
+- [ ] §15.4 smoke tests pass; real Apple Pinyin search and applicable ABC form and shortcut cases are verified separately
 - [ ] Manual zero-network check (§12.4) passes
 - [ ] On the user's real data for all four agents: session counts and token totals match each CLI's own statistics on spot checks (within 1%; record reasons for differences in FORMATS.md)
 - [ ] Sessions remain viewable and searchable after their raw files are deleted

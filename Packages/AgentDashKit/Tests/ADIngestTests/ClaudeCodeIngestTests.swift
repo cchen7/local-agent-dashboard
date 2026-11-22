@@ -548,3 +548,81 @@ func claudeThinkingPreferenceReplaysAndPurgesIndex() throws {
     #expect(try reopened.usage(window: window).totals.counts.total == 9)
     #expect(try Data(contentsOf: input) == bytes)
 }
+
+@Test("ADP-CC: copied history follows the destination file order without taking the original's later events",
+      .timeLimit(.minutes(1)), arguments: [true, false])
+func claudeInheritedTranscriptIsProvenAndPaged(copyFirst: Bool) async throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    let child = SessionKey(agent: .claudeCode, nativeID: copyID)
+    let firstID = "00000000-0000-4000-8000-000000000101"
+    let secondID = "00000000-0000-4000-8000-000000000102"
+    let laterID = "00000000-0000-4000-8000-000000000103"
+    func row(_ id: String, _ session: String, _ body: String) -> [String: Any] {
+        ["type": "user", "uuid": id, "sessionId": session, "cwd": "/synthetic/work", "message": ["content": body]]
+    }
+    let first = row(firstID, mainID, "Copied first")
+    let second = row(secondID, mainID, "Copied second")
+    let later = row(laterID, mainID, "Original only")
+    let own = row("00000000-0000-4000-8000-000000000104", copyID, "New child turn")
+    let fallback = row("missing-stable-id", mainID, "Ambiguous copy")
+    try box.write([second, first, later], to: box.main)
+    try box.write([first, fallback, second, own], to: box.copy)
+    if copyFirst { _ = try box.importPath(box.copy, role: .session) }
+    _ = try box.importPath(box.main, role: .session)
+    if !copyFirst { _ = try box.importPath(box.copy, role: .session) }
+    try box.store.write([.session(.init(key: box.key, sourceID: try #require(box.source.id),
+                                       environment: "Synthetic", title: "Indexed original"))])
+
+    var summaries = box.store.inheritedTranscriptSummary(in: child).makeAsyncIterator()
+    let available = try #require(try await summaries.next() ?? nil)
+    #expect(available.originalTitle == "Indexed original")
+    #expect(try box.store.events(in: child).map(\.text) == ["New child turn"])
+    #expect(try box.store.events(in: box.key).filter { $0.text == "Copied second" }.count == 1)
+    let search = try box.store.searchIndex(SearchQuery.parse("Copied second"),
+                                           scope: .init(now: 0, timeZone: .gmt))
+    #expect(search.groups.map(\.session) == [box.key] && search.matchCount == 1)
+
+    var pages = try box.store.inheritedTranscriptPages(in: child, limit: 1).makeAsyncIterator()
+    let firstPage = try #require(try await pages.next())
+    #expect(firstPage.events.map(\.text) == ["Copied first"])
+    #expect(firstPage.older == nil)
+    let forward = try #require(firstPage.newer)
+    var laterPages = try box.store.inheritedTranscriptPages(in: child, request: .after(forward), limit: 1).makeAsyncIterator()
+    let secondPage = try #require(try await laterPages.next())
+    #expect(secondPage.events.map(\.text) == ["Copied second"])
+    #expect(secondPage.newer == nil)
+    let backward = try #require(secondPage.older)
+    var earlierPages = try box.store.inheritedTranscriptPages(in: child, request: .before(backward), limit: 1).makeAsyncIterator()
+    #expect(try await earlierPages.next()?.events.map(\.text) == ["Copied first"])
+    var foreign = try box.store.inheritedTranscriptPages(in: box.key, request: .after(forward)).makeAsyncIterator()
+    await #expect(throws: TranscriptPagingError.foreignCursor) { _ = try await foreign.next() }
+
+    // A checkpoint from before copy indexing is replayed even without an append.
+    try await box.store.databasePool.write { db in
+        try db.execute(sql: "DELETE FROM inherited_transcript_items")
+        try db.execute(sql: "UPDATE source_files SET parser_version=10 WHERE rel_path=?", arguments: [box.copy])
+    }
+    let replay = try box.importPath(box.copy, role: .session)
+    #expect(replay.completeLines == 4)
+    var restored = try box.store.inheritedTranscriptPages(in: child).makeAsyncIterator()
+    #expect(try await restored.next()?.events.map(\.text) == ["Copied first", "Copied second"])
+
+    // A change to the original's body is not evidence of a newer copied body.
+    let original = try #require(try box.store.events(in: box.key).first { $0.text == "Copied first" })
+    var changed = original
+    changed.text = "New original-only body"
+    try box.store.write([.event(changed)])
+    var edited = try box.store.inheritedTranscriptPages(in: child).makeAsyncIterator()
+    #expect(try await edited.next()?.events.map(\.text) == ["Copied second"])
+
+    // Replacing the destination's bytes drops old copy references even though
+    // the normalized owner's events are deliberately still archived in the index.
+    try box.write([own], to: box.copy)
+    _ = try box.importPath(box.copy, role: .session)
+    var rewritten = try box.store.inheritedTranscriptPages(in: child).makeAsyncIterator()
+    #expect(try await rewritten.next()?.events.isEmpty == true)
+    var stale = try box.store.inheritedTranscriptPages(in: child, request: .after(forward)).makeAsyncIterator()
+    await #expect(throws: TranscriptPagingError.staleCursor) { _ = try await stale.next() }
+    #expect(try box.store.events(in: box.key).contains { $0.text == "Original only" })
+}

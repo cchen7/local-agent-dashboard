@@ -10,7 +10,12 @@ final class FixedKeyboardTests: XCTestCase {
     private let app = XCUIApplication()
     private var launched = false
 
-    override func setUpWithError() throws { continueAfterFailure = false }
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        #if !AGENTDASH_SYNTHETIC_ONLY
+        throw XCTSkip("UI testing requires the SyntheticQA build configuration.")
+        #endif
+    }
     override func tearDown() async throws {
         if launched { app.terminate() }
     }
@@ -61,11 +66,23 @@ final class FixedKeyboardTests: XCTestCase {
     }
 
     func testApplePinyinCommitsChineseIntoRealSearch() async throws {
+        try await checkPinyinSearch(withFilter: false)
+    }
+
+    func testApplePinyinCommitsChineseAlongsideSearchToken() async throws {
+        try await checkPinyinSearch(withFilter: true)
+    }
+
+    private func checkPinyinSearch(withFilter: Bool) async throws {
         app.launchEnvironment["AGENTDASH_SYNTHETIC_NATIVE_CHINESE"] = "1"
+        if withFilter { app.launchEnvironment["AGENTDASH_SYNTHETIC_SEARCH_QUERY"] = "agent:codex" }
         let keys = try launch(mode: .pinyin, populated: true)
         let field = app.searchFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.click()
+        if withFilter {
+            XCTAssertTrue(element("search.filters.menu").waitForExistence(timeout: 5))
+            field.coordinate(withNormalizedOffset: CGVector(dx: 0.72, dy: 0.5)).click()
+        } else { field.click() }
         // Hardware key positions for zhongwen, followed by a Pinyin commit.
         for key in [kVK_ANSI_Z, kVK_ANSI_H, kVK_ANSI_O, kVK_ANSI_N, kVK_ANSI_G,
                     kVK_ANSI_W, kVK_ANSI_E, kVK_ANSI_N] {
@@ -73,11 +90,13 @@ final class FixedKeyboardTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(75))
         }
         try keys.press(kVK_Space)
-        let committed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "中文"), object: field)
+        let predicate = NSPredicate(format: withFilter ? "value CONTAINS %@" : "value == %@", "中文")
+        let committed = XCTNSPredicateExpectation(predicate: predicate, object: field)
         let result = await XCTWaiter.fulfillment(of: [committed], timeout: 5)
         XCTAssertEqual(result, .completed)
         XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["中文输入 · Synthetic typing target"].firstMatch.waitForExistence(timeout: 5))
+        if withFilter { XCTAssertTrue(element("search.filters.menu").exists) }
     }
 
     func testABCExistingSourceNameRoundTrip() throws {
@@ -168,7 +187,7 @@ private struct FixedKeyboard {
         }
     }
 
-    static let bundleID = "com.chenxin.AgentDashboard"
+    static let bundleID = "com.chenxin.AgentDashboard.SyntheticQA"
     let mode: Mode
     let app: XCUIApplication
     let pid: pid_t

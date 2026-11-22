@@ -71,6 +71,17 @@ public enum RecordedSessionOwnership: String, Codable, Sendable { case original,
 /// Transcript channel arbitration applies only to normalized user and assistant messages.
 public enum TranscriptChannel: String, Codable, Sendable { case preferred, fallback }
 
+/// Evidence from the physical destination transcript, separate from the event owner.
+public struct InheritedTranscriptLocation: Codable, Equatable, Sendable {
+    public let child: SessionKey
+    public let block: Int
+
+    public init(child: SessionKey, block: Int) {
+        self.child = child
+        self.block = block
+    }
+}
+
 /// Searchable normalized event. The adapter owns truncation and the globally deterministic dedupe key.
 public struct EventRecord: Codable, Equatable, Sendable {
     public var session: SessionKey
@@ -83,6 +94,7 @@ public struct EventRecord: Codable, Equatable, Sendable {
     public var dedupeKey: String
     public var recordedOwnership: RecordedSessionOwnership?
     public var transcriptChannel: TranscriptChannel?
+    public var inheritedLocation: InheritedTranscriptLocation?
     public var toolOutput: ToolOutputCapture?
     public var toolInput: ToolInputCapture?
     public var toolAction: ToolActionEvidence?
@@ -90,10 +102,12 @@ public struct EventRecord: Codable, Equatable, Sendable {
     public init(session: SessionKey, sequence: Int64, timestamp: Int64, kind: EventKind,
                 toolName: String? = nil, text: String? = nil, metadataJSON: String? = nil, dedupeKey: String,
                 recordedOwnership: RecordedSessionOwnership? = nil, transcriptChannel: TranscriptChannel? = nil,
+                inheritedLocation: InheritedTranscriptLocation? = nil,
                 toolOutput: ToolOutputCapture? = nil, toolInput: ToolInputCapture? = nil, toolAction: ToolActionEvidence? = nil) {
         self.session = session; self.sequence = sequence; self.timestamp = timestamp; self.kind = kind
         self.toolName = toolName; self.text = text; self.metadataJSON = metadataJSON; self.dedupeKey = dedupeKey
         self.recordedOwnership = recordedOwnership; self.transcriptChannel = transcriptChannel
+        self.inheritedLocation = inheritedLocation
         self.toolOutput = toolOutput
         self.toolInput = toolInput
         self.toolAction = toolAction

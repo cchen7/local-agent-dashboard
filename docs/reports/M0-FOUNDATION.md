@@ -98,11 +98,14 @@ lifecycle coverage is completed in M2.
 
 ## Reproduction and local artifacts
 
-Use a task-specific directory outside the repository for all build products:
+Use a task-specific directory outside the repository for all build products.
+The current test workflow uses SyntheticQA rather than the original M0 Debug
+bundle. Its separate bundle identifier and early entry point protect the
+normal app's preferences and index from accidental launches.
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
-  -project AgentDashboard.xcodeproj -scheme AgentDashboard \
+  -project AgentDashboard.xcodeproj -scheme AgentDashboard -configuration SyntheticQA \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData \
   -clonedSourcePackagesDirPath /private/tmp/agentdash-m0-xcode-worker/packages \
@@ -110,13 +113,17 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 codesign --force --sign - --options runtime \
   --entitlements App/AgentDashboard.entitlements \
-  /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData/Build/Products/Debug/AgentDashboard.app
+  /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData/Build/Products/SyntheticQA/AgentDashboard.app
 
-Tools/check-entitlements.sh \
-  /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData/Build/Products/Debug/AgentDashboard.app
+Tools/check-synthetic-launch.sh \
+  /private/tmp/agentdash-m0-xcode-worker/ui-fix/DerivedData/Build/Products/SyntheticQA/AgentDashboard.app
 ```
 
-Then use `xcodebuild test-without-building` with the generated `.xctestrun` file.
+Then use `xcodebuild test-without-building` with the generated SyntheticQA
+`.xctestrun` file. Keep `--synthetic` explicit at launch. The guard verifies the
+signed bundle identity and compiled refusal before testing the no-argument
+exit. It will not launch a normal build. Do not use discovery or capture tools
+that may implicitly launch the dashboard without the test arguments.
 Xcode ad-hoc builds omit the runtime flag, and test builds add testing entitlements;
 explicit re-signing/readback is necessary for this local M0 validation. App Debug
 uses `ENABLE_DEBUG_DYLIB=NO` to avoid the real library-validation launch failure.

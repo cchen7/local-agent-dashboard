@@ -176,6 +176,9 @@ func backfillMillionUnpricedRecords() throws {
             #expect(try Int64.fetchOne(db, sql: "SELECT sum(cost_micro_usd) FROM token_events") == expected)
             #expect(try Int64.fetchOne(db, sql: "SELECT sum(cost_micro_usd) FROM token_minute") == expected)
             #expect(try Int64.fetchOne(db, sql: "SELECT sum(unpriced_tokens) FROM token_minute") == 0)
+            #expect(try Int64.fetchOne(db, sql: "SELECT sum(cost_micro_usd) FROM session_usage_rollup") == expected)
+            #expect(try Int64.fetchOne(db, sql: "SELECT sum(records) FROM session_usage_rollup") == 1_000_000)
+            #expect(try Int64.fetchOne(db, sql: "SELECT sum(unpriced_tokens) FROM session_usage_rollup") == 0)
             #expect(try Int64.fetchOne(db, sql: "SELECT sum(cost_micro_usd) FROM token_usage_scope WHERE grain=60") == expected)
             if pricedCache {
                 let expectedSavings = try Int64.fetchOne(db, sql: """

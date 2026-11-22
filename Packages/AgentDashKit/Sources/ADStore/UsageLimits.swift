@@ -94,6 +94,14 @@ enum UsageLimitsStore {
             }
     }
 
+    static func totalThroughput(_ rates: [AgentThroughputSample]) throws -> Int64 {
+        try rates.reduce(Int64(0)) { total, rate in
+            let (value, overflow) = total.addingReportingOverflow(rate.tokensPerMinute)
+            guard !overflow else { throw StoreError.invalidTokenCounts }
+            return value
+        }
+    }
+
     static func throughput(_ db: Database, now: Int64, agent: AgentKind?) throws -> [AgentThroughputSample] {
         let earliest = now.subtractingReportingOverflow(60_000)
         var args: StatementArguments = [earliest.overflow ? Int64.min : earliest.partialValue, now]

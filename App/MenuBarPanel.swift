@@ -8,6 +8,7 @@ import Charts
 import SwiftUI
 
 struct MenuBarPanel: View {
+    @Environment(\.locale) private var locale
     let model: DashboardModel
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
@@ -166,6 +167,7 @@ struct MenuBarPanel: View {
                     .lineStyle(StrokeStyle(lineWidth: sample.agent == nil ? 1.8 : 1))
             }
             .chartLegend(.hidden).chartYAxis(.hidden).frame(height: 76)
+            .environment(\.locale, model.clockFormat.locale(from: locale))
         }
         .padding(7).background(.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
     }

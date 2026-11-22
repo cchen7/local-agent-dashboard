@@ -31,6 +31,9 @@ enum DashboardPage: String, CaseIterable, Identifiable {
 final class DashboardModel {
     let sourceIndexing = SourceIndexingController()
     let pricing = PricingModel()
+    #if AGENTDASH_SYNTHETIC_ONLY
+    var syntheticQALaunchReady = false
+    #endif
     private(set) var maskSecrets = true
     private(set) var redactIndexSecrets = false
     private(set) var sessionExclusions: [String] = []
@@ -47,6 +50,49 @@ final class DashboardModel {
     var sources: [Source] = []
     var access: [Int64: SourceAccessStatus] = [:]
     var settingsPage: SettingsPage = .general
+    private(set) var clockFormat: DashboardClockFormat
+    private(set) var showsMenuBarThroughput: Bool
+    private(set) var menuBarTokensPerMinute: Int64?
+    @ObservationIgnored private var menuBarThroughputTask: Task<Void, Never>?
+    private let presentationPrefix: String?
+
+    init() {
+        let prefix: String?
+        if CommandLine.arguments.contains("--synthetic") {
+            // Opt-in relaunch tests own only their exact UUID namespace.
+            prefix = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PRESENTATION_ID"]
+                .flatMap(UUID.init(uuidString:)).map { "syntheticPresentation.\($0.uuidString)." }
+        } else {
+            prefix = ""
+        }
+        presentationPrefix = prefix
+        clockFormat = prefix.flatMap { UserDefaults.standard.string(forKey: $0 + "clockFormat") }
+            .flatMap(DashboardClockFormat.init(rawValue:)) ?? .system
+        showsMenuBarThroughput = prefix.map { UserDefaults.standard.bool(forKey: $0 + "showsMenuBarThroughput") } ?? false
+    }
+
+    func setClockFormat(_ format: DashboardClockFormat) {
+        guard clockFormat != format else { return }
+        clockFormat = format
+        if let prefix = presentationPrefix {
+            let key = prefix + "clockFormat"
+            if format == .system { UserDefaults.standard.removeObject(forKey: key) }
+            else { UserDefaults.standard.set(format.rawValue, forKey: key) }
+        }
+    }
+
+    func setShowsMenuBarThroughput(_ enabled: Bool) {
+        guard showsMenuBarThroughput != enabled else { return }
+        showsMenuBarThroughput = enabled
+        if let prefix = presentationPrefix {
+            let key = prefix + "showsMenuBarThroughput"
+            if enabled { UserDefaults.standard.set(true, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        restartMenuBarThroughput()
+        if enabled, store == nil { Task { await load() } }
+    }
+
     private(set) var contextWindowRules: [ModelContextWindow] = []
     private static let contextWindowPreferenceKey = "modelContextWindowRules"
     var selectedProjectID: IndexedProject.ID?
@@ -74,9 +120,34 @@ final class DashboardModel {
     }
     private(set) var store: AgentStore?
     var usageStore: AgentStore? { store }
-    var sessionSearchText = "" {
-        didSet { if sessionSearchText != oldValue { sessionSearchOffset = 0 } }
+    private(set) var searchField = SearchFieldQuery()
+    var sessionSearchText: String { searchField.query }
+
+    func editSearchText(_ text: String) { installSearchField(searchField.editingText(text)) }
+    func editSearchTokens(_ tokens: [SearchFieldQuery.Token]) { installSearchField(searchField.editingTokens(tokens)) }
+    func commitSearchFilters() { installSearchField(searchField.committingFilters()) }
+
+    func removeSearchFilter(_ token: SearchFieldQuery.Token) {
+        editSearchTokens(searchField.tokens.filter { $0 != token })
     }
+
+    private func replaceSearchQuery(_ query: String) {
+        installSearchField(SearchFieldQuery(query: query))
+    }
+
+    private func installSearchField(_ replacement: SearchFieldQuery) {
+        guard searchField != replacement else { return }
+        if !sessionSearchText.utf8.elementsEqual(replacement.query.utf8) { sessionSearchOffset = 0 }
+        searchField = replacement
+    }
+    var groupSessionsByProject = false {
+        didSet {
+            if !synthetic && groupSessionsByProject != oldValue {
+                UserDefaults.standard.set(groupSessionsByProject, forKey: Self.groupSessionsPreference)
+            }
+        }
+    }
+    private static let groupSessionsPreference = "groupSessionsByProject"
     var sessionSearchOrder: SessionSearchOrder = .relevance {
         didSet { if sessionSearchOrder != oldValue { sessionSearchOffset = 0 } }
     }
@@ -100,7 +171,7 @@ final class DashboardModel {
     var isSearchingSessions: Bool { !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var sessionSearchState: SessionSearchState {
-        searchForText == sessionSearchText && searchForOffset == sessionSearchOffset &&
+        searchForText?.utf8.elementsEqual(sessionSearchText.utf8) == true && searchForOffset == sessionSearchOffset &&
             searchForOrder == sessionSearchOrder && searchForFilter == libraryFilter ? lastSearchState : .waiting
     }
 
@@ -172,6 +243,10 @@ final class DashboardModel {
                     ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEX_STATUS"] == "1") {
                     try Self.seedIndexStatus(store, in: directory)
                 }
+                if synthetic && ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_FILTERS"] == "1" {
+                    try store.saveSessionSearch(name: "Synthetic filtered group", query: #" 登录 role:"assistant" agent:codex "#,
+                                                order: .recent, libraryFilter: .agent(.codex))
+                }
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
                                            : needsOnboarding
@@ -187,9 +262,10 @@ final class DashboardModel {
             if CommandLine.arguments.contains("--synthetic"),
                let query = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_QUERY"],
                query.utf8.count <= 512 {
-                sessionSearchText = query
+                replaceSearchQuery(query)
             }
             store = result.0
+            restartMenuBarThroughput()
             sources = result.1
             searchHome = result.2
             onboardingRequired = result.3
@@ -201,6 +277,7 @@ final class DashboardModel {
             toolOutputLimit = result.11
             scheduleArchiveMaintenance()
             pricing.attach(store: result.0, runtime: result.4, initial: result.5)
+            if !synthetic { groupSessionsByProject = UserDefaults.standard.bool(forKey: Self.groupSessionsPreference) }
             if !synthetic, let data = UserDefaults.standard.data(forKey: Self.contextWindowPreferenceKey),
                data.count <= 131_072, let rules = try? JSONDecoder().decode([ModelContextWindow].self, from: data),
                ModelContextWindow.areValid(rules) {
@@ -231,6 +308,53 @@ final class DashboardModel {
     deinit {
         statusTask?.cancel()
         topicsTask?.cancel()
+        menuBarThroughputTask?.cancel()
+    }
+
+    private func restartMenuBarThroughput() {
+        menuBarThroughputTask?.cancel()
+        menuBarTokensPerMinute = nil
+        guard showsMenuBarThroughput, let store else { return }
+        menuBarThroughputTask = Task(priority: .utility) { [weak self] in
+            let (signals, send) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    defer { send.finish() }
+                    do {
+                        for try await _ in store.menuBarThroughputChanges() { send.yield(()) }
+                    } catch { /* The consumer drops the numeric label. */ }
+                }
+                var expiry: Task<Void, Never>?
+                defer {
+                    expiry?.cancel()
+                    send.finish()
+                    group.cancelAll()
+                }
+                var lastRead: ContinuousClock.Instant?
+                for await _ in signals {
+                    if let lastRead, lastRead.duration(to: .now) < .seconds(1) {
+                        try? await Task.sleep(until: lastRead.advanced(by: .seconds(1)), clock: .continuous)
+                    }
+                    guard !Task.isCancelled, self != nil else { return }
+                    expiry?.cancel()
+                    lastRead = .now
+                    let now = Int64(Date().timeIntervalSince1970 * 1000)
+                    let tokens = try? await store.menuBarThroughput(now: now)
+                    guard !Task.isCancelled else { return }
+                    self?.menuBarTokensPerMinute = tokens
+                    if let tokens, tokens > 0 {
+                        // Age out a nonzero reading. Zero waits only for new usage.
+                        expiry = Task {
+                            do {
+                                try await Task.sleep(for: .seconds(5))
+                                send.yield(())
+                            } catch { /* A newer snapshot superseded this expiry. */ }
+                        }
+                    }
+                }
+                if !Task.isCancelled { self?.menuBarTokensPerMinute = nil }
+            }
+        }
     }
 
     func saveContextWindowRules(_ rules: [ModelContextWindow]) throws {
@@ -321,7 +445,7 @@ final class DashboardModel {
             return
         }
         do {
-            if text != searchForText { try await Task.sleep(for: .milliseconds(150)) }
+            if searchForText?.utf8.elementsEqual(text.utf8) != true { try await Task.sleep(for: .milliseconds(150)) }
             for try await _ in store.searchIndexChanges(order: order) {
                 guard privacyRevision == revision, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
                 let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
@@ -364,7 +488,8 @@ final class DashboardModel {
     }
 
     private func searchIsCurrent(_ text: String, offset: Int, order: SessionSearchOrder, filter: SessionLibraryFilter?) -> Bool {
-        !Task.isCancelled && text == sessionSearchText && offset == sessionSearchOffset && order == sessionSearchOrder
+        !Task.isCancelled && text.utf8.elementsEqual(sessionSearchText.utf8) &&
+            offset == sessionSearchOffset && order == sessionSearchOrder
             && filter == libraryFilter
     }
 
@@ -533,7 +658,7 @@ final class DashboardModel {
     }
 
     func searchFromTopic(_ term: String) {
-        sessionSearchText = SearchQuery.quotedLiteral(term)
+        replaceSearchQuery(SearchQuery.quotedLiteral(term))
     }
 
     func observeSmartGroups() async {
@@ -612,7 +737,10 @@ final class DashboardModel {
             rootURL: directory.appendingPathComponent("unused-source"), environment: "Synthetic"))
         let primary = SessionKey(agent: .codex, nativeID: "preview-import")
         let other = SessionKey(agent: .codex, nativeID: "preview-docs")
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let realNow = Int64(Date().timeIntervalSince1970 * 1000)
+        let knownClock = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PRESENTATION_ID"] != nil
+            ? Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 12, hour: 17, minute: 4)) : nil
+        let now = knownClock.map { Int64($0.timeIntervalSince1970 * 1000) + 900_000 } ?? realNow
         var records: [NormalizedRecord] = [
             .session(.init(key: primary, sourceID: sourceID, environment: "Synthetic",
                            cwd: "/synthetic/projects/client", title: "Verify synthetic import",
@@ -637,6 +765,15 @@ final class DashboardModel {
             records.append(.event(.init(session: primary, sequence: Int64(i), timestamp: now - 60_000 + Int64(i),
                                        kind: i.isMultiple(of: 2) ? .user : .assistant,
                                        text: text, dedupeKey: "preview:import:\(i)")))
+        }
+        if let knownClock {
+            // One known clock time and a separate live, cache-inclusive rate.
+            records.append(.tokens(.init(session: primary, timestamp: realNow - 1_000, model: "fixture",
+                                         counts: .init(inputFresh: 28, cacheRead: 10, output: 10),
+                                         dedupeKey: "preview:presentation-rate")))
+            records.append(.event(.init(session: primary, sequence: 401,
+                                       timestamp: Int64(knownClock.timeIntervalSince1970 * 1000), kind: .user,
+                                       text: "Fixed time example", dedupeKey: "preview:presentation-time")))
         }
         if CommandLine.arguments.contains("--synthetic-overview") ||
             ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_OVERVIEW"] == "1" {
@@ -692,6 +829,9 @@ final class DashboardModel {
         let peer = SessionKey(agent: .claudeCode, nativeID: "preview-project-worktree")
         let docs = SessionKey(agent: .codex, nativeID: "preview-project-docs")
         let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let grouping = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SESSION_GROUPING"] == "1"
+        let groupingSearch = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_GROUPING_SEARCH"] == "1"
+        let docsActivity = now - (grouping ? 10_000 : 120_000)
         var records: [NormalizedRecord] = [
             .session(.init(key: primary, sourceID: codex, environment: "Local",
                            cwd: client, title: "Verify synthetic checkout",
@@ -701,13 +841,13 @@ final class DashboardModel {
                            startedAt: now - 800_000, lastEventAt: now - 30_000, status: .running, gitBranch: "demo")),
             .session(.init(key: docs, sourceID: codex, environment: "Local",
                            cwd: "/synthetic/work/docs", title: "Review synthetic documentation",
-                           startedAt: now - 2_000_000, lastEventAt: now - 120_000, status: .waiting)),
+                           startedAt: now - 2_000_000, lastEventAt: docsActivity, status: .waiting)),
             .event(.init(session: primary, sequence: 0, timestamp: now, kind: .assistant,
                          text: "Synthetic checkout verified", dedupeKey: "preview:project:checkout")),
             .event(.init(session: peer, sequence: 0, timestamp: now - 30_000, kind: .toolResult,
                          toolName: "Synthetic check", text: "PROJECT_TOKEN=synthetic-project-secret",
                          dedupeKey: "preview:project:worktree")),
-            .event(.init(session: docs, sequence: 0, timestamp: now - 120_000, kind: .assistant,
+            .event(.init(session: docs, sequence: 0, timestamp: docsActivity, kind: .assistant,
                          text: "Synthetic documentation reviewed", dedupeKey: "preview:project:docs")),
         ]
         if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PROJECT_ACTIONS"] == "1" {
@@ -726,7 +866,8 @@ final class DashboardModel {
                              ]))),
             ]
         }
-        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PROJECT_USAGE"] == "1" {
+        let listUsage = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_LIST_USAGE"] == "1"
+        if listUsage || ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PROJECT_USAGE"] == "1" {
             let price = try PriceTable.decode(Data(#"{"schemaVersion":1,"currency":"USD","unit":"per_million_tokens","updatedAt":"2026-01-01","models":[{"id":"project-fixture-priced","vendor":"fixture","displayName":"Synthetic","prices":[{"effectiveFrom":"2020-01-01","input":4,"output":2,"cacheRead":1,"source":"https://example.invalid/","checkedAt":"2020-01-01"}]}]}"#.utf8))
             _ = try store.activatePricing(TokenQuoteEngine.make(table: price))
             records += [
@@ -738,16 +879,42 @@ final class DashboardModel {
                               counts: .init(output: 1000), dedupeKey: "preview:project:other")),
             ]
         }
+        if listUsage {
+            records += [
+                .tokens(.init(session: primary, timestamp: 0, model: nil,
+                              counts: .init(output: 7), dedupeKey: "preview:session:unknown-rate")),
+                .event(.init(session: primary, sequence: 1, timestamp: now - 1, kind: .user,
+                             text: "会话用量检查", dedupeKey: "preview:session:usage-query")),
+                .event(.init(session: peer, sequence: 1, timestamp: now - 30_000, kind: .user,
+                             text: "会话用量检查", dedupeKey: "preview:session:peer-usage-query")),
+            ]
+        }
         if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOPICS"] == "1" {
             records.append(.event(.init(session: primary, sequence: 2, timestamp: now + 1, kind: .user,
                                         text: "harmonic", dedupeKey: "preview:project:topic")))
+        }
+        if grouping {
+            let ungrouped = SessionKey(agent: .codex, nativeID: "preview-session-ungrouped")
+            records.append(.session(.init(key: ungrouped, sourceID: codex, environment: "Local",
+                                          title: "Synthetic without a project", lastEventAt: now - 40_000)))
+        }
+        if groupingSearch {
+            for number in 1...53 {
+                let key = SessionKey(agent: .codex, nativeID: "preview-grouped-search-\(number)")
+                let time = now - Int64(number) * 1000
+                let path = number.isMultiple(of: 2) ? client : "/synthetic/work/docs"
+                records.append(.session(.init(key: key, sourceID: codex, environment: "Local",
+                    cwd: path, title: "Synthetic search result \(number)", lastEventAt: time)))
+                records.append(.event(.init(session: key, sequence: 0, timestamp: time, kind: .user,
+                    text: "分组搜索命中", dedupeKey: "preview:grouped-search:\(number)")))
+            }
         }
         try store.write(records)
     }
 
     func openProjectSession(_ id: SessionKey) {
         setLibraryFilter(nil)
-        sessionSearchText = ""
+        replaceSearchQuery("")
         selectedSessionID = id
         page = .sessions
     }
@@ -755,7 +922,7 @@ final class DashboardModel {
     func openMenuSearch(_ query: String) {
         setLibraryFilter(nil)
         page = .sessions
-        sessionSearchText = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        replaceSearchQuery(query)
         sessionSearchOffset = 0
     }
 
@@ -878,6 +1045,16 @@ final class DashboardModel {
         }
         if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOPICS"] == "1" {
             lines.append(#"{"type":"user","uuid":"synthetic-index-livetopic","message":{"content":"harmonic"}}"#)
+        }
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INHERITED_TRANSCRIPT"] == "1" {
+            let copied = #"{"type":"user","uuid":"00000000-0000-4000-8000-000000000301","sessionId":"00000000-0000-0000-0000-000000000033","timestamp":1000,"cwd":"/synthetic/inherited-original","message":{"content":"Confirmed inherited message"}} "#
+            let redacted = #"{"type":"assistant","uuid":"00000000-0000-4000-8000-000000000302","sessionId":"00000000-0000-0000-0000-000000000033","timestamp":2000,"message":{"content":"API_TOKEN=synthetic-inherited-secret"}} "#
+            lines = [copied, redacted,
+                #"{"type":"user","uuid":"00000000-0000-4000-8000-000000000303","sessionId":"00000000-0000-0000-0000-000000000033","timestamp":3000,"message":{"content":"Later original message not copied"}} "#]
+            let continuation = [copied, redacted,
+                #"{"type":"user","uuid":"00000000-0000-4000-8000-000000000304","sessionId":"00000000-0000-0000-0000-000000000032","timestamp":4000,"cwd":"/synthetic/continued-preview","message":{"content":"Own continuation message"}} "#]
+            let child = project.appendingPathComponent("00000000-0000-0000-0000-000000000032.jsonl")
+            try Data((continuation.joined(separator: "\n") + "\n").utf8).write(to: child)
         }
         try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
         try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude source", rootURL: root,
@@ -1084,6 +1261,7 @@ struct SessionListItem: Identifiable, Sendable {
     let startedAt: Int64?
     let lastActivity: Int64?
     let archived: Bool
+    let usage: IndexedSessionUsageSummary?
 
     nonisolated init(_ row: IndexedSession, maskSecrets: Bool = true) {
         func visible(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
@@ -1098,6 +1276,7 @@ struct SessionListItem: Identifiable, Sendable {
         startedAt = row.startedAt
         lastActivity = row.lastActivity
         archived = row.archived
+        usage = row.usage
     }
 }
 

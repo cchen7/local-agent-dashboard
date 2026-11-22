@@ -90,15 +90,28 @@ let raw = #"not a comment: // and /*"#
                           "App/Tests/FixedKeyboardTests.swift")
         self.assertEqual(guard.check_ui_keyboard(self.root), 2)
         for call in ("field.typeText(text)", "app.typeKey(key)", "TISCreateInputSourceList(nil, true)",
-                     "TISSelectInputSource(ref)", "CGRequestPostEventAccess()", "event.postToPid(pid)"):
+                     "TISCopyCurrentASCIICapableKeyboardInputSource()", "TISSelectInputSource(ref)",
+                     "CGRequestPostEventAccess()", "event.postToPid(pid)",
+                     "XCUIElement.perform(withKeyModifiers: .command) {}"):
             with self.subTest(call=call):
                 baseline.write_text(call)
                 with self.assertRaises(guard.Violation):
                     guard.check_ui_keyboard(self.root)
         baseline.write_text("label.click()")
-        own.write_text("TISEnableInputSource(ref)")
-        with self.assertRaises(guard.Violation):
-            guard.check_ui_keyboard(self.root)
+        for call in ("TISEnableInputSource(ref)", "CGRequestPostEventAccess()", "event.post(tap: .cgSessionEventTap)"):
+            own.write_text(call)
+            with self.subTest(driver_call=call), self.assertRaises(guard.Violation):
+                guard.check_ui_keyboard(self.root)
+
+    def test_production_uses_native_fields_without_keyboard_automation(self):
+        self.source("TextField(\"Query\", text: $query).keyboardShortcut(.defaultAction)")
+        self.assertEqual(guard.check_forbidden(self.root), 1)
+        for call in ("TISCopyCurrentKeyboardInputSource()", "TISSelectInputSource(ref)", "CGRequestPostEventAccess()",
+                     "CGEventCreateKeyboardEvent(nil, 0, true)", "event.postToPid(pid)"):
+            with self.subTest(call=call):
+                self.source(call)
+                with self.assertRaises(guard.Violation):
+                    guard.check_forbidden(self.root)
 
     def test_c_line_continuation_cannot_hide_a_socket_call(self):
         self.source("int fd = so\\\ncket(1, 2, 3);", "App/Synthetic.c")

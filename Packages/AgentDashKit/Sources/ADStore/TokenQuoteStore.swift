@@ -31,8 +31,8 @@ public extension AgentStore {
         }
     }
 
-    /// Run one bounded background transaction. Rollups are updated atomically
-    /// with the event by the normal index triggers.
+    /// Run one bounded background transaction. Each grouped delta and its
+    /// individual stored quotes become visible in the same commit.
     func backfillUnpriced(_ cursor: UnpricedTokenSweep, limit: Int = 1_024) throws -> UnpricedTokenBatch {
         try databasePool.write { db in
             guard let active = tokenQuoter.withLock({ $0 }), active.revision == cursor.revision else {
@@ -188,6 +188,13 @@ enum TokenQuoteStore {
                 WHERE t.id=q.id AND t.price_status='unpriced' AND t.cache_read>0
                   AND (q.savings IS NOT NULL OR t.cache_savings_micro_usd IS NOT NULL)
                 GROUP BY 1,2,3;
+                INSERT INTO session_usage_delta
+                SELECT t.session_id,0,0,0,0,0,0,sum(q.cost),
+                       -sum(t.input_fresh+t.cache_read+t.cache_write+t.cache_write_1h+t.output),
+                       0,sum(q.status='approx')
+                FROM temp.pending_token_quotes q CROSS JOIN token_events t
+                WHERE t.id=q.id AND t.price_status='unpriced'
+                GROUP BY t.session_id;
                 UPDATE token_events SET (cost_micro_usd,price_status,price_ref,rate_basis_id,cache_savings_micro_usd)=(
                     SELECT q.cost,q.status,q.reference,q.basis_id,q.savings
                     FROM temp.pending_token_quotes q WHERE q.id=token_events.id

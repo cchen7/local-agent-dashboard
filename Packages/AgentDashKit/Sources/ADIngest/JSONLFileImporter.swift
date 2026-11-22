@@ -124,6 +124,7 @@ public enum JSONLFileImporter {
                               unknownRecords: resume?.unknownRecords ?? 0)
         var framer = JSONLFramer(offset: next.offset, sequence: next.sequence, prefixLimit: prefixLimit)
         let startingOffset = next.offset
+        var startsAtBeginning = resume == nil && encoding == .plain
         var lineStart = startingOffset
         var lines: Int64 = 0
         var batchLines = 0
@@ -141,7 +142,9 @@ public enum JSONLFileImporter {
             guard unchanged
             else { throw JSONLImportFailure.sourceChanged }
             let receipt = try store.commitFileBatch(batch, for: fileID, from: saved, to: next,
-                                                    exclusionRevision: position.exclusionRevision)
+                                                    exclusionRevision: position.exclusionRevision,
+                                                    startsAtBeginning: startsAtBeginning)
+            startsAtBeginning = false
             if receipt.needsWorkspaceReplay { throw ImportControl.workspaceReplay }
             saved = receipt.checkpoint
             batch.removeAll(keepingCapacity: true)

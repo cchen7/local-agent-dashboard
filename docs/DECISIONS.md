@@ -557,3 +557,100 @@ labels. Rank with the existing TF-IDF rule, return at most five distinguishable
 labels with literal search proof, and aggregate project labels only from a
 current canonical member scope. Cap candidate reads, assembled message sizes,
 and the distinct term set; use no polling while idle.
+
+## DEV-077 — Group visible session rows with the Projects identity
+
+The grouping preference is app-owned and starts off by default. Observe the
+existing project catalog only on the Sessions page while grouping is enabled.
+Use the canonical project ID, never the masked header name or raw workspace
+text. Form sections from the already-ordered current rows; group order follows
+the first hit, with original activity or relevance order within each section.
+Missing project metadata keeps a visible row under Ungrouped. Retain search
+and sidebar scope rather than changing the query or paging. Mask complete
+heading fields before display, and fall back to the flat list if unavailable.
+
+## DEV-078 — Read the same committed usage in Sessions rows and detail
+
+Backfill one summary per session from the app-owned token ledger. Maintain
+the summary in the same transactions as token inserts, corrections, ownership
+transfers, quote backfill, and deletes. A background quote batch updates
+each affected session once inside the same transaction. A library observation uses one indexed
+join; opening and scrolling the list do not scan token events or start an
+observer per row. The detail uses the same counters, keeping its turn query and
+chart separate. Retained usage after a session expires continues to belong to
+period and project totals, without creating a session row. Rows show compact
+tokens and the selected display currency, with exact counts in accessible
+labels and explicit partial, approximate and unpriced states.
+
+## DEV-079 — Fold only confirmed copies into a continued transcript
+
+Link the current Claude primary file and child session to canonical event rows
+with matching recorded owner, stable event UUID and indexed content. Keep the
+copy's physical order and block position; its reference never adds FTS, text,
+usage or turns to the child. The default folded row identifies one contributing
+original when known; multiple owners stay generic. Expansion pages only copied
+previews, without the original file or archived tool actions. Re-scan a live
+file from byte zero to reconstruct its references; a canonical body edit or
+owner change invalidates old references. Deleting or excluding the canonical
+event or child removes its references. No ancestry is inferred for a
+source that has not demonstrated its copy format.
+
+Session rows reserve their normal height during live insertion. The native list
+can otherwise briefly allocate its one-line default to a new multi-line row,
+letting the following row obscure its caption and click target.
+
+## DEV-080 — Describe the running app’s signature in About
+
+Use the bundle’s version and build. Validate this process with Apple’s
+code-signing services and [the no-network flag](https://developer.apple.com/documentation/security/seccsflags/nonetworkaccess),
+then render the embedded entitlement dictionary. The configured plist is not
+runtime readback, and an invalid, unreadable or unrecognized profile cannot
+verify the absence of network permission. This display does not replace
+the release’s signed artifact check or zero-network observation.
+
+The native About check takes an independent artifact receipt in
+`TEST_RUNNER_AGENTDASH_ABOUT_ARTIFACT_RECEIPT`: version and build strings from
+the built Info.plist and entitlement entries from `codesign -d --entitlements - --xml`.
+Represent booleans as `true`/`false` strings and join array entries with newlines.
+Compare the receipt against the running app’s display in English and Chinese.
+
+## DEV-081 — Local clock and optional menu throughput
+
+General persists just the display options. The clock uses
+[Foundation’s locale hour-cycle override](https://developer.apple.com/documentation/foundation/locale/components/hourcycle)
+for absolute times and period controls without moving any query or bucket
+boundary. The default follows the system. Only an enabled menu label
+observes recent call-level counts; its sampling matches the panel’s exact
+trailing minute and wakes only on relevant token changes or to age out a
+nonzero value. The detailed panel keeps its own visible-only read.
+
+## DEV-082 — Present validated search filters as native tokens
+
+The same bounded lexer that validates a query captures filter spellings. This
+lets the native field show text and tokens without changing query bytes on
+presentation or submission. Typed input is kept verbatim until submission,
+and AppKit’s marked-text state prevents converting during composition.
+Only removing or editing a token or text changes the query; filters are
+global and remain in their original order, independent of the sidebar scope.
+The session list’s Search Filters menu offers mouse removal with masked labels.
+Keep filter management and result sorting beside the results so the native
+search field has room for both tokens and the query at minimum width.
+
+## DEV-083 — Fail closed on accidental test launches
+
+Use a separate SyntheticQA build configuration and bundle identifier for
+native tests, using the same frozen entitlements. The app's entry point
+rejects a missing `--synthetic` argument before SwiftUI creates its app
+delegate or model. Verify the signed identity, compiled guard and actual
+early exit before a desktop test. Debug and Release keep normal entry
+behavior; tests target only the isolated QA bundle.
+
+An explicitly authorized QA launch opens the existing Dashboard scene after
+startup, without relying on restored windows from the normal app. Native
+diagnostics use the test window, never a complete application accessibility
+tree. Keep normal Debug and Release entry and window behavior.
+
+Bind the transcript's match scroll position before laying out a new page.
+An immediate scroll call after creating the scroll view could be dropped on
+a fresh launch, even though the right match page had loaded. Keep a manual
+scroll position when unrelated changes refresh the same page.

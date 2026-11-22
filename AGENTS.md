@@ -31,11 +31,11 @@ The app is **fully local and never touches the network.**
 
 Changing any of these needs explicit approval from the product owner. Do not implement it; raise it as a question in the PR.
 
-## Hard rules for keyboard input tests
+## Hard rules for input development and QA
 
-- **Fix one Apple input source per run.** For real keyboard tests, use macOS's built-in ABC for ASCII and shortcuts, or Apple's built-in Pinyin – Simplified for real Chinese typing. The required source must already be selected before the run and remain fixed throughout it.
-- **Never use third-party input methods.** Do not enumerate, cycle, switch, enable or disable input sources, or request input-source permissions. Third-party input method compatibility is out of scope. Avoid text injection helpers that can select or restore an input source on their own.
-- **Keep both kinds of Chinese coverage.** Routine unattended UI tests prefill Chinese in the real search field using synthetic data, then cover search, results and navigation with UI controls. Separately verify actual Pinyin composition and commit into that same field. For any actual-keyboard test, if the fixed source, target focus or existing event access cannot be verified, send no keys and record that case as unverified.
+- **Fix one built-in macOS input source per real keyboard run.** Use Apple Pinyin – Simplified to type and commit Chinese, and ABC for ASCII and shortcuts. The source must already be selected before the run and remain fixed throughout it.
+- **Never use third-party input methods.** In the app, tests, scripts and desktop tools, do not enumerate, cycle, change, enable or disable input sources or request input permissions. Use native text controls and avoid input helpers that can select or restore a layout. Third-party input method compatibility is out of scope.
+- **Actual Chinese typing is required for search acceptance.** Unattended UI tests can prefill a synthetic query and verify search, results, paging and navigation. Separately verify Apple Pinyin composition and commit in the real search field. If the source, target focus or existing automation access cannot be verified, send no keys and record that case as unverified. Follow the [input QA matrix](docs/reports/FIXED-INPUT-QA.md) for new or changed search, text entry and shortcuts.
 
 ## Workflow
 
@@ -62,7 +62,7 @@ swift test --package-path Packages/AgentDashKit
 
 # App tests (UI smoke, performance)
 xcodebuild test -project AgentDashboard.xcodeproj -scheme AgentDashboard \
-  -destination 'platform=macOS,arch=arm64'
+  -configuration SyntheticQA -destination 'platform=macOS,arch=arm64'
 
 # Guardrails — must pass before every commit
 Tools/check-entitlements.sh path/to/AgentDashboard.app
@@ -79,10 +79,12 @@ Tools/pricing/install
 ```
 
 For local ad-hoc App validation, follow the build/re-sign/test-without-building
-procedure in `docs/reports/M0-FOUNDATION.md`; inspect the actual frozen entitlements
-and runtime flag. If the UI host cannot expose a menu entry, a skipped test is not
-acceptance: run its documented manual-entry mode and obtain the real panel/reopen
-assertions. Visual review may use the owner's authorized Computer Use tool.
+procedure in `docs/reports/M0-FOUNDATION.md`. Use the isolated SyntheticQA build
+and run `Tools/check-synthetic-launch.sh` against the signed artifact before
+UI validation. It must refuse a launch missing `--synthetic`. If the UI host
+cannot expose a menu entry, a skipped test is not acceptance: obtain the real
+panel/reopen assertions in the documented manual-entry mode. Inspect only
+the verified test app's windows and avoid tools that can auto-launch it.
 
 ## Code map
 

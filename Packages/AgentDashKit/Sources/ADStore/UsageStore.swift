@@ -131,17 +131,29 @@ public extension AgentStore {
             .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
     }
 
+    /// The opt-in status label observes only columns used by the rolling rate.
+    /// Quote, status and configuration changes do not need another sample.
+    func menuBarThroughputChanges() -> some AsyncSequence<Void, any Error> & Sendable {
+        let inputs = Table("token_events").select(
+            Column("ts"), Column("precision"), Column("input_fresh"), Column("cache_read"),
+            Column("cache_write"), Column("cache_write_1h"), Column("output"))
+        return ValueObservation.tracking(region: inputs, fetch: { _ in () })
+            .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
+    }
+
+    func menuBarThroughput(now: Int64) async throws -> Int64 {
+        try await databasePool.read { db in
+            try UsageLimitsStore.totalThroughput(UsageLimitsStore.throughput(db, now: now, agent: nil))
+        }
+    }
+
     /// Produce the menu's local day, trailing minute and active list from one
     /// committed snapshot. No transcripts or source files are read.
     func menuUsage(now: Int64, timeZone: TimeZone, reusing chart: UsageChartSnapshot? = nil) throws -> MenuUsageSnapshot {
         let window = try UsageWindow.today(now: now, timeZone: timeZone)
         return try databasePool.read { db in
             let rates = try UsageLimitsStore.throughput(db, now: now, agent: nil)
-            let current = try rates.reduce(Int64(0)) { total, rate in
-                let (value, overflow) = total.addingReportingOverflow(rate.tokensPerMinute)
-                guard !overflow else { throw StoreError.invalidTokenCounts }
-                return value
-            }
+            let current = try UsageLimitsStore.totalThroughput(rates)
             let earliest = now.subtractingReportingOverflow(60_000)
             let sessions = try Row.fetchAll(db, sql: """
                 WITH recent AS (

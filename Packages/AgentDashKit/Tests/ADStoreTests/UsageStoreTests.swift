@@ -232,3 +232,35 @@ func exactHourlyProjection() throws {
         #expect(fast.breakdown.first { $0.agent == .copilot }?.peak?.value == 20)
     }
 }
+
+@Test("FR-TK-1: the optional menu label uses the same trailing minute and accounting as the full panel",
+      .timeLimit(.minutes(1)))
+func nativeMenuBarThroughputMatchesThePanelAndExpires() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("menu-rate-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let store = try AgentStore(databaseURL: folder.appendingPathComponent("index.sqlite"))
+    let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic", rootURL: folder))
+    let session = SessionKey(agent: .codex, nativeID: "synthetic-bar-rate")
+    let now: Int64 = 1_797_000_000_000
+    try store.write([.session(.init(key: session, sourceID: source, environment: "Synthetic"))])
+    var changes = store.menuBarThroughputChanges().makeAsyncIterator()
+    _ = try await changes.next()
+    #expect(try await store.menuBarThroughput(now: now) == 0)
+    try store.write([
+        .tokens(.init(session: session, timestamp: now - 60_001, counts: .init(output: 91), dedupeKey: "older")),
+        .tokens(.init(session: session, timestamp: now - 60_000,
+                      counts: .init(inputFresh: 2, cacheRead: 3, cacheWrite: 1, output: 4, reasoning: 1),
+                      dedupeKey: "inclusive")),
+        .tokens(.init(session: session, timestamp: now - 1, counts: .init(output: 7), dedupeKey: "latest")),
+        .tokens(.init(session: session, timestamp: now, counts: .init(output: 13), dedupeKey: "exclusive")),
+        .tokens(.init(session: session, timestamp: now - 1, counts: .init(output: 111), precision: .snapshot,
+                      dedupeKey: "coarse")),
+    ])
+    _ = try await changes.next()
+    #expect(try await store.menuBarThroughput(now: now) == 17)
+    let panel = try store.menuUsage(now: now, timeZone: .gmt)
+    #expect(panel.currentTokens == 17)
+    #expect(try await store.menuBarThroughput(now: now + 1) == 20)
+    #expect(try await store.menuBarThroughput(now: now + 60_001) == 0)
+}
