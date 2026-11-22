@@ -308,6 +308,11 @@ The normalized stream keeps typed turn/shutdown evidence and uses
 `modelMetrics.<model>.usage` snapshots retain their file position; the
 app-owned store subtracts earlier exact calls to avoid double counting.
 Per-call and child-event accounting are covered by synthetic fixtures.
+Observed `session.usage_record` events can put the explicit model in
+`data.usage.model` with no model at the event-data level. Parser v5
+reads that field before falling back to session metadata. Replaying a
+v4 file fills previously skipped calls; earlier native checkpoints
+continue to supply only the usage not already represented by calls.
 Event-backed Copilot workspaces expose the native title as top-level
 `name`, with an optional top-level `summary`. The observed strings used
 plain scalars, single or double quotes, and literal `|-` blocks. The
@@ -320,6 +325,13 @@ supported event stream is present. The default source can retain workspace
 metadata, plan files and auxiliary directories without `events.jsonl`.
 Count those as workspace-only in native comparisons. Do not infer a
 transcript, tokens or an App-importable event log from the sidecar.
+
+A stable read-only copy of Copilot's `session-store.db` can expose
+`assistant_usage_events` for independent numeric comparisons. Its
+coverage is not identical to the supported JSONL streams: an overlapping
+session can have additional accounting records only in the database.
+Compare the same time window and session identities without treating
+database-only activity as an event that the JSONL adapter imported.
 
 Claude parser v5 also records a typed turn-end hint on assistant text
 when `message.stop_reason` is `end_turn`. A turn end does not end the

@@ -897,3 +897,12 @@ these paths and discarded the agent strokes and the cumulative dash.
 Keep the selected metric and periods together when their intrinsic
 width fits; move periods below the heading when it does not.
 Verify the native strokes and heading at three sizes in both appearances.
+
+## DEV-098 — Read the model in Copilot's per-call usage (ADP-CP)
+
+Some real `session.usage_record` rows carry the model only inside the
+usage object. Read it ahead of session metadata so a call keeps its
+explicit model and time. Bump the parser version so files with skipped
+calls replay; reconcile the existing checkpoint remainder as those
+calls arrive. A synthetic v4 checkpoint test verifies that a preceding
+call replaces its covered volume and a subsequent call adds new volume.

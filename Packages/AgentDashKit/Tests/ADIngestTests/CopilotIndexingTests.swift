@@ -75,6 +75,54 @@ func copilotUsageGolden() throws {
     #expect(try store.events(in: key) == events)
 }
 
+@Test("ADP-CP: replay v4 model-less call rows using the model explicitly recorded in usage")
+func copilotReplaysNestedUsageModel() throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID().uuidString)")
+    let root = temp.appendingPathComponent("source", isDirectory: true)
+    let folder = root.appendingPathComponent("session-state/synthetic", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let stream = [
+        #"{"type":"session.start","id":"start","timestamp":"2020-01-01T00:00:00Z","data":{"sessionId":"synthetic"}}"#,
+        #"{"type":"session.usage_record","id":"before","timestamp":"2020-01-01T00:00:01Z","data":{"usage":{"model":"synthetic-inner","inputTokens":100,"cacheReadTokens":20,"outputTokens":5}}}"#,
+        #"{"type":"session.shutdown","id":"snapshot","timestamp":"2020-01-01T00:00:02Z","data":{"modelMetrics":{"synthetic-inner":{"usage":{"inputTokens":100,"cacheReadTokens":20,"outputTokens":5}}}}}"#,
+        #"{"type":"session.usage_record","id":"after","timestamp":"2020-01-01T00:00:03Z","data":{"usage":{"model":"synthetic-inner","inputTokens":30,"cacheReadTokens":10,"outputTokens":7}}}"#,
+    ]
+    try Data((stream.joined(separator: "\n") + "\n").utf8).write(to: folder.appendingPathComponent("events.jsonl"))
+    let store = try AgentStore(databaseURL: temp.appendingPathComponent("index.sqlite"))
+    var source = Source(agent: .copilot, label: "Synthetic Copilot", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let sourceID = try #require(source.id)
+    let adapter = CopilotAdapter()
+    let file = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    let fileID = try store.upsertFile(file, checkpoint: nil)
+    let reader = try SourceFileReader(root: root, relativePath: file.relativePath)
+    let saved = try reader.snapshot()
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    let old = Checkpoint(inode: saved.inode, size: saved.size, offset: saved.size, parserVersion: 4,
+        sequence: 3, previousTimestamp: 1_577_836_803_000, device: saved.device,
+        modificationTimeNS: saved.modificationTimeNS)
+    try store.commitFileBatch([
+        .session(.init(key: key, sourceID: sourceID, fileID: fileID, environment: "Synthetic")),
+        .copilotUsageSnapshot(.init(session: key, model: "synthetic-inner", sequence: 2, timestamp: 1_577_836_802_000,
+            counts: .init(inputFresh: 80, cacheRead: 20, output: 5),
+            dedupeKey: "cp:9:synthetic:id:8:snapshot:checkpoint:synthetic-inner")),
+    ], for: fileID, from: nil, to: old)
+    #expect(try totals(in: store, session: key).total == 105)
+    let rebuilt = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    #expect(rebuilt.completeLines == 4)
+    #expect(try totals(in: store, session: key) == .init(inputFresh: 100, cacheRead: 30, output: 12))
+    let usage = try store.databasePool.read { db in
+        try Row.fetchAll(db, sql: "SELECT model,precision,ts FROM token_events ORDER BY ts")
+    }
+    #expect(usage.map { $0["model"] as String } == ["synthetic-inner", "synthetic-inner"])
+    #expect(usage.map { $0["precision"] as String } == ["call", "call"])
+    #expect(usage.map { $0["ts"] as Int64 } == [1_577_836_801_000, 1_577_836_803_000])
+    _ = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, replay: true,
+                                        store: store, adapter: adapter)
+    #expect(try totals(in: store, session: key).total == 142)
+}
+
 private func totals(in store: AgentStore, session: SessionKey) throws -> TokenCounts {
     try store.databasePool.read { db in
         let row = try #require(try Row.fetchOne(db, sql: """

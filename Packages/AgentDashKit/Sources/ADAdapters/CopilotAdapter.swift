@@ -5,7 +5,7 @@ import Foundation
 /// GitHub Copilot CLI's append-only event stream (ADP-CP).
 public struct CopilotAdapter: AgentAdapter {
     public static let kind: AgentKind = .copilot
-    public static let parserVersion = 4
+    public static let parserVersion = 5
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}
@@ -157,7 +157,8 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
         case "session.usage_record":
             if !child {
                 let usage = data["usage"] as? AdapterJSON.Object ?? data
-                if let counts = Self.counts(usage), let model = Self.model(in: data) ?? metadata.model {
+                let model = Self.model(in: data) ?? AdapterJSON.string(usage["model"], bounded: 160) ?? metadata.model
+                if let counts = Self.counts(usage), let model {
                     records.append(.tokens(.init(session: key, timestamp: time, model: model, counts: counts,
                         dedupeKey: "\(eventKey):call", sourceSequence: frame.sequence)))
                 } else { unknown = true }
