@@ -17,16 +17,9 @@ struct MainWindow: View {
                         .navigationTitle("Token Usage")
                 }
             } else if model.page == .projects {
-                NavigationSplitView {
+                ProjectsBrowser(store: model.store, hostHome: model.projectPathHome,
+                                selection: $model.selectedProjectID, openSession: model.openProjectSession) {
                     sidebar
-                } content: {
-                    EmptyPanel(title: "No projects yet", symbol: "folder",
-                               message: "Your local library is empty.")
-                        .accessibilityIdentifier("empty.projects")
-                        .navigationSplitViewColumnWidth(min: 300, ideal: 356, max: 420)
-                        .navigationTitle("Projects")
-                } detail: {
-                    emptyDetail
                 }
             } else {
                 GeometryReader { geometry in
@@ -148,7 +141,7 @@ struct MainWindow: View {
     }
 
     @ViewBuilder private var emptyDetail: some View {
-        if model.sessions.isEmpty || model.page == .projects {
+        if model.sessions.isEmpty {
             EmptyPanel(title: "Your private, local dashboard", symbol: "lock.shield",
                        message: "Zero network. Read-only sources. Everything stays on this Mac.")
                 .accessibilityIdentifier("empty.detail")
