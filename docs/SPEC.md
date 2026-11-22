@@ -198,6 +198,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 - Default locations are read through the read-only entitlement `com.apple.security.temporary-exception.files.home-relative-path.read-only` (§12.1).
 - Other directories are picked with `NSOpenPanel` (`canChooseDirectories = true`, `showsHiddenFiles = true`) and stored as security-scoped bookmarks. Bookmarks are resolved at launch; a stale bookmark is flagged red in Settings with a "Grant access again" action.
 - Adding a custom directory saves the agent type, source name, environment label, and read-only bookmark. Registration checks the authorized directory identity so alternate spellings do not duplicate an existing source for the same agent. It does not open session files or start indexing. Use Grant access again to refresh an existing source's permission.
+- If a different directory occupies a registered pathname, adding it reports a path conflict (including equivalent path spellings) and preserves the original source and its history.
 - The first-run onboarding (§11.7) lists the detected locations and their session-file counts.
 
 ### 5.3 General parsing rules (all adapters)

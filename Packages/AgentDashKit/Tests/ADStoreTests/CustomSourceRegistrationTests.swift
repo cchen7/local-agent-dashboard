@@ -26,8 +26,10 @@ func duplicateCustomSourceDoesNotReplaceExistingSettings() throws {
     existing.access = .bookmark(Data([0x42, 0x43]))
     existing.enabled = false
     existing.pathMappings = [.init(from: "/workspace", to: "/synthetic/local")]
-    existing.id = try box.store.upsertSource(existing)
-    let id = try #require(existing.id)
+    guard case .added(let id) = try box.store.registerCustomSource(existing, identity: box.identity) else {
+        Issue.record("Expected original source to register"); return
+    }
+    existing.id = id
     let file = SourceFile(sourceID: id, relativePath: "sessions/synthetic.jsonl", role: .session)
     let checkpoint = Checkpoint(inode: 11, size: 12, offset: 10, parserVersion: 1, sequence: 0, previousTimestamp: 4)
     let fileID = try box.store.upsertFile(file, checkpoint: checkpoint)
@@ -195,4 +197,57 @@ private struct RegistrationFixture: Sendable {
     }
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
+}
+
+@Test("FR-SRC-2: a reused root path and its Data alias cannot replace the moved source", arguments: [false, true])
+func customSourceDistinguishesReusedAPFSPath(useDataAliasFirst: Bool) throws {
+    let box = try RegistrationFixture(temporaryRoot: URL(fileURLWithPath: "/private/tmp", isDirectory: true))
+    defer { box.remove() }
+    let atStart = box.directory.appendingPathComponent("Original", isDirectory: true)
+    let moved = box.directory.appendingPathComponent("Moved", isDirectory: true)
+    let dataAlias = URL(fileURLWithPath: "/System/Volumes/Data" + atStart.path, isDirectory: true)
+    let files = FileManager.default
+    try files.createDirectory(at: atStart, withIntermediateDirectories: false)
+    let oldIdentity = try SourceFileReader.directoryIdentity(root: atStart)
+    var source = box.custom(.codex, label: "Original", environment: "Synthetic")
+    source.rootURL = useDataAliasFirst ? dataAlias : atStart
+    guard case .added(let id) = try box.store.registerCustomSource(source, identity: oldIdentity) else {
+        Issue.record("Expected original source to register"); return
+    }
+    source.id = id
+    let file = SourceFile(sourceID: id, relativePath: "sessions/archived.jsonl", role: .session)
+    let checkpoint = Checkpoint(inode: 11, size: 12, offset: 10, parserVersion: 1, sequence: 0, previousTimestamp: 4)
+    let fileID = try box.store.upsertFile(file, checkpoint: checkpoint)
+    let session = SessionKey(agent: .codex, nativeID: "synthetic-archived")
+    try box.store.write([
+        .session(.init(key: session, sourceID: id, fileID: fileID, environment: source.environment)),
+        .event(.init(session: session, sequence: 0, timestamp: 4, kind: .user,
+                     text: "archived synthetic history", dedupeKey: "synthetic:archived:0")),
+    ])
+    let registeredBeforeMove = try box.store.sources()
+    try files.moveItem(at: atStart, to: moved)
+    try files.createDirectory(at: atStart, withIntermediateDirectories: false)
+    #expect(try SourceFileReader.directoryIdentity(root: moved) == oldIdentity)
+    let replacement = try SourceFileReader.directoryIdentity(root: atStart)
+    #expect(replacement != oldIdentity)
+    #expect(try SourceFileReader.directoryIdentity(root: dataAlias) == replacement)
+
+    let store = try AgentStore(databaseURL: box.index)
+    var choice = box.custom(.codex, label: "Replacement", environment: "Other")
+    choice.rootURL = source.rootURL
+    #expect(try store.registerCustomSource(choice, identity: replacement) == .pathConflict)
+    choice.rootURL = useDataAliasFirst ? atStart : dataAlias
+    let registered = try store.sources()
+    let occupiedPath = try #require(registered.first {
+        (try? SourceFileReader.directoryIdentity(root: $0.rootURL)) == replacement
+    })
+    #expect(try store.registerCustomSource(choice, identity: replacement, occupiedPath: occupiedPath) == .pathConflict)
+    // A live match against the saved path cannot override a known identity.
+    #expect(try store.registerCustomSource(choice, identity: replacement, existing: occupiedPath,
+                                           occupiedPath: occupiedPath) == .pathConflict)
+    choice.rootURL = moved
+    #expect(try store.registerCustomSource(choice, identity: oldIdentity) == .alreadyRegistered(id))
+    #expect(try store.sources() == registeredBeforeMove)
+    #expect(try store.checkpoint(for: fileID) == checkpoint)
+    #expect(try store.events(in: session).first?.text == "archived synthetic history")
 }

@@ -1361,6 +1361,23 @@
         }
       }
     },
+    "This path is saved for a different source. Choose another folder to keep both sources separate.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This path is saved for a different source. Choose another folder to keep both sources separate."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此路径已登记给另一个来源。请选择其他文件夹，以分别保留两个来源。"
+          }
+        }
+      }
+    },
     "Could not grant read-only access to this folder.": {
       "extractionState": "manual",
       "localizations": {

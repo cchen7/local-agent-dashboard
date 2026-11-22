@@ -99,10 +99,13 @@ reassigned. All six size/appearance combinations were executed and visually chec
 Sources → Add Source records the agent, label, environment and read-only
 permission after an explicit local folder choice. Read directory metadata
 under that authorization. The store atomically checks agent, persistent
-volume UUID, inode and directory creation time, as well as the standardized
-path. An older row can also match by its existing authorized directory
-identity. A match leaves the existing permission, configuration, checkpoint
-and history intact. Registration does not read session files or start indexing.
+volume UUID, inode and directory creation time. An older row without stored
+identity can match by its existing authorized directory. If the selected
+folder occupies a registered pathname but does not match that source's
+identity, report a path conflict. Check the current occupant separately from
+the saved bookmark so aliases of the replacement also report a conflict.
+Both outcomes leave the existing permission, configuration, checkpoint and
+history intact. Registration does not read session files or start indexing.
 
 ## DEV-038 — Commit JSONL batches against the expected checkpoint
 

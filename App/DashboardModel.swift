@@ -247,16 +247,23 @@ final class DashboardModel {
         guard let store else { return .storageFailed }
         do {
             let (outcome, snapshot) = try await Task.detached {
-                let existing = try store.sources().first {
-                    $0.agent == source.agent && SourceAccessProbe.directoryIdentity($0) == identity
+                let registered = try store.sources().filter { $0.agent == source.agent }
+                let existing = registered.first { SourceAccessProbe.directoryIdentity($0) == identity }
+                // Check the saved pathname independently of its bookmark. The
+                // newly selected folder can now occupy that pathname under a
+                // different spelling, while the bookmark follows the old one.
+                let occupiedPath = registered.first {
+                    (try? SourceFileReader.directoryIdentity(root: $0.rootURL)) == identity
                 }
-                let result = try store.registerCustomSource(source, identity: identity, existing: existing)
+                let result = try store.registerCustomSource(source, identity: identity,
+                                                            existing: existing, occupiedPath: occupiedPath)
                 return (result, try store.sources())
             }.value
             sources = snapshot
             switch outcome {
             case .added: return .added
             case .alreadyRegistered: return .duplicate
+            case .pathConflict: return .pathConflict
             }
         } catch { return .storageFailed }
     }
@@ -295,7 +302,7 @@ final class DashboardModel {
 }
 
 enum SourceAdditionResult: Equatable {
-    case added, duplicate, cancelled, inaccessible, storageFailed
+    case added, duplicate, pathConflict, cancelled, inaccessible, storageFailed
 }
 
 enum SessionSearchState: Equatable {

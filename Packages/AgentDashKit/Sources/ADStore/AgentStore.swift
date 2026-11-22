@@ -12,6 +12,7 @@ public enum StoreError: Error, Equatable, Sendable {
 public enum CustomSourceRegistration: Equatable, Sendable {
     case added(Int64)
     case alreadyRegistered(Int64)
+    case pathConflict
 }
 
 /// App-owned WAL database. The caller must supply a URL in its own container (or a
@@ -68,25 +69,29 @@ public final class AgentStore: Sendable {
     /// Upsert by (agent, root path); returns the stable row ID and never replaces children.
     @discardableResult
     public func upsertSource(_ source: Source) throws -> Int64 {
-        try saveSource(source, registration: nil).id
+        guard case .added(let id) = try saveSource(source, registration: nil) else {
+            throw StoreError.invalidStoredValue
+        }
+        return id
     }
 
     /// Register a selected local root. The caller supplies its observed identity
     /// and optionally an older authorized source observed to refer to that root.
-    /// The store performs no filesystem lookup.
+    /// `occupiedPath` identifies a saved path whose current occupant matched
+    /// the selected identity, even when the two path spellings differ.
+    /// The store validates both source snapshots without opening either path.
     public func registerCustomSource(_ source: Source, identity: SourceRootIdentity,
-                                     existing: Source? = nil) throws -> CustomSourceRegistration {
+                                     existing: Source? = nil, occupiedPath: Source? = nil) throws -> CustomSourceRegistration {
         guard Source.isLocalRoot(source.rootURL) else { throw StoreError.invalidLocation }
         guard case .bookmark(let data) = source.access, !data.isEmpty,
               !source.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !source.environment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { throw StoreError.invalidCustomSource }
-        let result = try saveSource(source, registration: (identity, existing))
-        return result.changed ? .added(result.id) : .alreadyRegistered(result.id)
+        return try saveSource(source, registration: (identity, existing, occupiedPath))
     }
 
-    private func saveSource(_ source: Source, registration: (identity: SourceRootIdentity, existing: Source?)?)
-    throws -> (id: Int64, changed: Bool) {
+    private func saveSource(_ source: Source, registration: (identity: SourceRootIdentity, existing: Source?, occupiedPath: Source?)?)
+    throws -> CustomSourceRegistration {
         guard source.rootURL.isFileURL else { throw StoreError.invalidLocation }
         let root = source.rootURL.standardizedFileURL.path
         let mappings = String(decoding: try JSONEncoder().encode(source.pathMappings), as: UTF8.self)
@@ -109,19 +114,17 @@ public final class AgentStore: Sendable {
                     WHERE s.agent=? AND r.volume=? AND r.inode=? AND r.birth_seconds=? AND r.birth_nanoseconds=?
                     ORDER BY s.id LIMIT 1
                     """, arguments: [source.agent.rawValue, identity.volume.uuidString, identity.inode,
-                                      identity.birthSeconds, identity.birthNanoseconds]) { return (id, false) }
-                if let existing = registration.existing, existing.agent == source.agent, let id = existing.id {
-                    let (kind, bookmark): (String, Data?)
-                    switch existing.access {
-                    case .defaultLocation: (kind, bookmark) = ("default_location", nil)
-                    case .bookmark(let data): (kind, bookmark) = ("bookmark", data)
-                    }
-                    let valid = try Bool.fetchOne(db, sql: """
-                        SELECT EXISTS(SELECT 1 FROM sources WHERE id=? AND agent=? AND root_path=? AND
-                                      access_kind=? AND bookmark IS ?)
-                        """, arguments: [id, source.agent.rawValue, existing.rootURL.standardizedFileURL.path, kind, bookmark])
-                    guard valid == true else { throw StoreError.invalidCustomSource }
-                    return (id, false)
+                                      identity.birthSeconds, identity.birthNanoseconds]) { return .alreadyRegistered(id) }
+                if let existing = registration.existing {
+                    let id = try Self.validateObservedSource(existing, for: source.agent, db: db)
+                    // A resolved bookmark can identify a legacy row, but cannot
+                    // override a known, different stored directory identity.
+                    if try Int.fetchOne(db, sql: "SELECT 1 FROM source_root_identities WHERE source_id=?",
+                                        arguments: [id]) == nil { return .alreadyRegistered(id) }
+                }
+                if let occupiedPath = registration.occupiedPath {
+                    _ = try Self.validateObservedSource(occupiedPath, for: source.agent, db: db)
+                    return .pathConflict
                 }
             }
             try db.execute(sql: """
@@ -129,19 +132,33 @@ public final class AgentStore: Sendable {
                 VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,root_path) \(conflict)
                 """, arguments: [source.agent.rawValue, source.label, root,
                                   source.environment, mappings, rules, kind, bookmark, source.enabled])
-            let changed = db.changesCount == 1
+            if registration != nil, db.changesCount == 0 { return .pathConflict }
             guard let id = try Int64.fetchOne(db, sql: "SELECT id FROM sources WHERE agent=? AND root_path=?",
                                               arguments: [source.agent.rawValue, root]) else {
                 throw StoreError.invalidStoredValue
             }
-            if changed, let identity = registration?.identity {
+            if let identity = registration?.identity {
                 try db.execute(sql: """
                     INSERT INTO source_root_identities(source_id,volume,inode,birth_seconds,birth_nanoseconds)
                     VALUES(?,?,?,?,?)
                     """, arguments: [id, identity.volume.uuidString, identity.inode, identity.birthSeconds, identity.birthNanoseconds])
             }
-            return (id, changed)
+            return .added(id)
         }
+    }
+
+    private static func validateObservedSource(_ source: Source, for agent: AgentKind, db: Database) throws -> Int64 {
+        guard source.agent == agent, let id = source.id else { throw StoreError.invalidCustomSource }
+        let (kind, bookmark): (String, Data?)
+        switch source.access {
+        case .defaultLocation: (kind, bookmark) = ("default_location", nil)
+        case .bookmark(let data): (kind, bookmark) = ("bookmark", data)
+        }
+        let valid = try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(SELECT 1 FROM sources WHERE id=? AND agent=? AND root_path=? AND access_kind=? AND bookmark IS ?)
+            """, arguments: [id, agent.rawValue, source.rootURL.standardizedFileURL.path, kind, bookmark])
+        guard valid == true else { throw StoreError.invalidCustomSource }
+        return id
     }
 
     /// Load source settings/bookmarks. This does not resolve or access the source directories.

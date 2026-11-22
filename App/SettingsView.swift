@@ -128,6 +128,7 @@ private struct AddSourceSheet: View {
     private var error: LocalizedStringResource? {
         switch result {
         case .duplicate: "This folder is already registered for this agent. Use Grant access again to update its permission."
+        case .pathConflict: "This path is saved for a different source. Choose another folder to keep both sources separate."
         case .inaccessible: "Could not grant read-only access to this folder."
         case .storageFailed: "Could not save the new source."
         case .added, .cancelled: nil
