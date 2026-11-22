@@ -906,3 +906,15 @@ explicit model and time. Bump the parser version so files with skipped
 calls replay; reconcile the existing checkpoint remainder as those
 calls arrive. A synthetic v4 checkpoint test verifies that a preceding
 call replaces its covered volume and a subsequent call adds new volume.
+
+## DEV-099 — Quote the observed Copilot spelling of supported Claude models (FR-COST)
+
+Use exact aliases for the dotted Fable 5.1, Haiku 5.5, Opus 5.5 and
+Sonnet 5.5 versions. Anthropic's
+[model catalog](https://platform.claude.com/docs/en/build-with-claude/claude-platform-on-aws)
+identifies the corresponding dashed API IDs. Do not normalize punctuation
+generally or treat unknown labels as a public model.
+
+Add the [published Opus 5.5 launch rates](https://www.anthropic.com/news/claude-opus-5-5)
+effective 2026-09-22. Existing rate entries are unchanged. Earlier dates
+without verified rates and unrecognized labels stay unpriced.

@@ -3,9 +3,13 @@
   "schemaVersion": 1,
   "currency": "USD",
   "unit": "per_million_tokens",
-  "updatedAt": "2026-11-20",
+  "updatedAt": "2026-11-23",
   "displayCurrencies": [],
   "aliases": {
+    "claude-fable-5.1": "claude-fable-5-1",
+    "claude-haiku-5.5": "claude-haiku-5-5",
+    "claude-opus-5.5": "claude-opus-5-5",
+    "claude-sonnet-5.5": "claude-sonnet-5-5",
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",
     "claude-opus-4-5": "claude-opus-4-5-20251101",
     "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
@@ -679,6 +683,16 @@
           "cacheWrite1h": 8,
           "source": "https://platform.claude.com/docs/en/about-claude/pricing#model-pricing",
           "checkedAt": "2026-11-20"
+        },
+        {
+          "effectiveFrom": "2026-09-22",
+          "input": 4,
+          "output": 20,
+          "cacheRead": 0.2,
+          "cacheWrite5m": 5,
+          "cacheWrite1h": 8,
+          "source": "https://www.anthropic.com/news/claude-opus-5-5",
+          "checkedAt": "2026-11-22"
         }
       ]
     },
