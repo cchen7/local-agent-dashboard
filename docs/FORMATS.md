@@ -310,6 +310,12 @@ app-owned store subtracts earlier exact calls to avoid double counting.
 Per-call and child-event accounting are covered by synthetic fixtures.
 This import does not parse `workspace.yaml` or the optional metadata DB.
 
+A native `workspace.yaml` updated timestamp does not establish that a
+supported event stream is present. The default source can retain workspace
+metadata, plan files and auxiliary directories without `events.jsonl`.
+Count those as workspace-only in native comparisons. Do not infer a
+transcript, tokens or an App-importable event log from the sidecar.
+
 Claude parser v5 also records a typed turn-end hint on assistant text
 when `message.stop_reason` is `end_turn`. A turn end does not end the
 session. An absent stop reason is ordinary assistant activity.
@@ -332,6 +338,25 @@ files as immutable. A session can have usage and task events without usable
 transcript messages in that channel. The local writer therefore chooses a
 transcript based on usable text and supersedes fallback content transactionally.
 This section and implementation are not cleared for publication.
+
+The native Codex `session_index.jsonl` can repeat an `id` and includes
+`updated_at`; it is not a start-time or token-usage ledger. For a
+fixed-window inventory check, deduplicate native IDs and check that the
+supported rollout headers resolve those same IDs. Matching a header
+does not prove that the whole file was imported or that its usage totals
+match. Do not compare a native updated-session count with a count of
+sessions having token events in the window.
+
+## Scope of native accounting verification
+
+Claude Code's `stats-cache.json` can contain dated `dailyActivity`
+and `dailyModelTokens`, plus aggregate session/model counters. A cache
+whose coverage ends before the audit window is unavailable as a reference
+for that window; its missing days do not mean zero sessions or zero usage.
+Distinct session counts, cache-inclusive token sums, and priced-record
+coverage are separate checks. A native Copilot shutdown total used by
+the fallback importer is a consistency reference, not an independent
+CLI-wide accounting ledger.
 
 ## Local source availability for M0
 
