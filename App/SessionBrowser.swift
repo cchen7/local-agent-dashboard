@@ -121,6 +121,9 @@ struct SessionTranscript: View {
     @State private var section = DetailSection.transcript
     @Environment(\.sessionOverviewOptions) private var overviewOptions
     @Environment(\.secretMaskingEnabled) private var maskSessionActivity
+    #if AGENTDASH_SYNTHETIC_ONLY
+    @Environment(\.syntheticLongTranscriptSelection) private var syntheticLongTranscriptSelection
+    #endif
 
     private enum DetailSection: Hashable { case overview, transcript }
     private var showingOverview: Bool { overviewOptions.enabled && section == .overview }
@@ -267,6 +270,20 @@ struct SessionTranscript: View {
                                 .background(matched ? Color.accentColor.opacity(0.15) : Color.clear,
                                             in: RoundedRectangle(cornerRadius: 6))
                                 .id(event.dedupeKey)
+                                #if AGENTDASH_SYNTHETIC_ONLY
+                                .background {
+                                    if SyntheticLongTranscript.measuring,
+                                       SyntheticLongTranscript.watches(session.id, sequence: event.sequence) {
+                                        SyntheticTranscriptRowProbe(sequence: event.sequence) { window, scroll in
+                                            SyntheticTranscriptRun.shared.didDraw(
+                                                session: session.id, sequence: event.sequence, page: page,
+                                                window: window, scroll: scroll,
+                                                select: syntheticLongTranscriptSelection, seek: seek
+                                            )
+                                        }
+                                    }
+                                }
+                                #endif
                         }
                     }
                     .scrollTargetLayout()

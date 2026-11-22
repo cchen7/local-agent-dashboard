@@ -196,8 +196,12 @@ final class DashboardModel {
                 let startup = try SyntheticStartupFixture.request()
                 let live = try SyntheticLiveUpdateFixture.request()
                 let resources = try SyntheticResourceFixture.request()
-                let standardFixtures = startup == nil && live == nil && resources == nil
-                if let startup {
+                let transcript = try SyntheticLongTranscript.request()
+                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil
+                if let transcript {
+                    guard startup == nil && live == nil && resources == nil else { throw StoreError.invalidLocation }
+                    directory = try transcript.openMeasurementDirectory()
+                } else if let startup {
                     guard live == nil && resources == nil else { throw StoreError.invalidLocation }
                     directory = try startup.openDirectory()
                 } else if let resources {
@@ -323,6 +327,9 @@ final class DashboardModel {
             }
             if SyntheticResourceFixture.current != nil {
                 SyntheticResourceFixture.report("fixture unavailable")
+            }
+            if ProcessInfo.processInfo.environment[SyntheticLongTranscript.environmentKey] != nil {
+                SyntheticLongTranscript.report("fixture unavailable")
             }
             #endif
         }

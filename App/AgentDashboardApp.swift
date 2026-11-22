@@ -107,6 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--synthetic-resource-cleanup") {
             Darwin.exit(SyntheticResourceFixture.runCleanup())
         }
+        if CommandLine.arguments.contains("--synthetic-long-transcript-fixture") {
+            Darwin.exit(SyntheticLongTranscript.runFixtureCommand())
+        }
         return AppDelegate.self
     }
     #endif

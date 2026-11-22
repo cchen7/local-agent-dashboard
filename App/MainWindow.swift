@@ -73,6 +73,11 @@ struct MainWindow: View {
                                               displayCurrency: model.pricing.currency)
                                 .id(TranscriptSelection(session: session.id, query: search?.query,
                                                          privacyRevision: model.privacyRevision))
+                                #if AGENTDASH_SYNTHETIC_ONLY
+                                .environment(\.syntheticLongTranscriptSelection, {
+                                    model.selectedSessionID = SyntheticLongTranscript.target
+                                })
+                                #endif
                         } else {
                             emptyDetail
                         }

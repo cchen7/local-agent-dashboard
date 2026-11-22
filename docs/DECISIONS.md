@@ -737,3 +737,20 @@ changes, and refreshes only the chart when its trailing minute changes.
 Its five-second NOW animation moves the range used for drawing, without
 querying usage or rebuilding the plot. Clock or time-zone changes resample
 the visible consumers; custom reports do not acquire a rolling deadline.
+
+## DEV-089 — Measure the native first screen and scrolling on 50,000 messages
+
+Build and sign the optimized SyntheticQA bundle, then run
+`python3 Tools/measure-synthetic-transcript.py /path/to/AgentDashboard.app`.
+A separate prepare process uses the project generator and verifies 50,000
+stored messages. The sample warms a short transcript and times the same
+selection binding the native list uses until a clipped message row draws.
+It checks a 128-message first page and the actual next cursor page.
+
+The window's display link requests 60 Hz. Each sample moves the real
+AppKit scroll viewport, runs pending view display and submits the layer
+transaction. Measure completed scroll updates, frame work and deadline
+misses, and require actual new message rows to draw in the viewport.
+These are view and submission measurements; they do not sample final
+display pixels or WindowServer presentation. No desktop capture, keyboard
+input or user source is involved.
