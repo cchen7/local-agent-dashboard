@@ -35,6 +35,12 @@ struct UsagePageSnapshot: Sendable {
     let report: UsageReport
     let plot: UsagePlot
     let request: UsageNavigationRequest
+    #if AGENTDASH_SYNTHETIC_ONLY
+    var syntheticQueryMS: Double = 0
+    var syntheticPlotMS: Double = 0
+    var syntheticQueryStart: UInt64 = 0
+    var syntheticPublish: UInt64 = 0
+    #endif
 }
 
 struct UsageLiveChart: Sendable {
@@ -46,7 +52,7 @@ struct UsageLiveChart: Sendable {
 @MainActor @Observable
 final class TokenUsageModel {
     private let store: AgentStore
-    var usagePeriod: UsagePeriod = .day
+    private(set) var usagePeriod: UsagePeriod = .day
     var usageMetric: UsageMetric = .tokens
     var usageGrouping: UsageGrouping = .agent
     var usageAgent: AgentKind?
@@ -61,12 +67,16 @@ final class TokenUsageModel {
     private(set) var projects: [UsageProjectOption] = []
     private(set) var usageVersion: Int64 = 0
     private var clockVersion: UInt64 = 0
+    @ObservationIgnored private var stagedPeriodRead: (request: UsageNavigationRequest, task: Task<UsagePageSnapshot, Error>)?
 
     let pricing: PricingModel
 
     init(store: AgentStore, pricing: PricingModel) {
         self.store = store
         self.pricing = pricing
+        #if AGENTDASH_SYNTHETIC_ONLY
+        SyntheticUsagePeriod.configure(self)
+        #endif
     }
 
     var usageCurrency: PriceDisplayCurrency { pricing.currency }
@@ -78,6 +88,21 @@ final class TokenUsageModel {
     }
 
     func clockChanged() { clockVersion &+= 1 }
+
+    func selectPeriod(_ period: UsagePeriod) {
+        guard usagePeriod != period else { return }
+        usagePeriod = period
+        cancelStagedPeriodRead()
+        let request = usageRequest
+        // Start the SQLite read at selection. The view's task will adopt it
+        // after the new selection has propagated through SwiftUI.
+        stagedPeriodRead = (request, startUsageRead(request))
+    }
+
+    func cancelStagedPeriodRead() {
+        stagedPeriodRead?.task.cancel()
+        stagedPeriodRead = nil
+    }
 
     func observeUsage() async {
         let store = self.store
@@ -128,23 +153,24 @@ final class TokenUsageModel {
         usageLoading = true
         usageError = nil
         defer { if usageRequest == request { usageLoading = false } }
-        let store = self.store
-        let now = Int64(Date().timeIntervalSince1970 * 1_000)
-        let zone = TimeZone.current
-        let base = liveUsageChart
+        let pending = stagedPeriodRead
+        stagedPeriodRead = nil
+        let task: Task<UsagePageSnapshot, Error>
+        if let pending, pending.request == request {
+            task = pending.task
+        } else {
+            pending?.task.cancel()
+            task = startUsageRead(request)
+        }
         do {
-            let snapshot = try await Self.background {
-                let window = try request.window(in: store, now: now, zone: zone)
-                #if AGENTDASH_SYNTHETIC_ONLY
-                SyntheticResourceFixture.reportVisibleUsage("usage-report-read")
-                #endif
-                let report = try store.usage(window: window, filter: request.filter, metric: request.metric,
-                                             grouping: request.grouping, reusing: base?.chart,
-                                             liveAt: request.period == .custom ? nil : now)
-                let plot = UsagePlot(report: report, period: request.period, metric: request.metric, reusing: base?.plot)
-                return UsagePageSnapshot(report: report, plot: plot, request: request)
-            }
+            let loaded = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
             guard !Task.isCancelled, usageRequest == request else { return }
+            #if AGENTDASH_SYNTHETIC_ONLY
+            var snapshot = loaded
+            if SyntheticUsagePeriod.measuring { snapshot.syntheticPublish = DispatchTime.now().uptimeNanoseconds }
+            #else
+            let snapshot = loaded
+            #endif
             usagePage = snapshot
             liveUsageChart = UsageLiveChart(chart: snapshot.report.chart, plot: snapshot.plot, request: request)
         } catch {
@@ -152,6 +178,39 @@ final class TokenUsageModel {
             usagePage = nil
             liveUsageChart = nil
             usageError = request.period == .custom ? "Check the custom time range." : "Could not read token usage."
+        }
+    }
+
+    private func startUsageRead(_ request: UsageNavigationRequest) -> Task<UsagePageSnapshot, Error> {
+        let store = self.store
+        let now = UsageRefresh.now
+        let zone = TimeZone.current
+        let base = liveUsageChart
+        return Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            #if AGENTDASH_SYNTHETIC_ONLY
+            let measuring = SyntheticUsagePeriod.measuring
+            let queryStart = measuring ? DispatchTime.now().uptimeNanoseconds : 0
+            #endif
+            let window = try request.window(in: store, now: now, zone: zone)
+            #if AGENTDASH_SYNTHETIC_ONLY
+            SyntheticResourceFixture.reportVisibleUsage("usage-report-read")
+            #endif
+            let report = try store.usage(window: window, filter: request.filter, metric: request.metric,
+                                         grouping: request.grouping, reusing: base?.chart,
+                                         liveAt: request.period == .custom ? nil : now)
+            #if AGENTDASH_SYNTHETIC_ONLY
+            let plotStart = measuring ? DispatchTime.now().uptimeNanoseconds : 0
+            #endif
+            let plot = UsagePlot(report: report, period: request.period, metric: request.metric, reusing: base?.plot)
+            #if AGENTDASH_SYNTHETIC_ONLY
+            return UsagePageSnapshot(report: report, plot: plot, request: request,
+                syntheticQueryMS: Double(plotStart - queryStart) / 1_000_000,
+                syntheticPlotMS: measuring ? Double(DispatchTime.now().uptimeNanoseconds - plotStart) / 1_000_000 : 0,
+                syntheticQueryStart: queryStart)
+            #else
+            return UsagePageSnapshot(report: report, plot: plot, request: request)
+            #endif
         }
     }
 
@@ -222,6 +281,7 @@ struct TokenUsageEntry: View {
             .task { await model.observeUsage() }
             .task { await model.observeRedlines() }
             .task(id: request) { await model.followUsage(request) }
+            .onDisappear { model.cancelStagedPeriodRead() }
             .onReceive(NotificationCenter.default.publisher(for: .NSSystemClockDidChange)) { _ in
                 Task { @MainActor in model.clockChanged() }
             }

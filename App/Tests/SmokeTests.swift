@@ -929,19 +929,26 @@ final class SmokeTests: XCTestCase {
 
     func testSyntheticUsageShowsTheChartAndSwitchesToCost() throws {
         app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
-        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
         openLibrary("tokens")
         XCTAssertTrue(element("usage.presented").waitForExistence(timeout: 5))
         let chart = element("usage.chart")
         let tokenAxis = chart.staticTexts["Tokens per minute"]
         XCTAssertTrue(tokenAxis.waitForExistence(timeout: 5))
+        let weeklyPeriod = window.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "7D")).firstMatch
+        XCTAssertTrue(weeklyPeriod.waitForExistence(timeout: 5))
+        weeklyPeriod.click()
+        let weeklyAxis = chart.staticTexts["Tokens per hour"]
+        XCTAssertTrue(weeklyAxis.waitForExistence(timeout: 5))
+        XCTAssertFalse(tokenAxis.exists)
         let metric = element("usage.metric")
         XCTAssertTrue(metric.waitForExistence(timeout: 3))
         metric.click()
         app.menuItems["Cost"].click()
         XCTAssertTrue(app.staticTexts["Peak spend rate"].waitForExistence(timeout: 5))
         XCTAssertTrue(chart.staticTexts["USD per hour"].waitForExistence(timeout: 5))
-        XCTAssertFalse(tokenAxis.exists)
+        XCTAssertFalse(weeklyAxis.exists)
     }
 
     func testUsageHeadroomExpiresWithoutNewRecords() throws {

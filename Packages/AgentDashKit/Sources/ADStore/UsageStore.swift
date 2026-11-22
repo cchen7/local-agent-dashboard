@@ -233,19 +233,22 @@ public extension AgentStore {
                grouping: UsageGrouping = .agent, reusing chartBase: UsageChartSnapshot? = nil,
                liveAt: Int64? = nil) throws -> UsageReport {
         try databasePool.read { db in
-            let hourly = grouping == .agent && Self.chartUsesHourRollup(window, filter: filter)
-            let current = UsageCoverage(window.range, filter: filter, hourly: hourly)
+            // Agent-wide summary facts and exact minute peaks can use scope
+            // rollups even when the chart itself needs sub-hour resolution.
+            let agentWide = grouping == .agent && filter.projectID == nil
+            let current = UsageCoverage(window.range, filter: filter, hourly: agentWide)
             let totals = try current.totals(db)
-            let previous = try window.previous.map { try UsageCoverage($0, filter: filter, hourly: hourly).totals(db) }
-            let chart = try buildUsageChart(db, window: window, filter: filter, hourly: hourly, reusing: chartBase, liveAt: liveAt)
+            let previous = try window.previous.map { try UsageCoverage($0, filter: filter, hourly: agentWide).totals(db) }
+            let chart = try buildUsageChart(db, window: window, filter: filter,
+                hourly: Self.chartUsesHourRollup(window, filter: filter), reusing: chartBase, liveAt: liveAt)
             guard totals.records > 0 else {
                 return UsageReport(window: window, totals: totals, previous: previous, peak: nil, chart: chart,
                                    breakdown: [], sessionCount: 0, cacheSavings: nil)
             }
             let amount = UsageCoverage.amount(metric)
-            let costPeaks = hourly && metric == .cost ? try current.fullCostPeaks(db, agent: filter.agent) : nil
+            let scopedPeaks = agentWide ? try current.middleRangePeaks(db, agent: filter.agent, metric: metric) : nil
             let peak: UsagePeak?
-            if hourly { peak = try current.scopePeak(db, agent: filter.agent, metric: metric, costPeaks: costPeaks) }
+            if agentWide { peak = try current.scopePeak(db, agent: filter.agent, metric: metric, precomputed: scopedPeaks) }
             else {
                 let peakRow = try Row.fetchOne(db, sql: """
                     \(current.cte) SELECT bucket,sum(\(amount)) AS peak FROM covered
@@ -254,7 +257,7 @@ public extension AgentStore {
                     """, arguments: current.arguments)
                 peak = try peakRow.map { UsagePeak(timestamp: try UsageCoverage.timestamp($0["bucket"]), value: $0["peak"]) }
             }
-            let breakdown = try current.breakdown(db, grouping: grouping, metric: metric, costPeaks: costPeaks)
+            let breakdown = try current.breakdown(db, grouping: grouping, metric: metric, precomputed: scopedPeaks)
             let sessionCount = grouping == .model ? try current.distinctSessions(db) : breakdown.reduce(0) { $0 + $1.sessions }
             return UsageReport(window: window, totals: totals, previous: previous, peak: peak, chart: chart,
                                breakdown: breakdown, sessionCount: sessionCount,
@@ -324,7 +327,8 @@ public extension AgentStore {
                                filter: filter, origin: usageChartIdentity, revision: revision)
         }
         func read(_ range: UsageRange) throws -> [UsagePoint] {
-            try UsageCoverage(range, filter: filter, hourly: hourly).points(db, window: window, filter: filter)
+            try UsageCoverage(range, filter: filter, hourly: hourly, scoped: filter.projectID == nil)
+                .points(db, window: window, filter: filter)
         }
         guard window.range.lowerBound < window.range.upperBound else { return snapshot([]) }
         guard let base, base.origin == usageChartIdentity, base.filter == filter,
@@ -386,6 +390,7 @@ private struct UsageCoverage {
     let cte: String
     let arguments: StatementArguments
     let hourly: Bool
+    let scoped: Bool
 
     static let sums = UsageTotals.aggregateColumns
 
@@ -433,11 +438,13 @@ private struct UsageCoverage {
         return once + once
     }
 
-    init(_ range: UsageRange, filter: UsageFilter, hourly: Bool = false) {
+    init(_ range: UsageRange, filter: UsageFilter, hourly: Bool = false, scoped: Bool = false) {
         self.range = range
         let predicate = UsagePredicate(filter)
         self.predicate = predicate
         self.hourly = hourly
+        let scope = filter.projectID == nil && (hourly || scoped)
+        self.scoped = scope
         var parts: [String] = []
         var args = StatementArguments()
         func raw(_ lower: Int64, _ upper: Int64) {
@@ -452,7 +459,15 @@ private struct UsageCoverage {
             guard lower < upper else { return }
             let (start, end) = Self.fullSlots(lower, upper, width: 60_000)
             if start < end {
-                parts.append("SELECT * FROM token_minute WHERE bucket>=? AND bucket<? \(predicate.sql)")
+                if scope {
+                    parts.append("""
+                        SELECT bucket,agent,0 AS project_id,'' AS model,precision,input_fresh,cache_read,
+                               cache_write,cache_write_1h,output,reasoning,cost_micro_usd,unpriced_tokens,records
+                        FROM token_usage_scope WHERE grain=1 AND agent<>'' AND bucket>=? AND bucket<? \(predicate.sql)
+                        """)
+                } else {
+                    parts.append("SELECT * FROM token_minute WHERE bucket>=? AND bucket<? \(predicate.sql)")
+                }
                 args += [start, end]; args += predicate.arguments
                 let from = start * 60_000, upto = end * 60_000
                 if lower < from { raw(lower, from) }
@@ -460,7 +475,7 @@ private struct UsageCoverage {
             } else { raw(lower, upper) }
         }
         let (firstHour, lastHour) = Self.fullSlots(range.lowerBound, range.upperBound, width: 3_600_000)
-        if hourly && firstHour < lastHour {
+        if scope && hourly && firstHour < lastHour {
             parts.append("""
                 SELECT bucket*60 AS bucket,agent,0 AS project_id,'' AS model,precision,input_fresh,cache_read,
                        cache_write,cache_write_1h,output,reasoning,cost_micro_usd,unpriced_tokens,records
@@ -523,7 +538,7 @@ private struct UsageCoverage {
                                           upperBound: min(bucket.upperBound, range.upperBound))
                 // Reuse the exact coverage at both report and local-day edges.
                 // A local midnight need not align to a UTC hour or minute.
-                let day = UsageCoverage(clip, filter: filter, hourly: hourly)
+                let day = UsageCoverage(clip, filter: filter, hourly: hourly, scoped: scoped)
                 try points.append(contentsOf: day.dayPoints(db, at: bucket.lowerBound))
                 cursor = clip.upperBound
             }
@@ -554,8 +569,7 @@ private struct UsageCoverage {
             }
     }
 
-    func breakdown(_ db: Database, grouping: UsageGrouping, metric: UsageMetric,
-                   costPeaks: CostScopePeaks?) throws -> [UsageBreakdown] {
+    func breakdown(_ db: Database, grouping: UsageGrouping, metric: UsageMetric, precomputed: ScopedPeaks?) throws -> [UsageBreakdown] {
         let key = Self.groupKey(grouping)
         let sessionSQL: String
         if grouping == .model {
@@ -598,7 +612,7 @@ private struct UsageCoverage {
             case .project:
                 label = try String.fetchOne(db, sql: "SELECT display_name FROM projects WHERE id=?", arguments: [Int64(id)])
             }
-            let peak = hourly ? try scopePeak(db, agent: agent, metric: metric, costPeaks: costPeaks) : peaks[id]
+            let peak = hourly ? try scopePeak(db, agent: agent, metric: metric, precomputed: precomputed) : peaks[id]
             return UsageBreakdown(id: id, label: label, agent: agent, totals: Self.readTotals(row),
                                   sessions: sessionCounts[id, default: 0], peak: peak)
         }.sorted { lhs, rhs in
@@ -616,41 +630,97 @@ private struct UsageCoverage {
             """, arguments: StatementArguments([range.lowerBound, range.upperBound]) + predicate.arguments) ?? 0
     }
 
-    struct CostScopePeaks {
+    struct ScopedPeaks {
         var peaks: [String: UsagePeak] = [:]
         var overflow: Set<String> = []
     }
 
-    /// Scan full minutes once for the combined and per-agent peaks. Rank a
+    private enum RankedPeakProbe {
+        case resolved(UsagePeak?)
+        case needsRangeScan
+    }
+
+    private static func peakIndex(_ metric: UsageMetric) -> (name: String, amount: String) {
+        switch metric {
+        case .tokens: ("token_usage_scope_peak_tokens", "volume")
+        case .output: ("token_usage_scope_peak_output", "output")
+        case .cost: ("token_usage_scope_peak_cost", "cost_micro_usd")
+        }
+    }
+
+    /// The ranked indexes order each scope by amount, then by time. An
+    /// equality seek on the amount can jump over any number of equal peaks
+    /// outside the selected interval while preserving the earliest in-range tie.
+    private func probeRankedPeak(_ db: Database, key: String, start: Int64, end: Int64,
+                                 metric: UsageMetric) throws -> RankedPeakProbe {
+        let index = Self.peakIndex(metric)
+        let eligible = metric == .cost ? "AND volume>unpriced_tokens" : ""
+        let scope = """
+            FROM token_usage_scope INDEXED BY \(index.name)
+            WHERE grain=1 AND precision='call' AND agent=? \(eligible)
+            """
+        var ceiling: Int64?
+        // A sparse interval may miss several high global values. Bound
+        // this fast path, then use the ordinary exact time-range scan.
+        for _ in 0..<8 {
+            let bound = ceiling == nil ? "" : "AND \(index.amount)<?"
+            var args: StatementArguments = [key]
+            if let ceiling { args += [ceiling] }
+            guard let amount = try Int64.fetchOne(db, sql: """
+                SELECT \(index.amount) \(scope) \(bound)
+                ORDER BY \(index.amount) DESC,bucket LIMIT 1
+                """, arguments: args) else { return .resolved(nil) }
+            if let bucket = try Int64.fetchOne(db, sql: """
+                SELECT bucket \(scope) AND \(index.amount)=? AND bucket>=? AND bucket<?
+                ORDER BY bucket LIMIT 1
+                """, arguments: [key, amount, start, end]) {
+                return .resolved(UsagePeak(timestamp: try Self.timestamp(bucket), value: amount))
+            }
+            ceiling = amount
+        }
+        return .needsRangeScan
+    }
+
+    /// Try bounded ranked seeks, then scan unresolved full-minute scopes once. Rank a
     /// fitting amount together with its minute offset using integer arithmetic
-    /// so equal costs choose the earlier minute. Very large costs fall back to
+    /// so equal values choose the earlier minute. Very large values fall back to
     /// the exact unencoded SQL order for that agent.
-    func fullCostPeaks(_ db: Database, agent: AgentKind?) throws -> CostScopePeaks {
+    func middleRangePeaks(_ db: Database, agent: AgentKind?, metric: UsageMetric) throws -> ScopedPeaks? {
         let (start, end) = Self.fullSlots(range.lowerBound, range.upperBound, width: 60_000)
-        guard start < end else { return CostScopePeaks() }
         let span = end - start
+        guard (10_080..<86_400).contains(span) else { return nil }
+        let measure = Self.peakIndex(metric).amount
+        let scopes = agent.map { [$0.rawValue] } ?? ([""] + AgentKind.allCases.map(\.rawValue))
+        var result = ScopedPeaks()
+        var unresolved: [String] = []
+        for scope in scopes {
+            switch try probeRankedPeak(db, key: scope, start: start, end: end, metric: metric) {
+            case .resolved(let peak): result.peaks[scope] = peak
+            case .needsRangeScan: unresolved.append(scope)
+            }
+        }
+        guard !unresolved.isEmpty else { return result }
         let overflowMarker = Int64.max
         let cap = (overflowMarker - 1 - (span - 1)) / span
         let last = end - 1
-        let scopes = agent.map { [$0.rawValue] } ?? ([""] + AgentKind.allCases.map(\.rawValue))
         var arguments: StatementArguments = [cap, overflowMarker, span, last, start, end]
-        if let agent { arguments += [agent.rawValue] }
-        arguments += StatementArguments(scopes)
+        arguments += StatementArguments(unresolved)
+        arguments += StatementArguments(unresolved)
         // Fixed scope keys let SQLite accumulate maxima without sorting a
         // temporary GROUP BY table over the whole selected minute range.
-        let aggregates = scopes.map { _ in "max(ranked) FILTER (WHERE agent=?)" }.joined(separator: ",")
+        let placeholders = unresolved.map { _ in "?" }.joined(separator: ",")
+        let aggregates = unresolved.map { _ in "max(ranked) FILTER (WHERE agent=?)" }.joined(separator: ",")
         let row = try Row.fetchOne(db, sql: """
             WITH minutes AS (
-                SELECT agent,CASE WHEN cost_micro_usd>? THEN ? ELSE cost_micro_usd*?+(?-bucket) END AS ranked
-                FROM token_usage_scope
-                WHERE grain=1 AND precision='call' AND bucket>=? AND bucket<? AND volume>unpriced_tokens
-                  \(agent == nil ? "" : "AND agent=?")
+                SELECT agent,CASE WHEN \(measure)>? THEN ? ELSE \(measure)*?+(?-bucket) END AS ranked
+                FROM token_usage_scope NOT INDEXED
+                WHERE grain=1 AND precision='call' AND bucket>=? AND bucket<? \(metric == .cost ? "AND volume>unpriced_tokens" : "")
+                  AND agent IN (\(placeholders))
             )
             SELECT \(aggregates) FROM minutes
             """, arguments: arguments)
-        var result = CostScopePeaks()
         guard let row else { return result }
-        for (index, key) in scopes.enumerated() {
+        for (index, key) in unresolved.enumerated() {
             guard let packed: Int64 = row[index] else { continue }
             if packed == overflowMarker { result.overflow.insert(key); continue }
             result.peaks[key] = UsagePeak(timestamp: try Self.timestamp(last - packed % span), value: packed / span)
@@ -658,26 +728,23 @@ private struct UsageCoverage {
         return result
     }
 
-    /// Full precise minutes use indexed token peaks or the bounded scope rollup
-    /// range for costs. A cost index would add write overhead to price backfill.
-    func scopePeak(_ db: Database, agent: AgentKind?, metric: UsageMetric, costPeaks: CostScopePeaks?) throws -> UsagePeak? {
+    /// Use the ranked scope indexes for wide periods. A tight time range
+    /// is cheaper to scan in primary-key bucket order than to filter a
+    /// ranked index whose largest peaks might all be outside the range.
+    func scopePeak(_ db: Database, agent: AgentKind?, metric: UsageMetric, precomputed: ScopedPeaks?) throws -> UsagePeak? {
         let (start, end) = Self.fullSlots(range.lowerBound, range.upperBound, width: 60_000)
         var candidates: [UsagePeak] = []
         var edges: [(Int64, Int64)] = []
         let key = agent?.rawValue ?? ""
         if start < end {
-            if let costPeaks, !costPeaks.overflow.contains(key) {
-                if let peak = costPeaks.peaks[key] { candidates.append(peak) }
+            if let precomputed, !precomputed.overflow.contains(key) {
+                if let peak = precomputed.peaks[key] { candidates.append(peak) }
             } else {
-                let index: String
-                let amount: String
-                switch metric {
-                case .tokens: index = "INDEXED BY token_usage_scope_peak_tokens"; amount = "volume"
-                case .output: index = "INDEXED BY token_usage_scope_peak_output"; amount = "output"
-                case .cost: index = ""; amount = "cost_micro_usd"
-                }
+                let index = Self.peakIndex(metric)
+                let amount = index.amount
+                let selection = end - start >= 86_400 ? "INDEXED BY \(index.name)" : "NOT INDEXED"
                 let row = try Row.fetchOne(db, sql: """
-                    SELECT bucket,\(amount) AS peak FROM token_usage_scope \(index)
+                    SELECT bucket,\(amount) AS peak FROM token_usage_scope \(selection)
                     WHERE grain=1 AND precision='call' AND agent=? AND bucket>=? AND bucket<?
                       \(metric == .cost ? "AND volume>unpriced_tokens" : "")
                     ORDER BY \(amount) DESC,bucket LIMIT 1
@@ -733,6 +800,7 @@ private struct UsageCoverage {
         return result.partialValue
     }
 }
+
 
 
 extension UsageTotals {

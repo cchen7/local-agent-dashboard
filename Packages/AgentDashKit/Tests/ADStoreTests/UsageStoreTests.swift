@@ -387,3 +387,78 @@ func usageChartDeadlines() throws {
         #expect(fixed.nextRangeChangeAt == nil && fixed.nextRecentChangeAt == nil)
     }
 }
+
+@Test("NFR-5: scope rollups keep sub-hour series, exact edges and minute peaks")
+func scopeRollupsKeepFineUsageFacts() throws {
+    try withUsageStore { store, codex, copilot in
+        let start: Int64 = 3_600_123
+        let end = start + 3_600_000
+        let peakMinute = start + 60_000
+        func usage(_ key: SessionKey, _ id: String, _ time: Int64, _ tokens: Int64,
+                   precision: TokenPrecision = .call) -> NormalizedRecord {
+            .tokens(.init(session: key, timestamp: time, model: id, counts: .init(output: tokens),
+                          precision: precision, dedupeKey: id))
+        }
+        try store.write([
+            usage(codex, "before", start - 1, 90),
+            usage(codex, "lower-edge", start, 4),
+            usage(codex, "first-precise", peakMinute, 15),
+            usage(copilot, "second-precise", peakMinute + 1, 20),
+            usage(codex, "coarse", peakMinute + 2, 7, precision: .checkpoint),
+            usage(copilot, "upper-edge", end - 1, 3),
+            usage(copilot, "after", end, 95),
+        ])
+        let window = try UsageWindow.make(.hour, now: end, timeZone: .gmt)
+        let scoped = try store.usage(window: window, grouping: .agent, liveAt: end)
+        let detailed = try store.usage(window: window, grouping: .model, liveAt: end)
+        #expect(scoped.totals == detailed.totals && scoped.totals.counts.total == 49)
+        #expect(scoped.previous == detailed.previous && scoped.previous?.counts.total == 90)
+        #expect(scoped.peak == detailed.peak && scoped.peak?.value == 35)
+        #expect(scoped.chart.cumulative(.tokens) == 49)
+        #expect(scoped.points.first { $0.coarse }?.totals.counts.total == 7)
+        let onlyCodex = try store.usage(window: window, filter: .init(agent: .codex), liveAt: end)
+        #expect(onlyCodex.totals.counts.total == 26 && onlyCodex.peak?.value == 15)
+        #expect(onlyCodex.points.allSatisfy { $0.agent == .codex })
+    }
+}
+
+@Test("NFR-5: bounded ranked peak seeks preserve in-range ties and exact range fallback")
+func rankedMiddlePeaksStayExact() throws {
+    try withUsageStore { store, codex, copilot in
+        let start: Int64 = 1_728_000_000
+        let range = try UsageRange(lowerBound: start, upperBound: start + 1_209_600_000)
+        let window = try UsageWindow.make(.custom, now: start, custom: range, timeZone: .gmt)
+        let basis = TokenRateBasis(reference: "synthetic-ranked-peak", bytes: Data([3, 7]))
+        _ = try store.activatePricing { input, _ in
+            guard input.model != "unpriced" else { return nil }
+            return TokenQuote(microUSD: input.counts.output, status: .priced, basis: basis)
+        }
+        func row(_ key: SessionKey, _ id: String, offset: Int64, output: Int64,
+                 model: String = "synthetic", precision: TokenPrecision = .call) -> NormalizedRecord {
+            .tokens(.init(session: key, timestamp: start + offset, model: model, counts: .init(output: output),
+                          precision: precision, dedupeKey: id))
+        }
+        var events = [
+            row(codex, "outside-tie", offset: -60_000, output: 100),
+            row(codex, "first-inside", offset: 60_000, output: 100),
+            row(codex, "second-inside", offset: 120_000, output: 100),
+            row(codex, "unquoted", offset: 180_000, output: 9, model: "unpriced"),
+            row(codex, "coarse", offset: 240_000, output: 500, precision: .checkpoint),
+            row(copilot, "smaller", offset: 300_000, output: 11),
+            row(copilot, "copilot-peak", offset: 360_000, output: 12),
+        ]
+        // Combined and Copilot have enough higher out-of-range levels to
+        // exhaust the bounded fast path. Codex's highest level can seek.
+        for i in 0..<12 {
+            events.append(row(copilot, "outside-\(i)", offset: -Int64(i + 2) * 60_000, output: Int64(200 + i)))
+        }
+        try store.write(events)
+        for metric in [UsageMetric.tokens, .output, .cost] {
+            let all = try store.usage(window: window, metric: metric)
+            #expect(all.peak?.value == 100 && all.peak?.timestamp == start + 60_000)
+            #expect(all.breakdown.first { $0.agent == .copilot }?.peak?.value == 12)
+            let filtered = try store.usage(window: window, filter: .init(agent: .codex), metric: metric)
+            #expect(filtered.peak?.value == 100 && filtered.peak?.timestamp == start + 60_000)
+        }
+    }
+}

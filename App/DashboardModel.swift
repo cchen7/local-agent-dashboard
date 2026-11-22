@@ -197,8 +197,14 @@ final class DashboardModel {
                 let live = try SyntheticLiveUpdateFixture.request()
                 let resources = try SyntheticResourceFixture.request()
                 let transcript = try SyntheticLongTranscript.request()
-                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil
-                if let transcript {
+                let periods = try SyntheticUsagePeriod.request()
+                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil && periods == nil
+                if let periods {
+                    guard startup == nil && live == nil && resources == nil && transcript == nil else {
+                        throw StoreError.invalidLocation
+                    }
+                    directory = try periods.openMeasurementDirectory()
+                } else if let transcript {
                     guard startup == nil && live == nil && resources == nil else { throw StoreError.invalidLocation }
                     directory = try transcript.openMeasurementDirectory()
                 } else if let startup {
@@ -270,7 +276,7 @@ final class DashboardModel {
                 replaceSearchQuery(query)
             }
             #if AGENTDASH_SYNTHETIC_ONLY
-            if SyntheticResourceFixture.current?.mode == .usage { page = .tokens }
+            if SyntheticResourceFixture.current?.mode == .usage || SyntheticUsagePeriod.measuring { page = .tokens }
             #endif
             store = result.0
             restartMenuBarThroughput()
@@ -330,6 +336,9 @@ final class DashboardModel {
             }
             if ProcessInfo.processInfo.environment[SyntheticLongTranscript.environmentKey] != nil {
                 SyntheticLongTranscript.report("fixture unavailable")
+            }
+            if ProcessInfo.processInfo.environment[SyntheticUsagePeriod.environmentKey] != nil {
+                SyntheticUsagePeriod.report("fixture unavailable")
             }
             #endif
         }

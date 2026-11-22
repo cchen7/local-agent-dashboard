@@ -14,22 +14,38 @@ struct UsageView: View {
 
     var body: some View {
         GeometryReader { viewport in
-            if model.usageError == nil, let snapshot = model.usagePage, snapshot.report.totals.records > 0,
-               snapshot.request.sameDisplayScope(as: model.usageRequest) {
+            if model.usageError == nil, let snapshot = model.usagePage, snapshot.report.totals.records > 0 {
+                // Keep the native chart and scroll hierarchy mounted until a
+                // replacement arrives, but hide data from the old scope.
+                let switching = !snapshot.request.sameDisplayScope(as: model.usageRequest)
                 ScrollView {
                     UsageViewportLayout(viewport: max(0, viewport.size.height - 8)) {
                         VStack(alignment: .leading, spacing: 10) {
                             controls
                             rangeLabel(snapshot)
+                                .opacity(switching ? 0 : 1)
+                                .accessibilityHidden(switching)
                             readouts(snapshot, showCaptions: DashboardLayoutRules.usageCaptions(width: viewport.size.width))
+                                .opacity(switching ? 0 : 1)
+                                .allowsHitTesting(!switching)
+                                .accessibilityHidden(switching)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         liveChart(snapshot)
+                            .opacity(switching ? 0 : 1)
+                            .allowsHitTesting(!switching)
+                            .accessibilityHidden(switching)
+                            .overlay {
+                                if switching { ProgressView("Loading token usage…") }
+                            }
                         breakdown(snapshot, availableWidth: max(0, viewport.size.width - 24))
+                            .opacity(switching ? 0 : 1)
+                            .allowsHitTesting(!switching)
+                            .accessibilityHidden(switching)
                     }
                     .padding(.bottom, 8)
                 }
-                .accessibilityIdentifier("usage.presented")
+                .accessibilityIdentifier(switching ? "usage.switching" : "usage.presented")
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     controls
@@ -55,7 +71,7 @@ struct UsageView: View {
                 Text(model.usageMetric == .cost ? "Estimated spend" : "Token throughput")
                     .font(.title3.weight(.semibold)).lineLimit(1)
                 Spacer(minLength: 4)
-                Picker("Period", selection: $model.usagePeriod) {
+                Picker("Period", selection: Binding(get: { model.usagePeriod }, set: model.selectPeriod)) {
                     ForEach(UsagePeriod.allCases, id: \.self) { Text($0.displayLabel).tag($0) }
                 }
                 .labelsHidden().pickerStyle(.segmented).fixedSize()
@@ -106,26 +122,35 @@ struct UsageView: View {
                 .frame(maxWidth: .infinity, minHeight: DashboardLayoutRules.minimumPlotHeight,
                        idealHeight: DashboardLayoutRules.minimumPlotHeight, maxHeight: .infinity)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
-        } else if data.recent != nil {
+        } else {
             // The moving NOW axis is presentation only. No index read or plot
-            // rebuild is scheduled by the clock tick.
-            TimelineView(.periodic(from: .now, by: 5)) { tick in
+            // rebuild is scheduled by the clock tick. Keep the same chart
+            // identity for a custom range, but omit its recurring ticks.
+            TimelineView(UsageChartTimeline(live: data.recent != nil)) { tick in
                 let now = max(data.window.range.upperBound, Int64(tick.date.timeIntervalSince1970 * 1000))
-                let visibleWindow = try? UsageWindow.make(snapshot.request.period, now: now,
+                let visibleWindow = data.recent == nil ? nil : try? UsageWindow.make(snapshot.request.period, now: now,
                     firstTimestamp: data.window.range.lowerBound, timeZone: .current)
                 UsageChart(data: data, plot: plot, request: snapshot.request, currency: model.usageCurrency,
                            redlines: model.usageRedlines, displayRange: visibleWindow?.range)
+                    .equatable()
                     #if AGENTDASH_SYNTHETIC_ONLY
                     .onChange(of: visibleWindow?.range.upperBound, initial: true) { _, _ in
                         SyntheticResourceFixture.reportVisibleUsage("usage-visual-tick")
                     }
+                    .environment(\.syntheticPeriodMarker, periodMarker(snapshot, data: data))
                     #endif
             }
-        } else {
-            UsageChart(data: data, plot: plot, request: snapshot.request,
-                       currency: model.usageCurrency, redlines: model.usageRedlines)
         }
     }
+
+    #if AGENTDASH_SYNTHETIC_ONLY
+    private func periodMarker(_ snapshot: UsagePageSnapshot, data: UsageChartSnapshot) -> SyntheticPeriodChartMarker? {
+        guard SyntheticUsagePeriod.measuring else { return nil }
+        return .init(id: data.id) { [model] window in
+            SyntheticPeriodRun.shared.chartDidDraw(model: model, snapshot: snapshot, data: data, window: window)
+        }
+    }
+    #endif
 
     private func readouts(_ value: UsagePageSnapshot, showCaptions: Bool) -> some View {
         HStack(alignment: .top, spacing: 8) { tiles(value, showCaptions: showCaptions) }
@@ -357,16 +382,33 @@ private struct UsageViewportLayout: Layout {
     let viewport: CGFloat
     private let gap: CGFloat = 14
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    struct Measurement {
+        let width: CGFloat
+        let viewport: CGFloat
+        let heights: [CGFloat]
+    }
+
+    func makeCache(subviews: Subviews) -> Measurement? { nil }
+
+    func updateCache(_ cache: inout Measurement?, subviews: Subviews) { cache = nil }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Measurement?) -> CGSize {
         guard subviews.count == 3 else { return .zero }
         let width = proposal.width ?? 760
         let heights = blockHeights(width: width, subviews: subviews)
+        cache = Measurement(width: width, viewport: viewport, heights: heights)
         return CGSize(width: width, height: heights.reduce(0, +) + 2 * gap)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Measurement?) {
         guard subviews.count == 3 else { return }
-        let heights = blockHeights(width: bounds.width, subviews: subviews)
+        let heights: [CGFloat]
+        if let measured = cache, measured.width == bounds.width, measured.viewport == viewport {
+            heights = measured.heights
+        } else {
+            heights = blockHeights(width: bounds.width, subviews: subviews)
+        }
+        cache = nil
         var y = bounds.minY
         for (index, child) in subviews.enumerated() {
             child.place(at: CGPoint(x: bounds.minX, y: y), anchor: .topLeading,
@@ -382,6 +424,17 @@ private struct UsageViewportLayout: Layout {
         let table = subviews[2].sizeThatFits(intrinsic).height
         return [header, DashboardLayoutRules.chartBlockHeight(viewport: viewport, header: header, table: table,
                                                                naturalChart: chart, spacing: gap), table]
+    }
+}
+
+private struct UsageChartTimeline: TimelineSchedule {
+    let live: Bool
+
+    func entries(from startDate: Date, mode: Mode) -> AnySequence<Date> {
+        if live {
+            return AnySequence(PeriodicTimelineSchedule(from: startDate, by: 5).entries(from: startDate, mode: mode))
+        }
+        return AnySequence([startDate])
     }
 }
 
@@ -506,22 +559,52 @@ private struct UsageTile<Value: View>: View {
     }
 }
 
-struct UsageChart: View {
+struct UsageChart: View, Equatable {
+    #if AGENTDASH_SYNTHETIC_ONLY
+    @Environment(\.syntheticPeriodMarker) private var syntheticPeriodMarker
+    #endif
     @DashboardClock private var clock
     let data: UsageChartSnapshot
     let plot: UsagePlot
     let request: UsageNavigationRequest
     let currency: PriceDisplayCurrency
     let redlines: [AgentKind: Int64]
-    var displayRange: UsageRange? = nil
+    let displayRange: UsageRange?
     @State private var hovered: Int64?
     @State private var peakOverflow: [String] = []
+    @State private var peakLayout = PeakLayoutCache()
+
+    init(data: UsageChartSnapshot, plot: UsagePlot, request: UsageNavigationRequest, currency: PriceDisplayCurrency,
+         redlines: [AgentKind: Int64], displayRange: UsageRange? = nil) {
+        self.data = data
+        self.plot = plot
+        self.request = request
+        self.currency = currency
+        self.redlines = redlines
+        self.displayRange = displayRange
+    }
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.data.id == rhs.data.id && lhs.plot == rhs.plot && lhs.request == rhs.request &&
+            lhs.currency == rhs.currency && lhs.redlines == rhs.redlines && lhs.displayRange == rhs.displayRange
+    }
 
     private struct StackedBar: Identifiable {
         let sample: UsageDisplaySample
         let lower: Double
         let upper: Double
         var id: String { sample.id }
+    }
+
+    private struct CurvePoint {
+        let time: Date
+        let value: Double
+    }
+
+    private struct CurveLane: Identifiable {
+        let agent: AgentKind?
+        let points: [CurvePoint]
+        var id: String { agent?.rawValue ?? "" }
     }
 
     private var longPeriod: Bool { request.period == .month || request.period == .quarter }
@@ -565,6 +648,8 @@ struct UsageChart: View {
                 .background {
                     if SyntheticResourceFixture.current?.mode == .usage {
                         SyntheticRowDrawMarker(event: "synthetic-resources: usage ready")
+                    } else if let marker = syntheticPeriodMarker {
+                        SyntheticRowDrawMarker(event: "synthetic-period draw \(marker.id)", onDraw: marker.draw)
                     }
                 }
                 #endif
@@ -594,7 +679,20 @@ struct UsageChart: View {
     }
 
     private var chart: some View {
-        Chart {
+        let combined = combined
+        let scale = scale
+        let area = longPeriod ? [] : combined.map {
+            CurvePoint(time: plottedDate($0.timestamp), value: $0.throughput)
+        }
+        let lanes: [CurveLane] = longPeriod ? [] : Dictionary(grouping: plot.samples, by: \.agent).map { agent, samples in
+            CurveLane(agent: agent, points: samples.map {
+                CurvePoint(time: plottedDate($0.timestamp), value: $0.throughput)
+            })
+        }.sorted { $0.id < $1.id }
+        let cumulative = combined.map {
+            CurvePoint(time: plottedDate($0.timestamp), value: $0.cumulative * scale)
+        }
+        return Chart {
             if longPeriod {
                 ForEach(bars) { bar in
                     BarMark(x: .value("Bucket", barCenter(bar.sample)), yStart: .value("Base", bar.lower),
@@ -602,22 +700,16 @@ struct UsageChart: View {
                         .foregroundStyle(bar.sample.agent?.badge.color ?? Color.primary)
                 }
             } else {
-                ForEach(combined) { sample in
-                    AreaMark(x: .value("Time", plottedDate(sample.timestamp)), y: .value("Combined", sample.throughput))
-                        .interpolationMethod(.monotone).foregroundStyle(Color.primary.opacity(0.06))
-                }
-                ForEach(plot.samples) { sample in
-                    LineMark(x: .value("Time", plottedDate(sample.timestamp)), y: .value("Throughput", sample.throughput),
-                             series: .value("Agent", sample.agent?.rawValue ?? "combined"))
-                        .interpolationMethod(.monotone).foregroundStyle(sample.agent?.badge.color ?? Color.primary)
-                        .lineStyle(StrokeStyle(lineWidth: sample.agent == nil ? 2.2 : 1.4))
+                AreaPlot(area, x: .value("Time", \.time), y: .value("Combined", \.value))
+                    .interpolationMethod(.monotone).foregroundStyle(Color.primary.opacity(0.06))
+                ForEach(lanes) { lane in
+                    LinePlot(lane.points, x: .value("Time", \.time), y: .value("Throughput", \.value))
+                        .interpolationMethod(.monotone).foregroundStyle(lane.agent?.badge.color ?? Color.primary)
+                        .lineStyle(StrokeStyle(lineWidth: lane.agent == nil ? 2.2 : 1.4))
                 }
             }
-            ForEach(combined) { sample in
-                LineMark(x: .value("Time", plottedDate(sample.timestamp)), y: .value("Cumulative", sample.cumulative * scale),
-                         series: .value("Agent", "cumulative"))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(.secondary)
-            }
+            LinePlot(cumulative, x: .value("Time", \.time), y: .value("Cumulative", \.value))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(.secondary)
             ForEach(guides) { guide in
                 ForEach(guide.segments) { segment in
                     RuleMark(xStart: .value("Time", usageDate(segment.start)),
@@ -756,14 +848,37 @@ struct UsageChart: View {
 
     private func peakObstacles(proxy: ChartProxy, bounds: CGRect) -> [CGRect] {
         let clearance: CGFloat = 2.5
-        let baseline = proxy.position(forY: 0.0) ?? bounds.height
+        let range = visibleRange
+        let xStart = proxy.position(forX: usageDate(range.lowerBound))
+        let xEnd = proxy.position(forX: usageDate(range.upperBound))
+        let yStart = proxy.position(forY: 0.0)
+        let yLimit = ceiling * 1.08
+        let yEnd = proxy.position(forY: yLimit)
+        let baseline = yStart ?? bounds.height
+        let duration = Double(range.upperBound - range.lowerBound)
+        let combined = combined
+        let scale = scale
+
+        // These axes are explicitly linear. Read their endpoints once
+        // rather than asking Swift Charts to project every obstacle point.
+        func project(_ timestamp: Int64, height: Double) -> CGPoint? {
+            if let xStart, let xEnd, let yStart, let yEnd, duration > 0, height.isFinite {
+                let fraction = (Double(timestamp) - Double(range.lowerBound)) / duration
+                return CGPoint(x: xStart + (xEnd - xStart) * fraction,
+                               y: yStart + (yEnd - yStart) * height / yLimit)
+            }
+            return position(proxy, date: usageDate(timestamp), height: height)
+        }
+        func point(_ sample: UsageDisplaySample, height: Double) -> CGPoint? {
+            project(max(sample.timestamp, range.lowerBound), height: height)
+        }
         var result: [CGRect] = []
         if longPeriod {
             // Block each bucket's full horizontal space up to its stack,
             // conservatively wider than the drawn bar.
             for sample in combined where sample.throughput > 0 {
-                guard let first = position(proxy, date: plottedDate(sample.timestamp), height: sample.throughput),
-                      let last = proxy.position(forX: usageDate(min(sample.endTimestamp, visibleRange.upperBound)))
+                guard let first = point(sample, height: sample.throughput),
+                      let last = project(min(sample.endTimestamp, range.upperBound), height: 0)?.x
                 else { continue }
                 result.append(CGRect(x: first.x, y: first.y, width: max(0, last - first.x),
                                      height: max(0, baseline - first.y)).insetBy(dx: -clearance, dy: -clearance))
@@ -771,26 +886,26 @@ struct UsageChart: View {
         } else {
             let lanes = Dictionary(grouping: plot.samples) { $0.agent?.rawValue ?? "combined" }
             for lane in lanes.values {
-                let points = lane.compactMap { position(proxy, date: plottedDate($0.timestamp), height: $0.throughput) }
+                let points = lane.compactMap { point($0, height: $0.throughput) }
                 result.append(contentsOf: PeakChipLayout.curveObstacles(points, clearance: clearance))
             }
         }
-        let cumulative = combined.compactMap { position(proxy, date: plottedDate($0.timestamp), height: $0.cumulative * scale) }
+        let cumulative = combined.compactMap { point($0, height: $0.cumulative * scale) }
         result.append(contentsOf: PeakChipLayout.curveObstacles(cumulative, clearance: clearance))
         let hatchWidth = max(2, bounds.width / Double(max(1, combined.count)) * 0.8)
-        for sample in fallback {
-            guard let point = position(proxy, date: plottedDate(sample.timestamp), height: sample.coarseThroughput) else { continue }
-            result.append(CGRect(x: point.x, y: point.y, width: hatchWidth, height: max(0, baseline - point.y))
+        for sample in combined where sample.coarseThroughput > 0 {
+            guard let projected = point(sample, height: sample.coarseThroughput) else { continue }
+            result.append(CGRect(x: projected.x, y: projected.y, width: hatchWidth, height: max(0, baseline - projected.y))
                 .insetBy(dx: -clearance, dy: -clearance))
         }
         for guide in guides {
             for segment in guide.segments {
-                guard let start = position(proxy, date: usageDate(segment.start), height: segment.value),
-                      let end = position(proxy, date: usageDate(segment.end), height: segment.value) else { continue }
+                guard let start = project(segment.start, height: segment.value),
+                      let end = project(segment.end, height: segment.value) else { continue }
                 result.append(contentsOf: PeakChipLayout.curveObstacles([start, end], clearance: clearance))
             }
         }
-        if data.recent != nil, let now = proxy.position(forX: usageDate(visibleRange.upperBound)) {
+        if data.recent != nil, let now = project(range.upperBound, height: 0)?.x {
             result.append(CGRect(x: now - clearance, y: 0, width: 2 * clearance, height: bounds.height))
         }
         return result
@@ -801,7 +916,14 @@ struct UsageChart: View {
         let peakByID = Dictionary(uniqueKeysWithValues: peaks.map { ($0.id, $0) })
         let requests = peakRequests(peaks, proxy: proxy)
         let bounds = CGRect(origin: .zero, size: frame.size)
-        let plan = PeakChipLayout.place(requests, in: bounds, obstacles: peakObstacles(proxy: proxy, bounds: bounds))
+        let key = PeakLayoutKey(chart: data.id, request: request, range: visibleRange, size: frame.size,
+            redlines: redlines, requests: requests,
+            axis: [proxy.position(forX: usageDate(visibleRange.lowerBound)),
+                   proxy.position(forX: usageDate(visibleRange.upperBound)),
+                   proxy.position(forY: 0.0), proxy.position(forY: ceiling * 1.08)])
+        let plan = peakLayout.placement(for: key) {
+            PeakChipLayout.place(requests, in: bounds, obstacles: peakObstacles(proxy: proxy, bounds: bounds))
+        }
         let shown = Set(plan.placed.map(\.id))
         return ZStack(alignment: .topLeading) {
             ForEach(requests, id: \.id) { point in
@@ -821,6 +943,29 @@ struct UsageChart: View {
             }
         }
         .preference(key: PeakOverflowKey.self, value: peaks.filter { !shown.contains($0.id) }.map(\.id))
+    }
+
+    private struct PeakLayoutKey: Equatable {
+        let chart: UUID
+        let request: UsageNavigationRequest
+        let range: UsageRange
+        let size: CGSize
+        let redlines: [AgentKind: Int64]
+        let requests: [PeakChipRequest]
+        let axis: [CGFloat?]
+    }
+
+    /// SwiftUI Charts can ask for the same overlay several times in one
+    /// layout. Keep only the last geometry, separate from observable state.
+    private final class PeakLayoutCache {
+        private var last: (PeakLayoutKey, PeakChipLayout)?
+
+        func placement(for key: PeakLayoutKey, make: () -> PeakChipLayout) -> PeakChipLayout {
+            if let last, last.0 == key { return last.1 }
+            let placement = make()
+            last = (key, placement)
+            return placement
+        }
     }
 
     private func peakChip(_ peak: UsageCurvePeak, size: CGSize) -> some View {

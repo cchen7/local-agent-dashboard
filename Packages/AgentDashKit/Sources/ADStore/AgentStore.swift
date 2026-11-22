@@ -206,6 +206,12 @@ public final class AgentStore: Sendable {
             }
             try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
         }
+        migrator.registerMigration("usage_cost_peak_index") { db in
+            try db.execute(sql: """
+                CREATE INDEX token_usage_scope_peak_cost ON token_usage_scope(agent,cost_micro_usd DESC,bucket)
+                WHERE grain=1 AND precision='call' AND volume>unpriced_tokens
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 

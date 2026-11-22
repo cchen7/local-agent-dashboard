@@ -110,6 +110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--synthetic-long-transcript-fixture") {
             Darwin.exit(SyntheticLongTranscript.runFixtureCommand())
         }
+        if CommandLine.arguments.contains("--synthetic-period-fixture") {
+            Darwin.exit(SyntheticUsagePeriod.runFixtureCommand())
+        }
         return AppDelegate.self
     }
     #endif

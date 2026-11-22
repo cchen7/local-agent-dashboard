@@ -754,3 +754,29 @@ misses, and require actual new message rows to draw in the viewport.
 These are view and submission measurements; they do not sample final
 display pixels or WindowServer presentation. No desktop capture, keyboard
 input or user source is involved.
+
+## DEV-090 — Measure complete period switching in the native Usage view
+
+Run `Tools/measure-synthetic-usage-period.py` against the signed, optimized
+SyntheticQA build. It uses the period picker's binding and times until the
+new chart's draw pass completes. A separate fixture holds 1M verified
+token rows with stored synthetic quotes. The probe checks the selected
+period, exact report totals and chart totals; it records query, plot and
+end-to-end time. A warm initial chart excludes process launch but does not
+assume every other period's database pages are already resident.
+
+Keep the chart mounted while replacing a report and hide the stale scope
+during loading. Rolling and fixed periods share their chart structure;
+fixed ranges have no visual timer. Draw each line as a batch of unchanged
+data points and derive obstacle coordinates from the actual linear scales.
+Use existing scope rollups for agent-wide summaries and a ranked minute
+cost index for long ranges. For middle ranges, seek by rank and time at
+each of a bounded number of distinct values, skipping ties outside the
+window. Scan unresolved scopes by time; partial-minute facts and
+project/model filters remain exact. Reuse an unchanged chart and its last
+peak-label plan only when the data and resolved geometry match. Measure
+and place the three viewport blocks with the same size proposal.
+
+Start a reader from the period selection; the view adopts it only if
+its full request still matches. Cancelling or leaving the page cannot
+publish a previous scope.
