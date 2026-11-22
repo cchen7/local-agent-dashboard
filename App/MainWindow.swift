@@ -41,8 +41,9 @@ struct MainWindow: View {
                     .navigationTitle("Token Usage")
                 }
             } else if model.page == .projects {
-                ProjectsBrowser(store: model.store, hostHome: model.projectPathHome,
-                                selection: $model.selectedProjectID, openSession: model.openProjectSession) {
+                ProjectsBrowser(store: model.store, hostHome: model.projectPathHome, currency: model.pricing.currency,
+                                selection: $model.selectedProjectID, openSession: model.openProjectSession,
+                                searchTopic: { model.openMenuSearch(SearchQuery.quotedLiteral($0)) }) {
                     sidebar
                 }
                 .id(model.privacyRevision)

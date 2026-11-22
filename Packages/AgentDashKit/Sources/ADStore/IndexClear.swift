@@ -117,7 +117,6 @@ public extension AgentStore {
                 DELETE FROM projects WHERE id IN (SELECT id FROM temp.clear_index_refs WHERE kind='project') AND pinned=0
                     AND NOT EXISTS(SELECT 1 FROM sessions WHERE project_id=projects.id)
                     AND NOT EXISTS(SELECT 1 FROM retained_archive_usage WHERE project_id=projects.id);
-                DELETE FROM term_df WHERE term NOT IN (SELECT term FROM session_keywords);
                 UPDATE source_files SET device=NULL,inode=NULL,size=NULL,mtime_ns=NULL,read_offset=0,parser_version=0,
                     last_seq=-1,previous_ts=NULL,decoder_state=NULL,unknown_records=0,last_error=NULL,
                     state=CASE WHEN state='gone' THEN 'gone' ELSE 'ok' END

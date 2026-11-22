@@ -4,7 +4,7 @@ import Foundation
 /// Local Codex CLI and desktop rollouts (ADP-CX).
 public struct CodexAdapter: AgentAdapter {
     public static let kind: AgentKind = .codex
-    public static let parserVersion = 5
+    public static let parserVersion = 6
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}
@@ -129,11 +129,11 @@ public struct CodexRecordDecoder: AgentFileDecoder {
         var records: [NormalizedRecord] = []
         func event(_ kind: EventKind, _ text: String?, tool: String? = nil, meta: String? = nil,
                    channel: TranscriptChannel? = nil, toolOutput: ToolOutputCapture? = nil,
-                   toolInput: ToolInputCapture? = nil) -> NormalizedRecord {
+                   toolInput: ToolInputCapture? = nil, toolAction: ToolActionEvidence? = nil) -> NormalizedRecord {
             .event(.init(session: previous.key, sequence: frame.sequence, timestamp: time, kind: kind,
                          toolName: tool, text: text, metadataJSON: meta,
                          dedupeKey: Self.key(previous.key, line: frame.sequence, suffix: "event"), transcriptChannel: channel,
-                         toolOutput: toolOutput, toolInput: toolInput))
+                         toolOutput: toolOutput, toolInput: toolInput, toolAction: toolAction))
         }
         func unknown() -> NormalizedRecord {
             // Do not persist partial/unclassified model-facing payloads.
@@ -181,7 +181,10 @@ public struct CodexRecordDecoder: AgentFileDecoder {
             case "exec_command_end", "patch_apply_end":
                 var meta: AdapterJSON.Object = [:]
                 for field in ["call_id", "exit_code"] { meta[field] = payload[field] }
-                records.append(event(.system, nil, meta: AdapterJSON.json(meta)))
+                let outcome = payload["type"] as? String == "exec_command_end"
+                    ? ToolActionDecoder.completion(exitCode: payload["exit_code"], durationMS: payload["duration_ms"], success: payload["success"])
+                    : nil
+                records.append(event(.system, nil, meta: AdapterJSON.json(meta), toolAction: outcome))
             case "error", "stream_error": records.append(event(.error, AdapterJSON.string(payload["message"], bounded: 2048)))
             case "agent_reasoning", "agent_reasoning_raw_content": break
             default: records.append(unknown())
@@ -203,7 +206,8 @@ public struct CodexRecordDecoder: AgentFileDecoder {
                 let args = AdapterJSON.string(payload["arguments"] ?? payload["input"]) ?? ""
                 records.append(event(.toolCall, AdapterJSON.prefix(args, bytes: 2048), tool: tool,
                                      meta: Self.toolMetadata(callID, tool: name, arguments: args),
-                                     toolInput: args.utf8.count > ToolOutputCapture.searchableBytes ? .init(.codex) : nil))
+                                     toolInput: args.utf8.count > ToolOutputCapture.searchableBytes ? .init(.codex) : nil,
+                                     toolAction: namespace == nil || namespace == "functions" ? ToolActionDecoder.codex(name: name, arguments: args) : nil))
             case "function_call_output", "custom_tool_call_output":
                 let callID = AdapterJSON.string(payload["call_id"], bounded: 160)
                 let tool = recentCalls.last { $0.id == callID }?.name

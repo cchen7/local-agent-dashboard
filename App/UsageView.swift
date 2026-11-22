@@ -55,7 +55,7 @@ struct UsageView: View {
                     .font(.title3.weight(.semibold)).lineLimit(1)
                 Spacer(minLength: 4)
                 Picker("Period", selection: $model.usagePeriod) {
-                    ForEach(UsagePeriod.allCases, id: \.self) { Text(periodLabel($0)).tag($0) }
+                    ForEach(UsagePeriod.allCases, id: \.self) { Text($0.displayLabel).tag($0) }
                 }
                 .labelsHidden().pickerStyle(.segmented).fixedSize()
             }
@@ -328,8 +328,12 @@ struct UsageView: View {
         content().lineLimit(1).frame(width: width, alignment: alignment)
     }
 
-    private func periodLabel(_ period: UsagePeriod) -> LocalizedStringResource {
-        switch period {
+
+}
+
+extension UsagePeriod {
+    var displayLabel: LocalizedStringResource {
+        switch self {
         case .hour: "1H"
         case .day: "24H"
         case .week: "7D"
@@ -502,7 +506,7 @@ private struct UsageTile<Value: View>: View {
     }
 }
 
-private struct UsageChart: View {
+struct UsageChart: View {
     let data: UsageChartSnapshot
     let plot: UsagePlot
     let request: UsageNavigationRequest

@@ -116,13 +116,166 @@ final class SmokeTests: XCTestCase {
         openLibrary("projects")
         XCTAssertTrue(element("projects.list").waitForExistence(timeout: 5))
         XCTAssertTrue(element("projects.timeline").waitForExistence(timeout: 5))
-        XCTAssertTrue(window.staticTexts["Synthetic checkout verified"].waitForExistence(timeout: 5))
-        XCTAssertTrue(window.staticTexts["PROJECT_TOKEN=••••••"].exists)
-        XCTAssertFalse(window.staticTexts["PROJECT_TOKEN=synthetic-project-secret"].exists)
-        XCTAssertFalse(window.staticTexts["Synthetic documentation reviewed"].exists)
+        XCTAssertTrue(projectTimelineEntry(containing: "Synthetic checkout verified").waitForExistence(timeout: 5))
+        XCTAssertTrue(projectTimelineEntry(containing: "PROJECT_TOKEN=••••••").exists)
+        XCTAssertFalse(projectTimelineEntry(containing: "PROJECT_TOKEN=synthetic-project-secret").exists)
+        XCTAssertFalse(projectTimelineEntry(containing: "Synthetic documentation reviewed").exists)
         window.buttons["Open Latest Session"].click()
         XCTAssertTrue(element("session.transcript").waitForExistence(timeout: 5))
         XCTAssertTrue(window.staticTexts["Synthetic checkout verified"].exists)
+    }
+
+    func testProjectUsageChangesPeriodAndShowsOnlyProjectFacts() throws {
+        _ = try openProjectUsage(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let summary = element("projects.usage.summary")
+        XCTAssertTrue(summary.staticTexts["20 tokens"].waitForExistence(timeout: 5))
+        let priced = summary.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@", "List-price estimate", "List-price estimate")).firstMatch
+        XCTAssertTrue(priced.exists)
+        XCTAssertTrue(element("projects.usage.chart").waitForExistence(timeout: 5))
+        let period = element("projects.usage.period")
+        period.click()
+        app.menuItems["7D"].firstMatch.click()
+        XCTAssertTrue(summary.staticTexts["33 tokens"].waitForExistence(timeout: 5))
+        let partial = summary.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@", "Partial estimate", "Partial estimate")).firstMatch
+        XCTAssertTrue(partial.exists)
+        XCTAssertTrue(element("projects.usage.chart").waitForExistence(timeout: 5))
+        XCTAssertFalse(summary.staticTexts["1,033 tokens"].exists)
+    }
+
+    func testProjectUsageAtNativeWindowSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try openProjectUsage(size: size, appearance: appearance)
+                let total = element("projects.usage.summary").staticTexts["20 tokens"]
+                XCTAssertTrue(total.waitForExistence(timeout: 5))
+                XCTAssertTrue(window.frame.contains(total.frame))
+                XCTAssertTrue(element("projects.usage.chart").waitForExistence(timeout: 5))
+                let image = XCTAttachment(screenshot: window.screenshot())
+                image.name = "project-usage-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                image.lifetime = .keepAlways
+                add(image)
+                app.terminate()
+            }
+        }
+    }
+
+    private func openProjectUsage(size: CGSize, appearance: String) throws -> XCUIElement {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_PROJECT_USAGE"] = "1"
+        let window = try launch(size: size, appearance: appearance, projects: true)
+        openLibrary("projects")
+        let tabs = element("projects.tabs")
+        let usage = tabs.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Usage")).firstMatch
+        XCTAssertTrue(usage.waitForExistence(timeout: 5))
+        usage.click()
+        return window
+    }
+
+    func testStructuredProjectTimelineShowsActionsAndOpensTheirSession() throws {
+        _ = try openStructuredProjectTimeline(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let files = app.buttons["projects.timeline.files"]
+        let command = app.buttons["projects.timeline.command"]
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+        XCTAssertTrue(files.label.contains("/synthetic/edited.swift"))
+        XCTAssertTrue(files.label.contains("Edit"))
+        XCTAssertTrue(files.label.contains("+4"))
+        XCTAssertTrue(files.label.contains("−3"))
+        XCTAssertTrue(command.waitForExistence(timeout: 5))
+        XCTAssertTrue(command.label.contains("967 ms"))
+        XCTAssertTrue(command.label.contains("Exit 2"))
+        XCTAssertTrue(command.label.contains("Failed"))
+        XCTAssertTrue(command.label.contains("API_TOKEN='••••••' synthetic diagnostic"))
+        XCTAssertFalse(command.label.contains("synthetic-project-action-secret"))
+
+        command.click()
+        let session = element("session.transcript")
+        XCTAssertTrue(session.waitForExistence(timeout: 5))
+        XCTAssertTrue(session.staticTexts["Validate synthetic integration"].exists)
+        XCTAssertFalse(session.staticTexts["Verify synthetic checkout"].exists)
+    }
+
+    func testStructuredProjectTimelineAtNativeWindowSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try openStructuredProjectTimeline(size: size, appearance: appearance)
+                let command = app.buttons["projects.timeline.command"]
+                XCTAssertTrue(command.waitForExistence(timeout: 5))
+                XCTAssertTrue(command.label.contains("967 ms"))
+                XCTAssertTrue(window.frame.contains(command.frame))
+                XCTAssertTrue(element("projects.timeline.files").exists)
+                let image = XCTAttachment(screenshot: window.screenshot())
+                image.name = "project-actions-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                image.lifetime = .keepAlways
+                add(image)
+                app.terminate()
+            }
+        }
+    }
+
+    private func projectTimelineEntry(containing text: String) -> XCUIElement {
+        app.buttons.matching(identifier: "projects.timeline.event")
+            .matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+    }
+
+    private func openStructuredProjectTimeline(size: CGSize, appearance: String) throws -> XCUIElement {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_PROJECT_ACTIONS"] = "1"
+        let window = try launch(size: size, appearance: appearance, projects: true)
+        openLibrary("projects")
+        XCTAssertTrue(element("projects.timeline").waitForExistence(timeout: 5))
+        return window
+    }
+
+    func testProjectPinTogglesAndChangesListOrder() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
+        openLibrary("projects")
+        let list = element("projects.list")
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        let docs = list.staticTexts["Review synthetic documentation"].firstMatch
+        let client = list.staticTexts["Verify synthetic checkout"].firstMatch
+        XCTAssertTrue(docs.waitForExistence(timeout: 5))
+        XCTAssertTrue(client.exists)
+        XCTAssertLessThan(client.frame.minY, docs.frame.minY)
+        docs.click()
+        let pin = window.buttons["projects.pin"]
+        XCTAssertTrue(pin.wait(for: \.label, toEqual: "Pin Project", timeout: 5))
+        pin.click()
+        XCTAssertTrue(pin.wait(for: \.label, toEqual: "Unpin Project", timeout: 5))
+        XCTAssertLessThan(docs.frame.minY, client.frame.minY)
+        pin.click()
+        XCTAssertTrue(pin.wait(for: \.label, toEqual: "Pin Project", timeout: 5))
+        XCTAssertLessThan(client.frame.minY, docs.frame.minY)
+    }
+
+    func testProjectFinderUsesVerifiedSyntheticDirectory() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_PROJECT_DIRECTORY"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
+        openLibrary("projects")
+        let finder = app.buttons["projects.finder"]
+        XCTAssertTrue(finder.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        finder.click()
+        let received = app.staticTexts.matching(identifier: "projects.finder.feedback")
+            .matching(NSPredicate(format: "label == %@ OR value == %@", "Finder request sent", "Finder request sent")).firstMatch
+        XCTAssertTrue(received.waitForExistence(timeout: 5))
+    }
+
+    func testProjectControlsAtNativeWindowSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance, projects: true)
+                openLibrary("projects")
+                let pin = window.buttons["projects.pin"]
+                let finder = window.buttons["projects.finder"]
+                XCTAssertTrue(pin.waitForExistence(timeout: 5))
+                XCTAssertTrue(finder.waitForExistence(timeout: 5))
+                XCTAssertTrue(window.frame.contains(pin.frame) && window.frame.contains(finder.frame))
+                let image = XCTAttachment(screenshot: window.screenshot())
+                image.name = "project-controls-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                image.lifetime = .keepAlways
+                add(image)
+                app.terminate()
+            }
+        }
     }
 
     func testIndexedProjectsAtAllSizes() throws {
@@ -477,6 +630,106 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(settings.staticTexts["Bundled price table"].exists)
         XCTAssertTrue(settings.staticTexts["synthetic-unpriced"].waitForExistence(timeout: 5))
         XCTAssertTrue(settings.buttons["Copy Unpriced Models"].exists)
+    }
+
+    func testOverviewShowsStructuredActionsFromIndexedSource() throws {
+        let window = try openStructuredOverview(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        XCTAssertTrue(window.staticTexts["Touched Files"].waitForExistence(timeout: 5))
+        XCTAssertTrue(window.staticTexts["/synthetic/test/working.swift"].firstMatch.exists)
+        XCTAssertTrue(window.staticTexts["+2"].firstMatch.exists)
+        XCTAssertTrue(window.staticTexts["−1"].firstMatch.exists)
+        XCTAssertTrue(window.staticTexts["Commands Run"].exists)
+        XCTAssertTrue(window.staticTexts["713 ms"].firstMatch.exists)
+        XCTAssertTrue(window.staticTexts["Succeeded"].firstMatch.exists)
+        let masked = window.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR label CONTAINS %@", "API_TOKEN='••••••'", "API_TOKEN='••••••'")).firstMatch
+        XCTAssertTrue(masked.exists)
+        let raw = window.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR label CONTAINS %@", "synthetic-actions-secret", "synthetic-actions-secret")).firstMatch
+        XCTAssertFalse(raw.exists)
+    }
+
+    func testStructuredOverviewAtNativeWindowSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try openStructuredOverview(size: size, appearance: appearance)
+                XCTAssertTrue(window.staticTexts["713 ms"].firstMatch.waitForExistence(timeout: 5))
+                XCTAssertTrue(window.staticTexts["+2"].firstMatch.exists)
+                let amount = window.staticTexts["713 ms"].firstMatch
+                XCTAssertTrue(window.frame.contains(amount.frame))
+                let capture = XCTAttachment(screenshot: window.screenshot())
+                capture.name = "structured-overview-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                capture.lifetime = .keepAlways
+                add(capture)
+                app.terminate()
+            }
+        }
+    }
+
+    private func openStructuredOverview(size: CGSize, appearance: String) throws -> XCUIElement {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_STRUCTURED_ACTIONS"] = "1"
+        let window = try launch(size: size, appearance: appearance, onboarding: true)
+        let choose = app.buttons["onboarding.chooseSources"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 5))
+        choose.click()
+        let start = app.buttons["onboarding.startIndexing"]
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        start.click()
+        let open = app.buttons["onboarding.openDashboard"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+        let tabs = element("session.details.tabs")
+        let overview = tabs.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Overview")).firstMatch
+        XCTAssertTrue(overview.waitForExistence(timeout: 10))
+        overview.click()
+        XCTAssertTrue(element("session.overview").waitForExistence(timeout: 5))
+
+        return window
+    }
+
+    func testSessionTopicsAppearAfterNormalSourceIndexing() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_TOPICS"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", onboarding: true)
+        app.buttons["onboarding.chooseSources"].click()
+        let start = app.buttons["onboarding.startIndexing"]
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        start.click()
+        let open = app.buttons["onboarding.openDashboard"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+        let tabs = element("session.details.tabs")
+        let overview = tabs.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Overview")).firstMatch
+        XCTAssertTrue(overview.waitForExistence(timeout: 10))
+        overview.click()
+        let topic = element("session.topics").buttons["harmonic"]
+        XCTAssertTrue(topic.waitForExistence(timeout: 8))
+        topic.click()
+        XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
+    }
+
+    func testProjectTopicsOpenSearchAndFitNativeWindowSizes() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_TOPICS"] = "1"
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance, projects: true)
+                openLibrary("projects")
+                let chip = element("projects.topics").buttons["harmonic"]
+                XCTAssertTrue(chip.waitForExistence(timeout: 8))
+                XCTAssertTrue(chip.isHittable)
+                XCTAssertTrue(window.frame.contains(chip.frame))
+                let capture = XCTAttachment(screenshot: window.screenshot())
+                capture.name = "project-topics-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                capture.lifetime = .keepAlways
+                add(capture)
+                if appearance == "dark", size.width == 1120 {
+                    chip.click()
+                    XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
+                }
+                app.terminate()
+            }
+        }
     }
 
     func testSessionOverviewShowsProgressAndMasksToolOutput() throws {

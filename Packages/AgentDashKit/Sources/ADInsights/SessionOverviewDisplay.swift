@@ -18,6 +18,7 @@ public struct SessionOverviewDisplay: Equatable, Sendable {
         public let removed: Int64?
         public let exitCode: Int64?
         public let durationMS: Int64?
+        public let success: Bool?
     }
 
     public let summary: String?
@@ -45,8 +46,13 @@ public struct SessionOverviewDisplay: Equatable, Sendable {
             case let .tool(kind, name, text, timestamp):
                 Row(kind: .tool(kind), text: Self.excerpt(text, limit: 180, maskSecrets: maskSecrets),
                     detail: Self.excerpt(name, limit: 80, maskSecrets: maskSecrets),
-                    timestamp: timestamp, count: nil, added: nil, removed: nil, exitCode: nil, durationMS: nil)
+                    timestamp: timestamp, count: nil, added: nil, removed: nil, exitCode: nil, durationMS: nil, success: nil)
             }
+        }
+
+        if snapshot.topicsVerified {
+            topics = snapshot.topics
+            return
         }
 
         // Catalog topics may have been produced by a different version.
@@ -61,16 +67,16 @@ public struct SessionOverviewDisplay: Equatable, Sendable {
         topics = Array(snapshot.topics.lazy.filter { allowed[$0] != nil }.prefix(5))
     }
 
-    private static func file(_ item: IndexedOverviewFile, maskSecrets: Bool) -> Row {
+    public static func file(_ item: IndexedOverviewFile, maskSecrets: Bool) -> Row {
         .init(kind: .file, text: excerpt(item.path, limit: 200, maskSecrets: maskSecrets), detail: excerpt(item.operation, limit: 32, maskSecrets: maskSecrets),
               timestamp: item.timestamp, count: item.count, added: item.added, removed: item.removed,
-              exitCode: nil, durationMS: nil)
+              exitCode: nil, durationMS: nil, success: nil)
     }
 
-    private static func command(_ item: IndexedOverviewCommand, maskSecrets: Bool) -> Row {
+    public static func command(_ item: IndexedOverviewCommand, maskSecrets: Bool) -> Row {
         .init(kind: .command, text: excerpt(item.text, limit: 180, maskSecrets: maskSecrets), detail: nil,
               timestamp: item.timestamp, count: nil, added: nil, removed: nil,
-              exitCode: item.exitCode, durationMS: item.durationMS)
+              exitCode: item.exitCode, durationMS: item.durationMS, success: item.success)
     }
 
     private static func excerpt(_ raw: String?, limit: Int, maskSecrets: Bool = true) -> String? {

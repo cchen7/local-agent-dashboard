@@ -114,3 +114,95 @@ private struct RetentionFixture {
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
+
+@Test("§11.3 / FR-STO-1: project usage keeps exact counts across expiry and preserves retained-only projects",
+      .timeLimit(.minutes(1)))
+func projectUsageKeepsCanonicalScopeAcrossArchiveExpiry() async throws {
+    let box = try RetentionFixture()
+    defer { box.remove() }
+    _ = try box.seed("old", path: "/workspace/shared", ts: box.stamp, deleted: box.stamp)
+    let live = try box.seed("live", path: "/workspace/shared", ts: box.stamp + 10, deleted: nil)
+    _ = try box.seed("different", path: "/workspace/separate", ts: box.stamp + 20, deleted: box.stamp)
+    try box.store.write([.tokens(.init(session: live, timestamp: box.stamp + 30, model: nil,
+        counts: .init(inputFresh: 7), dedupeKey: "partial-price"))])
+    let detached = SessionKey(agent: .codex, nativeID: "no-workspace")
+    try box.store.write([.session(.init(key: detached, sourceID: box.sourceID, environment: "Synthetic")),
+        .tokens(box.token(for: detached, ts: box.stamp, dedupe: "not-a-project"))])
+
+    var catalog = box.store.indexedProjectUpdates().makeAsyncIterator()
+    let projects = try #require(try await catalog.next())
+    let project = try #require(projects.first { $0.path == "/mapped/shared" })
+    let range = try UsageRange(lowerBound: box.stamp, upperBound: box.stamp + 31)
+    let now = box.now
+    var updates = box.store.indexedProjectUsageUpdates(period: .custom, custom: range,
+        timeZone: .gmt, chartFor: project.id, now: { now }).makeAsyncIterator()
+    let before = try #require(try await updates.next())
+    #expect(before.totals.count == 2)
+    let expected = try #require(before.totals[project.id])
+    #expect(expected.counts.total == 25 && expected.counts.cacheRead == 6)
+    #expect(expected.costMicroUSD == 38 && expected.unpricedTokens == 7)
+    #expect(before.chart?.cumulative(.tokens) == 25 && before.chart?.cumulative(.cost) == 38)
+
+    #expect(try box.store.setArchiveRetention(.quarterYear, now: box.now, hostHome: nil) == 2)
+    let after = try #require(try await updates.next())
+    #expect(after.totals[project.id] == expected)
+    #expect(after.chart?.points == before.chart?.points)
+    let formerlyActive = try #require(after.projects.first { $0.name == "separate" })
+    #expect(formerlyActive.sessions.isEmpty && formerlyActive.retainedOnly)
+    #expect(after.totals[formerlyActive.id]?.counts.total == 9)
+    #expect(after.totals[formerlyActive.id]?.costMicroUSD == 19)
+}
+
+@Test("§11.3: rolling and custom project buckets share exact half-open bounds; All includes undated usage only in totals",
+      .timeLimit(.minutes(1)))
+func projectUsageWindowKeepsExactBucketBoundaries() async throws {
+    let box = try RetentionFixture()
+    defer { box.remove() }
+    let at = box.stamp
+    let key = try box.seed("bounded", path: "/workspace/bounded", ts: at, deleted: nil)
+    let next = at + 86_400_000
+    let extras: [(String, Int64, Int64)] = [("unknown", 0, 6), ("before", at - 1, 3), ("right-edge", next, 5)]
+    for (name, ts, output) in extras {
+        try box.store.write([.tokens(.init(session: key, timestamp: ts,
+            model: nil, counts: .init(output: output), precision: .snapshot, dedupeKey: name))])
+    }
+    var catalog = box.store.indexedProjectUpdates().makeAsyncIterator()
+    let first = try #require(try await catalog.next()?.first)
+    var roll = box.store.indexedProjectUsageUpdates(period: .day, timeZone: .gmt,
+        chartFor: first.id, now: { next }).makeAsyncIterator()
+    let day = try #require(try await roll.next())
+    #expect(day.totals[first.id]?.counts.total == 9)
+    #expect(day.chart?.cumulative(.tokens) == 9 && day.chart?.window.range.lowerBound == at)
+    var all = box.store.indexedProjectUsageUpdates(period: .all, timeZone: .gmt,
+        chartFor: first.id, now: { next + 1 }).makeAsyncIterator()
+    let full = try #require(try await all.next())
+    #expect(full.totals[first.id]?.counts.total == 23)
+    #expect(full.chart?.cumulative(.tokens) == 17)
+    #expect(full.chart?.points.contains { $0.coarse } == true)
+    #expect(full.chart?.window.range.lowerBound == at - 1)
+}
+
+@Test("§11.3: pinning remains attached to a retained-only project and can be undone",
+      .timeLimit(.minutes(1)))
+func projectPinSurvivesTranscriptExpiry() async throws {
+    let box = try RetentionFixture()
+    defer { box.remove() }
+    _ = try box.seed("expired-pin", path: "/workspace/pinned", ts: box.stamp, deleted: box.stamp)
+    _ = try box.seed("newest", path: "/workspace/latest", ts: box.stamp + 1, deleted: nil)
+    var projects = box.store.indexedProjectUpdates().makeAsyncIterator()
+    let initial = try #require(try await projects.next())
+    let chosen = try #require(initial.first { $0.name == "pinned" })
+    try box.store.setProjectPinned(chosen.pinTarget, pinned: true)
+    _ = try box.store.setArchiveRetention(.quarterYear, now: box.now, hostHome: nil)
+    let now = box.now
+    var usage = box.store.indexedProjectUsageUpdates(period: .all, timeZone: .gmt, now: { now }).makeAsyncIterator()
+    let retained = try #require(try await usage.next())
+    let first = try #require(retained.projects.first)
+    #expect(first.retainedOnly && first.name == "pinned" && first.pinned)
+    #expect(!first.canRevealDirectory)
+    #expect(retained.totals[first.id]?.counts.total == 9)
+    try box.store.setProjectPinned(first.pinTarget, pinned: false)
+    let unpinned = try #require(try await usage.next())
+    #expect(unpinned.projects.first?.name == "latest")
+    #expect(unpinned.projects.first { $0.id == first.id }?.pinned == false)
+}

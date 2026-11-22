@@ -127,7 +127,6 @@ enum ArchiveRetentionStore {
                 AND NOT EXISTS(SELECT 1 FROM events WHERE blob_id=blobs.id);
             DELETE FROM token_rate_bases WHERE id IN (SELECT id FROM temp.expiry_refs WHERE kind='basis')
                 AND NOT EXISTS(SELECT 1 FROM token_events WHERE rate_basis_id=token_rate_bases.id);
-            DELETE FROM term_df WHERE term NOT IN (SELECT term FROM session_keywords);
             DROP TABLE temp.expiry_usage;
             DROP TABLE temp.expiry_refs;
             DROP TABLE temp.expiry_sessions;

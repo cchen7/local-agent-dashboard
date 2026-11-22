@@ -64,19 +64,34 @@ public extension AgentStore {
 
     /// Use the search box's literal query and eligibility rules. Restrict the
     /// FTS posting scan to the selected session's row ID range.
-    internal static func overviewSearchableTopics(_ terms: [String], in sessionID: Int64, db: Database) throws -> [String] {
+    internal static func overviewSearchableTopics(_ terms: [String], in sessionID: Int64, db: Database,
+                                                   distinctLimit: Int? = nil) throws -> [String] {
         guard !terms.isEmpty,
               let bounds = try Row.fetchOne(db, sql: "SELECT min(id),max(id) FROM events WHERE session_id=?",
                                             arguments: [sessionID]),
               let first = bounds[0] as Int64?, let last = bounds[1] as Int64? else { return [] }
-        return try terms.filter { term in
-            guard let query = try? SearchQuery.parse(SearchQuery.quotedLiteral(term)) else { return false }
+        var result: [String] = []
+        for term in terms {
+            if distinctLimit != nil && result.contains(where: { $0.contains(term) }) { continue }
+            guard let query = try? SearchQuery.parse(SearchQuery.quotedLiteral(term)) else { continue }
             var statement = try SearchStatement(query, scope: .init(now: 0, timeZone: .gmt))
-            guard statement.usesFTS else { return false }
+            guard statement.usesFTS else { continue }
             statement.restrictFTS(to: sessionID, eventIDs: first...last)
-            return try Bool.fetchOne(db, sql: "SELECT EXISTS(\(statement.sql))",
-                                     arguments: .init(statement.arguments)) == true
+            if try Bool.fetchOne(db, sql: "SELECT EXISTS(\(statement.sql))",
+                                 arguments: .init(statement.arguments)) == true {
+                result.append(term)
+                if result.count == distinctLimit { break }
+            }
         }
+        return result
+    }
+
+    internal static func projectSearchableTopic(_ term: String, membership: String, db: Database) throws -> Bool {
+        guard let query = try? SearchQuery.parse(SearchQuery.quotedLiteral(term)) else { return false }
+        var statement = try SearchStatement(query, scope: .init(now: 0, timeZone: .gmt))
+        guard statement.usesFTS else { return false }
+        statement.restrictFTS(toMembership: membership)
+        return try Bool.fetchOne(db, sql: "SELECT EXISTS(\(statement.sql))", arguments: .init(statement.arguments)) == true
     }
 
     /// Find and group normalized index records in one read snapshot. The database
@@ -351,6 +366,10 @@ private struct SearchStatement {
     mutating func restrictFTS(to sessionID: Int64, eventIDs: ClosedRange<Int64>) {
         add("e.session_id=? AND events_fts.rowid BETWEEN ? AND ?", sessionID.databaseValue,
             eventIDs.lowerBound.databaseValue, eventIDs.upperBound.databaseValue)
+    }
+
+    mutating func restrictFTS(toMembership membership: String) {
+        add("e.session_id IN (SELECT value FROM json_each(?))", membership.databaseValue)
     }
 
     private mutating func add(_ predicate: String, _ values: DatabaseValue...) {

@@ -49,20 +49,24 @@ enum IndexSecretRedaction {
     }
 
     static func scrubExisting(_ db: Database) throws {
-        try pages("SELECT id,text,tool_name,meta_json FROM events", db: db) { row in
+        try pages("SELECT id,text,tool_name,meta_json,tool_action FROM events", db: db) { row in
             let text: String? = row["text"]
             let tool: String? = row["tool_name"]
             let metadata: String? = row["meta_json"]
+            let rawAction: String? = row["tool_action"]
+            let parsed = rawAction.flatMap { try? JSONDecoder().decode(ToolActionEvidence.self, from: Data($0.utf8)) }
+            let cleanAction = try AgentStore.encodedToolAction(parsed.map(redactedAction))
             let clean = text.map(IndexSecretMasker.text)
             let cleanTool = tool.map(IndexSecretMasker.text)
             let cleanMetadata = metadata.flatMap(IndexSecretMasker.eventMetadata)
             let id: Int64 = row["id"]
             if clean != text || cleanTool != tool {
                 // Updating these columns also updates FTS through its normal triggers.
-                try db.execute(sql: "UPDATE events SET text=?,tool_name=?,meta_json=? WHERE id=?",
-                               arguments: [clean, cleanTool, cleanMetadata, id])
-            } else if cleanMetadata != metadata {
-                try db.execute(sql: "UPDATE events SET meta_json=? WHERE id=?", arguments: [cleanMetadata, id])
+                try db.execute(sql: "UPDATE events SET text=?,tool_name=?,meta_json=?,tool_action=? WHERE id=?",
+                               arguments: [clean, cleanTool, cleanMetadata, cleanAction, id])
+            } else if cleanMetadata != metadata || cleanAction != rawAction {
+                try db.execute(sql: "UPDATE events SET meta_json=?,tool_action=? WHERE id=?",
+                               arguments: [cleanMetadata, cleanAction, id])
             }
         }
         try pages("SELECT id,title,first_prompt,latest_summary FROM sessions", db: db) { row in
@@ -102,7 +106,13 @@ enum IndexSecretRedaction {
                 try ToolOutputArchive.removeUnreferenced(id, db: db)
             }
         }
-        try db.execute(sql: "DELETE FROM session_keywords; DELETE FROM term_df;")
+        try TopicLedger.invalidateAll(db)
+    }
+
+    private static func redactedAction(_ value: ToolActionEvidence) -> ToolActionEvidence {
+        .init(files: value.files.map {
+            .init(path: IndexSecretMasker.text($0.path), operation: $0.operation, added: $0.added, removed: $0.removed)
+        }, command: value.command.map(IndexSecretMasker.text), completion: value.completion)
     }
 
     static func event(_ value: EventRecord) -> EventRecord {
@@ -110,6 +120,7 @@ enum IndexSecretRedaction {
         safe.text = value.text.map(IndexSecretMasker.text)
         safe.toolName = value.toolName.map(IndexSecretMasker.text)
         safe.metadataJSON = value.metadataJSON.flatMap(IndexSecretMasker.eventMetadata)
+        safe.toolAction = value.toolAction.map(redactedAction)
         if var capture = value.toolOutput {
             capture.archiveText = capture.archiveText.map(IndexSecretMasker.text)
             if let text = capture.archiveText {

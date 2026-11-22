@@ -97,11 +97,11 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         }
         func event(_ kind: EventKind, _ body: String, index: Int = 0, tool: String? = nil,
                    metadata: String? = nil, toolOutput: ToolOutputCapture? = nil,
-                   toolInput: ToolInputCapture? = nil) -> NormalizedRecord {
+                   toolInput: ToolInputCapture? = nil, toolAction: ToolActionEvidence? = nil) -> NormalizedRecord {
             .event(.init(session: owner, sequence: frame.sequence, timestamp: time ?? 0, kind: kind,
                          toolName: tool, text: body, metadataJSON: metadata,
                          dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership,
-                         toolOutput: toolOutput, toolInput: toolInput))
+                         toolOutput: toolOutput, toolInput: toolInput, toolAction: toolAction))
         }
 
         var unknown = false
@@ -114,6 +114,8 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             if !frame.isTruncated, let text = message["content"] as? String {
                 if !isUser || !isMeta { records.append(event(isUser ? .user : .assistant, text, metadata: textMetadata)) }
             } else if let blocks = message["content"] as? [[String: Any]] {
+                let resultCount = blocks.lazy.filter { ($0["type"] as? String) == "tool_result" }.prefix(2).count
+                let envelope = !frame.isTruncated && resultCount == 1 ? row["toolUseResult"] as? [String: Any] : nil
                 for (index, block) in blocks.prefix(240).enumerated() {
                     let blockType = block["type"] as? String
                     if frame.isTruncated && blockType != "tool_result" { continue }
@@ -128,14 +130,18 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                         records.append(event(.toolCall, Self.bounded(text, bytes: 2048), index: index,
                                              tool: Self.metadata(block["name"], maximum: 128),
                                              metadata: Self.toolMetadata(block["id"]),
-                                             toolInput: !isUser && block["input"] is [String: Any] ? .init(.claude(block: index)) : nil))
+                                             toolInput: !isUser && block["input"] is [String: Any] ? .init(.claude(block: index)) : nil,
+                                             toolAction: isUser ? nil : ToolActionDecoder.claude(name: block["name"] as? String, input: input)))
                     case "tool_result":
                         recoveredToolResult = true
                         let body = ToolOutputText.text(block["content"]) ?? ""
+                        let success = ToolActionDecoder.boolean(block["is_error"]).map { !$0 }
+                            ?? ToolActionDecoder.boolean(envelope?["success"])
                         records.append(event(.toolResult, Self.bounded(body, bytes: ToolOutputCapture.searchableBytes),
                                              index: index, metadata: Self.toolMetadata(block["tool_use_id"],
                                                  isError: (block["is_error"] as? Bool) == true),
-                                             toolOutput: .init(format: .claude(block: index), text: body, complete: !frame.isTruncated)))
+                                             toolOutput: .init(format: .claude(block: index), text: body, complete: !frame.isTruncated),
+                                             toolAction: ToolActionDecoder.completion(durationMS: envelope?["durationMs"], success: success)))
                     case "thinking":
                         // Do not split a credential at a byte limit. Only keep
                         // complete readable blocks, separately from replies.

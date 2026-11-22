@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import ADCore
 import ADInsights
+import ADPricing
 import ADPrivacy
 import ADSearch
 import ADStore
@@ -61,6 +62,7 @@ final class DashboardModel {
     private(set) var sessionIndexFailed = false
     private var loaded = false
     @ObservationIgnored private var statusTask: Task<Void, Never>?
+    @ObservationIgnored private var topicsTask: Task<Void, Never>?
     private var statusPipeline: SessionStatusPipeline?
     private(set) var statusThresholds = StatusInferenceThresholds.default
     private(set) var savingStatusThresholds = false
@@ -162,7 +164,7 @@ final class DashboardModel {
                 } else if synthetic && ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOOL_PAIR"] == "1" {
                     try Self.seedTranscriptToolPair(store, in: directory)
                 } else if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
-                    try Self.seedProjects(store)
+                    try Self.seedProjects(store, fixtureRoot: directory)
                 } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
                 }
@@ -204,6 +206,12 @@ final class DashboardModel {
                ModelContextWindow.areValid(rules) {
                 contextWindowRules = rules
             }
+            if !synthetic || ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOPICS"] == "1" {
+                let store = result.0
+                topicsTask = Task(priority: .utility) {
+                    if let pipeline = try? TopicIndexPipeline(store: store) { try? await pipeline.run() }
+                }
+            }
             if !synthetic || Self.syntheticActivity || CommandLine.arguments.contains("--synthetic-status") {
                 statusThresholds = loadStatusThresholds()
                 let initial = statusThresholds
@@ -220,7 +228,10 @@ final class DashboardModel {
         } catch { storageFailed = true }
     }
 
-    deinit { statusTask?.cancel() }
+    deinit {
+        statusTask?.cancel()
+        topicsTask?.cancel()
+    }
 
     func saveContextWindowRules(_ rules: [ModelContextWindow]) throws {
         guard ModelContextWindow.areValid(rules) else { throw ContextWindowSettingsFailure.invalidRules }
@@ -665,18 +676,23 @@ final class DashboardModel {
         try store.write(records)
     }
 
-    nonisolated private static func seedProjects(_ store: AgentStore) throws {
+    nonisolated private static func seedProjects(_ store: AgentStore, fixtureRoot: URL) throws {
         let home = URL(fileURLWithPath: "/synthetic")
         let codex = try store.upsertSource(.init(agent: .codex, label: "Synthetic Codex",
             rootURL: home.appendingPathComponent(AgentKind.codex.defaultSourceDirectoryName)))
         let claude = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude",
             rootURL: home.appendingPathComponent(AgentKind.claudeCode.defaultSourceDirectoryName)))
-        let client = "/synthetic/work/client"
+        let client: String
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PROJECT_DIRECTORY"] == "1" {
+            let folder = fixtureRoot.appendingPathComponent("synthetic-project")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            client = folder.resolvingSymlinksInPath().path
+        } else { client = "/synthetic/work/client" }
         let primary = SessionKey(agent: .codex, nativeID: "preview-project-client")
         let peer = SessionKey(agent: .claudeCode, nativeID: "preview-project-worktree")
         let docs = SessionKey(agent: .codex, nativeID: "preview-project-docs")
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        try store.write([
+        var records: [NormalizedRecord] = [
             .session(.init(key: primary, sourceID: codex, environment: "Local",
                            cwd: client, title: "Verify synthetic checkout",
                            startedAt: now - 900_000, lastEventAt: now, status: .completed, gitBranch: "main")),
@@ -693,7 +709,40 @@ final class DashboardModel {
                          dedupeKey: "preview:project:worktree")),
             .event(.init(session: docs, sequence: 0, timestamp: now - 120_000, kind: .assistant,
                          text: "Synthetic documentation reviewed", dedupeKey: "preview:project:docs")),
-        ])
+        ]
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PROJECT_ACTIONS"] == "1" {
+            let call = #"{"tool_use_id":"synthetic-project-call"}"#
+            records += [
+                .event(.init(session: peer, sequence: 1, timestamp: now + 1, kind: .toolCall, toolName: "Bash",
+                             text: "Synthetic command preview", metadataJSON: call, dedupeKey: "preview:project:command",
+                             toolAction: .init(command: "API_TOKEN='synthetic-project-action-secret' synthetic diagnostic"))),
+                .event(.init(session: peer, sequence: 2, timestamp: now + 3, kind: .toolResult,
+                             metadataJSON: call, dedupeKey: "preview:project:completion",
+                             toolAction: .init(completion: .init(exitCode: 2, durationMS: 967, success: false)))),
+                .event(.init(session: primary, sequence: 1, timestamp: now + 2, kind: .toolCall, toolName: "apply_patch",
+                             text: "Synthetic patch preview", dedupeKey: "preview:project:patch",
+                             toolAction: .init(files: [
+                                 .init(path: "/synthetic/edited.swift", operation: .edit, added: 4, removed: 3)
+                             ]))),
+            ]
+        }
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PROJECT_USAGE"] == "1" {
+            let price = try PriceTable.decode(Data(#"{"schemaVersion":1,"currency":"USD","unit":"per_million_tokens","updatedAt":"2026-01-01","models":[{"id":"project-fixture-priced","vendor":"fixture","displayName":"Synthetic","prices":[{"effectiveFrom":"2020-01-01","input":4,"output":2,"cacheRead":1,"source":"https://example.invalid/","checkedAt":"2020-01-01"}]}]}"#.utf8))
+            _ = try store.activatePricing(TokenQuoteEngine.make(table: price))
+            records += [
+                .tokens(.init(session: primary, timestamp: now - 60_000, model: "project-fixture-priced",
+                              counts: .init(inputFresh: 12, cacheRead: 3, output: 5), dedupeKey: "preview:project:day")),
+                .tokens(.init(session: peer, timestamp: now - 172_800_000, model: nil,
+                              counts: .init(output: 13), precision: .snapshot, dedupeKey: "preview:project:week")),
+                .tokens(.init(session: docs, timestamp: now - 60_000, model: "project-fixture-priced",
+                              counts: .init(output: 1000), dedupeKey: "preview:project:other")),
+            ]
+        }
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOPICS"] == "1" {
+            records.append(.event(.init(session: primary, sequence: 2, timestamp: now + 1, kind: .user,
+                                        text: "harmonic", dedupeKey: "preview:project:topic")))
+        }
+        try store.write(records)
     }
 
     func openProjectSession(_ id: SessionKey) {
@@ -819,6 +868,16 @@ final class DashboardModel {
         var lines = [#"{"type":"user","uuid":"synthetic-index-selection","cwd":"/synthetic/test","message":{"content":"Selected source 索引验证"}}"#]
         if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_ORIGINAL_INPUT"] == "1" {
             lines.append(#"{"type":"assistant","uuid":"synthetic-index-original-input","message":{"content":[{"type":"tool_use","name":"Bash","id":"synthetic-input","input":{"command":"synthetic diagnostic","detail":"syntheticinputonly","API_TOKEN":"synthetic-input-secret"}}]}}"#)
+        }
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_STRUCTURED_ACTIONS"] == "1" {
+            lines += [
+                #"{"type":"assistant","uuid":"synthetic-index-action-file","message":{"content":[{"type":"tool_use","name":"Edit","id":"synthetic-edit","input":{"file_path":"/synthetic/test/working.swift","old_string":"stay\nremove\n","new_string":"stay\nadd\nextra\n"}}]}}"#,
+                #"{"type":"assistant","uuid":"synthetic-index-action-command","message":{"content":[{"type":"tool_use","name":"Bash","id":"synthetic-command","input":{"command":"API_TOKEN='synthetic-actions-secret' synthetic checks"}}]}}"#,
+                #"{"type":"user","uuid":"synthetic-index-action-completion","toolUseResult":{"durationMs":713},"message":{"content":[{"type":"tool_result","tool_use_id":"synthetic-command","is_error":false,"content":"synthetic done"}]}}"#,
+            ]
+        }
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOPICS"] == "1" {
+            lines.append(#"{"type":"user","uuid":"synthetic-index-livetopic","message":{"content":"harmonic"}}"#)
         }
         try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
         try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude source", rootURL: root,

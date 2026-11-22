@@ -365,3 +365,19 @@ using command/path text as the full input. Codex v5 and Copilot v3 record an
 address when clipping arguments. Their existing preview and event keys are
 unchanged. An authorized replay adds addresses to older live records; it cannot
 restore argument bodies from deleted originals.
+
+## Structured file and command evidence
+
+Private sanitized captures on 2026-11-22 confirmed Claude Bash command strings,
+Read/Write/Edit file paths, Edit before/after strings, block-level tool result
+IDs and booleans, and numeric completion duration in some single-result
+envelopes. Copilot captures confirmed Bash command and View/Edit path fields
+and tool completion IDs with explicit success booleans. Prior Codex sanitized
+captures verified the string argument envelope; specific exec/patch and
+completion variants here follow SPEC §5.5 and synthetic replay tests rather than
+a fresh positive live sample. No missing duration or exit code is inferred.
+
+Claude parser 10, Codex 6 and Copilot 4 add bounded action fields without changing
+the original transcript keys or token arithmetic. The next authorized replay
+fills these summaries for old live sources. Matching Claude resume copies and
+immutable Copilot records can fill missing evidence without replacing the text.

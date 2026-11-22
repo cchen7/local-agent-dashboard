@@ -725,6 +725,11 @@ Priority: title set by the user in this app → title/summary provided by the ag
 - Scoring: TF-IDF with `tf = ln(1 + count)`, `idf = ln(N / (1 + df))`, N = number of sessions, `df` kept in `term_df`.
 - Keep the top 5; skip a term that is a substring of a higher-ranked term.
 - Shown as chips; clicking a chip searches for it.
+- Refresh weights from the app-owned index after relevant writes, off the ingest
+  writer, without waiting for a manual rebuild. A stale calculation cannot
+  overwrite newer text. Keep the existing whole-message and file-name masking
+  before counting. Session and project chips must match the existing literal
+  search in at least one member session.
 
 ### 10.3 Latest progress ("what are the latest updates")
 
@@ -776,6 +781,14 @@ in effect until changes are saved.
 ### 10.5 Files and commands
 
 Extracted from tool calls: Claude `Read`/`Edit`/`Write`/`MultiEdit`/`Bash`, Codex `exec_command`/`apply_patch`, Grok Build tool calls in `updates.jsonl`, Copilot `tool.execution_*`. Line counts: Claude `Edit` diffs `old_string` vs `new_string` by line; Codex `apply_patch` counts `+`/`-` lines in the patch.
+
+File entries describe logged tool targets, including requests whose disk outcome
+cannot be verified. Repeated scans and resume copies do not add counts. Show
+line totals only when all contributing counts are known. A command result
+requires an explicit, unique call and completion with the same ID in the same
+session and in file order. Missing or ambiguous outcome fields remain blank.
+Render only recorded command text and metadata; never run the command or read
+a target path named in its arguments.
 
 ### 10.6 Context usage
 
@@ -839,14 +852,14 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 
 ### 11.3 Projects page (answers "which directory, and what is going on there")
 
-- List: project name, path, agents used (icons), session count, last activity, tokens and cost for the selected period, latest session title. Projects can be pinned.
+- List: project name, path, agents used (icons), session count, last activity, tokens and cost for the selected period, latest session title. Projects can be pinned. Pins sort before other projects, preserve activity order within each section, and persist by project identity across restarts and archive expiry.
 - Detail:
   - Header: project name, full path, repository URL (if known), branches.
-  - Meta grid: Sessions, Agents, Tokens · Cost, Last activity. Main-topics line below it.
-  - **Latest updates timeline**: recent actions from **all agents** in this project merged by time (who, which session, what was done).
-  - Tabs: Sessions | Latest updates. The Sessions tab lists this project's sessions (filter by agent / status).
-  - Token chart for this project (reuse the Token Usage components with a project filter).
-  - Buttons: Show in Finder, Open Latest Session.
+  - Meta grid: Sessions, Agents, Tokens · Cost, Last activity. Main-topics line below it, ranked from the project’s member-session counts and the same document-frequency ledger. Clicking a chip starts a literal library search.
+  - **Latest updates timeline**: recent actions from **all agents** in this project merged by time (who, which session, what was done). Show structured commands with their recorded outcomes, and up to three affected paths with known line counts per tool action. Indicate additional targets. Keep the original call time and open its session on click. Only suppress an empty wrapper whose same-session action or outcome is already represented; keep genuine output, unpaired records and ambiguous completions.
+  - Tabs: Sessions | Latest updates | Usage. The Sessions tab lists this project's sessions (filter by agent / status). The Usage tab reuses the token chart without crowding the timeline at small window sizes.
+  - The project period picker uses the same rolling or custom boundaries as Token Usage. List totals, detail totals and the selected chart share one index snapshot. Resolve current sessions through project membership and retained numbers through the exact saved project fingerprint; never mix unclassified catalog rows into a workspace project. Retained-only projects remain visible without transcripts. Undated records contribute to All totals but are not plotted. Show partial or unavailable prices explicitly.
+  - Buttons: Show in Finder, Open Latest Session. Finder requires a current index-proven host directory (including explicit path mappings), a locally verifiable directory and an explicit click. Do not offer a directory target for an unmapped environment or from retained-only records.
 - Project identity: if a repository URL is known, the normalized URL is the key (worktrees of the same repository group together, with the worktree name as a tag); otherwise `cwd`. Claude worktree paths look like `<repo>/.claude/worktrees/<name>` and belong to the main repository.
   Resolve workspace groups from the owned index. For a registered default local root and local environment, re-granting access does not change project identity. Normalize unambiguous path spellings before applying mappings. An explicit mapping can join the same host project, including a unique catalog root; keep unmapped environments separate and do not infer which catalog project an ambiguous root belongs to. Prompt-history buckets remain searchable and do not count as project sessions or latest-session targets. The recent timeline uses normalized event time and a stable tie break.
 

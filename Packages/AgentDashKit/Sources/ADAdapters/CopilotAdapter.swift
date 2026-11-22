@@ -5,7 +5,7 @@ import Foundation
 /// GitHub Copilot CLI's append-only event stream (ADP-CP).
 public struct CopilotAdapter: AgentAdapter {
     public static let kind: AgentKind = .copilot
-    public static let parserVersion = 3
+    public static let parserVersion = 4
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}
@@ -93,13 +93,13 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
         var unknown = false
         func event(_ kind: EventKind, _ text: String? = nil, tool: String? = nil,
                    fields: AdapterJSON.Object = [:], toolOutput: ToolOutputCapture? = nil,
-                   toolInput: ToolInputCapture? = nil) -> NormalizedRecord {
+                   toolInput: ToolInputCapture? = nil, toolAction: ToolActionEvidence? = nil) -> NormalizedRecord {
             var hints = fields
             if child { hints["child_activity"] = true }
             return .event(.init(session: key, sequence: frame.sequence, timestamp: time, kind: kind,
                 toolName: tool, text: text, metadataJSON: hints.isEmpty ? nil : AdapterJSON.json(hints),
                 dedupeKey: "\(eventKey):\(kind == .unknown ? "unknown" : "event")",
-                toolOutput: toolOutput, toolInput: toolInput))
+                toolOutput: toolOutput, toolInput: toolInput, toolAction: toolAction))
         }
         var records: [NormalizedRecord] = []
         switch type {
@@ -134,7 +134,10 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
                 let preview = arguments.map { AdapterJSON.prefix($0, bytes: ToolOutputCapture.searchableBytes) }
                 let long = (arguments?.utf8.count ?? 0) > ToolOutputCapture.searchableBytes
                 records.append(event(.toolCall, preview, tool: name, fields: id.map { ["call_id": $0] } ?? [:],
-                                     toolInput: long ? .init(.copilot) : nil))
+                                     toolInput: long ? .init(.copilot) : nil,
+                                     toolAction: (data["arguments"] as? AdapterJSON.Object).flatMap {
+                                         ToolActionDecoder.copilot(name: name, arguments: $0)
+                                     }))
             } else { unknown = true }
         case "tool.execution_complete":
             let id = Self.identifier(data["toolCallId"])
@@ -145,7 +148,8 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
             if let success = Self.boolean(data["success"]) { fields["success"] = success }
             if let id { fields["call_id"] = id }
             records.append(event(.toolResult, text, tool: tool, fields: fields,
-                                 toolOutput: body.flatMap { .init(format: .copilot, text: $0) }))
+                                 toolOutput: body.flatMap { .init(format: .copilot, text: $0) },
+                                 toolAction: ToolActionDecoder.completion(success: data["success"])))
         case "session.task_complete", "session.compaction_complete":
             var fields: AdapterJSON.Object = ["signal": type ?? ""]
             if let success = Self.boolean(data["success"]) { fields["success"] = success }

@@ -330,12 +330,7 @@ private struct UsageCoverage {
     let arguments: StatementArguments
     let hourly: Bool
 
-    static let sums = """
-        coalesce(sum(input_fresh),0) AS fresh,coalesce(sum(cache_read),0) AS read_cache,
-        coalesce(sum(cache_write),0) AS write_cache,coalesce(sum(cache_write_1h),0) AS write_hour,
-        coalesce(sum(output),0) AS output,coalesce(sum(reasoning),0) AS reasoning,
-        coalesce(sum(cost_micro_usd),0) AS cost,coalesce(sum(unpriced_tokens),0) AS unpriced,coalesce(sum(records),0) AS records
-        """
+    static let sums = UsageTotals.aggregateColumns
 
     static func firstTimestamp(_ db: Database, predicate: UsagePredicate) throws -> Int64? {
         try Int64.fetchOne(db, sql: """
@@ -659,15 +654,35 @@ private struct UsageCoverage {
                    : "AND (\(amount(.tokens)))>unpriced_tokens"
     }
 
-    static func readTotals(_ row: Row) -> UsageTotals {
-        UsageTotals(counts: TokenCounts(inputFresh: row["fresh"], cacheRead: row["read_cache"], cacheWrite: row["write_cache"],
-                                        cacheWrite1h: row["write_hour"], output: row["output"], reasoning: row["reasoning"]),
-                    costMicroUSD: row["cost"], unpricedTokens: row["unpriced"], records: row["records"])
-    }
+    static func readTotals(_ row: Row) -> UsageTotals { .fromAggregate(row) }
 
     static func timestamp(_ minute: Int64) throws -> Int64 {
         let result = minute.multipliedReportingOverflow(by: 60_000)
         guard !result.overflow else { throw StoreError.invalidStoredValue }
         return result.partialValue
+    }
+}
+
+
+extension UsageTotals {
+    static let aggregateColumns = """
+        coalesce(sum(input_fresh),0) AS fresh,coalesce(sum(cache_read),0) AS read_cache,
+        coalesce(sum(cache_write),0) AS write_cache,coalesce(sum(cache_write_1h),0) AS write_hour,
+        coalesce(sum(output),0) AS output,coalesce(sum(reasoning),0) AS reasoning,
+        coalesce(sum(cost_micro_usd),0) AS cost,coalesce(sum(unpriced_tokens),0) AS unpriced,coalesce(sum(records),0) AS records
+        """
+
+    static func fromAggregate(_ row: Row) -> UsageTotals {
+        UsageTotals(counts: TokenCounts(inputFresh: row["fresh"], cacheRead: row["read_cache"], cacheWrite: row["write_cache"],
+                                        cacheWrite1h: row["write_hour"], output: row["output"], reasoning: row["reasoning"]),
+                    costMicroUSD: row["cost"], unpricedTokens: row["unpriced"], records: row["records"])
+    }
+}
+
+extension UsageChartSnapshot {
+    /// Identifiers for workspace charts never match a broad or catalog cache.
+    static func project(window: UsageWindow, points: [UsagePoint]) -> Self {
+        .init(id: UUID(), window: window, points: points, reusedBuckets: [], reusedFrom: nil,
+              recent: nil, filter: .init(), origin: UUID(), revision: nil)
     }
 }

@@ -33,7 +33,7 @@ func freshAndReopened() throws {
             #expect(try String.fetchOne(db, sql: "PRAGMA journal_mode") == "wal")
             #expect(try Int.fetchOne(db, sql: "PRAGMA foreign_keys") == 1)
             #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY identifier") ==
-                ["archive_retention", "context_measurement_model", "copilot_accounting", "original_tool_input", "running_session_activity", "saved_search_sidebar_filter", "session_exclusions", "session_record_identity", "source_removal", "source_root_identity", "status_inference", "tool_output_archive", "transcript_tool_pairs", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint", "v4_codex_index", "v9_token_minutes",
+                ["archive_retention", "context_measurement_model", "copilot_accounting", "live_topic_index", "original_tool_input", "project_pin_preferences", "project_usage_scope_edges", "running_session_activity", "saved_search_sidebar_filter", "session_exclusions", "session_record_identity", "source_removal", "source_root_identity", "status_inference", "structured_tool_actions", "tool_output_archive", "transcript_tool_pairs", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint", "v4_codex_index", "v9_token_minutes",
                  "v10_usage_readouts", "v11_token_quotes", "v12_cache_savings", "v13_usage_chart_changes"].sorted())
             for name in ["sources", "source_root_identities", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
                          "file_touches", "commands", "token_events", "token_minute", "rate_limit_snapshots",

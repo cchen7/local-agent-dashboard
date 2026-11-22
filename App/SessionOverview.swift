@@ -47,7 +47,7 @@ struct SessionOverview: View {
                             }
                             .font(.caption).foregroundStyle(.secondary)
                         }
-                        if !value.topics.isEmpty { topicChips(value.topics) }
+                        if !value.topics.isEmpty { MainTopicChips(terms: value.topics, compact: false, identifier: "session.topics", search: options.searchTopic) }
                         if value.summary != nil || value.lastPrompt != nil || value.lastReply != nil {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Latest Progress").font(.headline)
@@ -109,21 +109,6 @@ struct SessionOverview: View {
         }
     }
 
-    private func topicChips(_ topics: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Main Topics").font(.headline)
-            ScrollView(.horizontal) {
-                HStack(spacing: 5) {
-                    ForEach(topics, id: \.self) { term in
-                        Button { options.searchTopic(term) } label: { Text(verbatim: term) }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                    }
-                }
-            }
-        }
-    }
-
     @ViewBuilder private func excerpt(_ title: LocalizedStringResource, _ text: String?) -> some View {
         if let text {
             VStack(alignment: .leading, spacing: 3) {
@@ -177,15 +162,7 @@ private struct OverviewRowView: View {
             if let text = row.text {
                 Text(verbatim: text).lineLimit(3).textSelection(.enabled)
             }
-            if row.added != nil || row.removed != nil || row.exitCode != nil || row.durationMS != nil {
-                HStack(spacing: 8) {
-                    if let added = row.added, added >= 0 { Text(verbatim: "+\(added)") }
-                    if let removed = row.removed, removed >= 0 { Text(verbatim: "−\(removed)") }
-                    if let code = row.exitCode { Text("Exit \(code)") }
-                    if let duration = row.durationMS, duration >= 0 { Text("\(duration) ms") }
-                }
-                .foregroundStyle(.secondary)
-            }
+            ToolActionMetrics(row: row)
         }
         .font(.caption)
         .padding(8)
@@ -207,6 +184,64 @@ private struct OverviewRowView: View {
         case .file: "doc"
         case .command, .tool(.toolCall): "terminal"
         case .tool: "doc.text"
+        }
+    }
+}
+
+/// Only recorded numbers are rendered; an unknown field never becomes zero.
+struct ToolActionMetrics: View {
+    let row: SessionOverviewDisplay.Row
+
+    var body: some View {
+        if row.added != nil || row.removed != nil || row.exitCode != nil || row.durationMS != nil || row.success != nil {
+            HStack(spacing: 8) {
+                if let added = row.added, added >= 0 { Text(verbatim: "+\(added)") }
+                if let removed = row.removed, removed >= 0 { Text(verbatim: "−\(removed)") }
+                if let code = row.exitCode { Text("Exit \(code)") }
+                if let duration = row.durationMS, duration >= 0 { Text("\(duration) ms") }
+                if let success = row.success {
+                    if success { Text("Succeeded") } else { Text("Failed") }
+                }
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
+
+struct MainTopicChips: View {
+    let terms: [String]
+    let compact: Bool
+    let identifier: String
+    let search: (String) -> Void
+
+    var body: some View {
+        Group {
+            if compact {
+                HStack(alignment: .center, spacing: 6) {
+                    Text("Main Topics").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    chips
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Main Topics").font(.headline)
+                    chips
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private var chips: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 5) {
+                ForEach(terms, id: \.self) { term in
+                    Button { search(term) } label: { Text(verbatim: term) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
         }
     }
 }

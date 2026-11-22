@@ -17,6 +17,11 @@ public struct IndexedProject: Identifiable, Equatable, Sendable {
 
         static func retained(_ fingerprint: Data) -> Self { .init(key: .retained(fingerprint)) }
 
+        var catalogRowID: Int64? {
+            if case .catalog(let id) = key { return id }
+            return nil
+        }
+
         var retentionKey: Data {
             var bytes = Data()
             func integer(_ value: Int64) {
@@ -46,6 +51,15 @@ public struct IndexedProject: Identifiable, Equatable, Sendable {
     /// Stable activity order, newest first. Transcript text is read separately.
     public let sessions: [IndexedProjectSession]
     public let activityScope: IndexedProjectActivityScope
+    public let pinTarget: IndexedProjectPinTarget
+    public let pinned: Bool
+    let revealPath: String?
+    public var retainedOnly: Bool { sessions.isEmpty }
+
+    static func catalogRetentionKey(for rowID: Int64) -> Data {
+        ID(key: .catalog(rowID)).retentionKey
+    }
+    public var canRevealDirectory: Bool { revealPath != nil }
 }
 
 public struct IndexedProjectSession: Identifiable, Equatable, Sendable {
@@ -60,6 +74,11 @@ public struct IndexedProjectActivityScope: Equatable, Sendable {
     let sessionIDs: [Int64]
 }
 
+public enum IndexedProjectToolAction: Equatable, Sendable {
+    case command(IndexedOverviewCommand)
+    case files([IndexedOverviewFile], total: Int)
+}
+
 public struct IndexedProjectActivity: Identifiable, Equatable, Sendable {
     public let id: String
     public let session: SessionKey
@@ -68,10 +87,12 @@ public struct IndexedProjectActivity: Identifiable, Equatable, Sendable {
     public let kind: EventKind
     public let toolName: String?
     public let text: String?
+    public let action: IndexedProjectToolAction?
 }
 
 public enum IndexedProjectFailure: Error, Equatable, Sendable {
     case invalidLimit
+    case selectionChanged
 }
 
 public extension AgentStore {
@@ -99,9 +120,10 @@ public extension AgentStore {
 
     internal static func projectCatalog(_ db: Database, hostHome: String?) throws -> [IndexedProject] {
         let catalog = try Row.fetchAll(db, sql: """
-            SELECT id,display_name,root_path,repo_url FROM projects
+            SELECT id,key,display_name,root_path,repo_url FROM projects
             """).map(CatalogProject.init)
         let catalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
+        let pins = try ProjectPinPreferences.keys(db)
         let rootClaims = Dictionary(grouping: catalog.compactMap { project -> (Data, CatalogProject)? in
             guard let root = project.hostRootKey else { return nil }
             return (root, project)
@@ -111,7 +133,7 @@ public extension AgentStore {
             SELECT s.id,s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.status_reason,s.started_at,
                    coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,s.source_id,s.project_id,
                    source.label AS source_label,source.environment AS source_environment,
-                   source.agent AS source_agent,source.root_path AS source_root,source.path_mappings_json
+                   source.agent AS source_agent,source.root_path AS source_root,source.path_mappings_json,source.removed
             FROM sessions AS s JOIN sources AS source ON source.id=s.source_id
             LEFT JOIN source_files AS file ON file.id=s.file_id
             WHERE file.role IS NULL OR file.role<>?
@@ -168,16 +190,23 @@ public extension AgentStore {
             } else {
                 return
             }
-            if groups[id] == nil { order.append(id) }
+            if groups[id] == nil {
+                order.append(id)
+                let pinKey = attributed.map { ProjectPinPreferences.catalogKey($0.key) } ?? id.retentionKey
+                groups[id] = .init(name: name, path: path, repository: repository, location: location, pinKey: pinKey)
+            }
             let member = IndexedProjectSession(session: session, worktree: workspace?.worktree ?? recorded?.worktree)
-            groups[id, default: .init(name: name, path: path, repository: repository, location: location)]
-                .append(member, rowID: row["id"])
+            let knownPath: Data?
+            if !source.removed, let path, let hostRoot, hostRoot.elementsEqual(path.utf8), path != "/" {
+                knownPath = hostRoot
+            } else { knownPath = nil }
+            groups[id]?.append(member, rowID: row["id"], reveal: knownPath)
         }
-        return order.compactMap { id in groups[id]?.project(id) }
+        return ProjectPinPreferences.ordered(order.compactMap { id in groups[id]?.project(id, pins: pins) })
     }
 
     private static func projectActivity(_ db: Database, members: [Int64], limit: Int) throws -> [IndexedProjectActivity] {
-        var latest: [(id: Int64, time: Int64)] = []
+        var latest: [(id: Int64, time: Int64, kind: String)] = []
         // Use the per-session event index. Chunk the membership so a single
         // project cannot exceed SQLite's bound-argument limit.
         let chunkSize = 400
@@ -186,31 +215,44 @@ public extension AgentStore {
             let bindings = Array(repeating: "?", count: chunk.count).joined(separator: ",")
             let arguments = chunk.map(\.databaseValue) + [limit.databaseValue]
             let rows = try Row.fetchAll(db, sql: """
-                SELECT id,ts FROM events INDEXED BY events_session_seq
-                WHERE session_id IN (\(bindings)) AND ts>0
-                    AND kind IN ('user','assistant','summary','system','error','tool_call','tool_result')
-                ORDER BY ts DESC,id DESC LIMIT ?
+                SELECT e.id,e.ts,e.kind FROM events e INDEXED BY events_session_seq
+                WHERE e.session_id IN (\(bindings)) AND e.ts>0
+                    AND e.kind IN ('user','assistant','summary','system','error','tool_call','tool_result')
+                    AND NOT (\(StructuredActionProjection.hiddenProjectWrapper))
+                ORDER BY e.ts DESC,e.id DESC LIMIT ?
                 """, arguments: .init(arguments))
-            latest.append(contentsOf: rows.map { (id: $0[0], time: $0[1]) })
+            latest.append(contentsOf: rows.map { (id: $0[0], time: $0[1], kind: $0[2]) })
             latest.sort { ($0.time, $0.id) > ($1.time, $1.id) }
             if latest.count > limit { latest.removeLast(latest.count - limit) }
         }
         return try latest.map { candidate in
+            let action: IndexedProjectToolAction?
+            if candidate.kind == EventKind.toolCall.rawValue {
+                if let command = try StructuredActionProjection.command(for: candidate.id, db: db) {
+                    action = .command(command)
+                } else {
+                    action = try StructuredActionProjection.filePreview(for: candidate.id, db: db)
+                }
+            } else { action = nil }
             guard let row = try Row.fetchOne(db, sql: """
-                SELECT e.dedupe_key,e.kind,e.tool_name,e.text,s.agent,s.native_id,s.title
+                SELECT e.dedupe_key,e.kind,s.agent,s.native_id,
+                    CASE WHEN length(CAST(s.title AS BLOB))<=16384 THEN s.title END AS title,
+                    CASE WHEN length(CAST(e.tool_name AS BLOB))<=16384 THEN e.tool_name END AS tool_name,
+                    CASE WHEN ? AND length(CAST(e.text AS BLOB))<=1048576 THEN e.text END AS text
                 FROM events e JOIN sessions s ON s.id=e.session_id WHERE e.id=?
-                """, arguments: [candidate.id]),
+                """, arguments: [action == nil, candidate.id]),
                 let agent = AgentKind(rawValue: row["agent"]), let kind = EventKind(rawValue: row["kind"])
             else { throw StoreError.invalidStoredValue }
             return .init(id: row["dedupe_key"], session: .init(agent: agent, nativeID: row["native_id"]),
                          sessionTitle: row["title"], timestamp: candidate.time, kind: kind,
-                         toolName: row["tool_name"], text: row["text"])
+                         toolName: row["tool_name"], text: row["text"], action: action)
         }
     }
 }
 
 private struct CatalogProject {
     let id: Int64
+    let key: String
     let name: String
     let path: String?
     let normalizedRoot: String?
@@ -219,6 +261,7 @@ private struct CatalogProject {
 
     init(_ row: Row) {
         id = row["id"]
+        key = row["key"]
         name = row["display_name"]
         path = row["root_path"]
         let workspace = path.flatMap(WorkspacePath.init)
@@ -233,9 +276,11 @@ private struct WorkspaceSource {
     let label: String
     let mappings: [PathMapping]
     let localDefaultAgent: AgentKind?
+    let removed: Bool
 
     init(_ row: Row, hostHome: String?, decoder: JSONDecoder) {
         label = row["source_label"]
+        removed = row["removed"]
         let serialized: String = row["path_mappings_json"]
         mappings = (try? decoder.decode([PathMapping].self, from: Data(serialized.utf8))) ?? []
         // A re-grant changes how a source is accessed, not its provenance.
@@ -290,28 +335,37 @@ private struct ProjectGroup {
     let path: String?
     let repository: String?
     let location: String?
+    let pinKey: Data
+    private var revealPaths: Set<Data> = []
     private var members: [IndexedProjectSession] = []
     private var rowIDs: [Int64] = []
     private var agents: Set<AgentKind> = []
     private var branches: Set<String> = []
 
-    init(name: String, path: String?, repository: String?, location: String?) {
+    init(name: String, path: String?, repository: String?, location: String?, pinKey: Data) {
         self.name = name
         self.path = path
         self.repository = repository
         self.location = location
+        self.pinKey = pinKey
     }
 
-    mutating func append(_ member: IndexedProjectSession, rowID: Int64) {
+    mutating func append(_ member: IndexedProjectSession, rowID: Int64, reveal: Data?) {
+        if let reveal { revealPaths.insert(reveal) }
         members.append(member)
         rowIDs.append(rowID)
         agents.insert(member.session.id.agent)
         if let branch = member.session.branch, !branch.isEmpty { branches.insert(branch) }
     }
 
-    func project(_ id: IndexedProject.ID) -> IndexedProject {
-        .init(id: id, name: name, path: path, repositoryURL: repository, location: location,
-              agents: AgentKind.allCases.filter(agents.contains), branches: branches.sorted(),
-              sessions: members, activityScope: .init(sessionIDs: rowIDs.sorted()))
+    func project(_ id: IndexedProject.ID, pins: Set<Data>) -> IndexedProject {
+        let directory: String?
+        if revealPaths.count == 1, let path, revealPaths.contains(Data(path.utf8)) {
+            directory = path
+        } else { directory = nil }
+        return .init(id: id, name: name, path: path, repositoryURL: repository, location: location,
+                     agents: AgentKind.allCases.filter(agents.contains), branches: branches.sorted(),
+                     sessions: members, activityScope: .init(sessionIDs: rowIDs.sorted()),
+                     pinTarget: .init(id: id, key: pinKey), pinned: pins.contains(pinKey), revealPath: directory)
     }
 }

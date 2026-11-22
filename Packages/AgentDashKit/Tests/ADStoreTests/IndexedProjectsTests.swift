@@ -251,3 +251,171 @@ private struct ProjectFixture {
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
+
+@Test("§11.3: project activity keeps scoped structured actions in time order and absorbs only proved duplicates",
+      .timeLimit(.minutes(1)))
+func projectTimelineProjectsStructuredActions() async throws {
+    let box = try ProjectFixture()
+    defer { box.remove() }
+    let codex = try box.source(.codex, label: "Codex")
+    let claude = try box.source(.claudeCode, label: "Claude")
+    let primary = box.session(.codex, codex, "command-session", "/synthetic/repo", activity: 100)
+    let peer = box.session(.claudeCode, claude, "file-session", "/synthetic/repo", activity: 120)
+    let outside = box.session(.codex, codex, "outside", "/synthetic/isolated", activity: 130)
+    let correlation = #"{"call_id":"synthetic-id"}"#
+    func event(_ owner: SessionKey, _ id: String, _ seq: Int64, _ ts: Int64, _ kind: EventKind,
+               text: String? = nil, meta: String? = nil, action: ToolActionEvidence? = nil) -> NormalizedRecord {
+        .event(.init(session: owner, sequence: seq, timestamp: ts, kind: kind, toolName: "synthetic tool",
+                     text: text, metadataJSON: meta, dedupeKey: id, toolAction: action))
+    }
+    let command = ToolActionEvidence(command: "synthetic command")
+    let outcome = ToolActionEvidence(completion: .init(exitCode: 7, durationMS: 983, success: false))
+    let edits = ToolActionEvidence(files: (1...4).map {
+        .init(path: "synthetic/file-\($0)", operation: .edit, added: Int64($0), removed: 1)
+    })
+    try box.store.write([.session(primary), .session(peer), .session(outside),
+        event(primary.key, "command", 1, 20, .toolCall, text: "raw preview", meta: correlation, action: command),
+        event(primary.key, "wrapper", 2, 23, .toolResult, meta: correlation),
+        event(peer.key, "files", 1, 30, .toolCall, text: "raw patch", action: edits),
+        event(peer.key, "orphan", 2, 27, .toolResult, text: "only evidence", meta: correlation),
+        event(peer.key, "message", 3, 14, .user, text: "synthetic message"),
+        event(outside.key, "outside-outcome", 2, 100, .system, meta: correlation, action: outcome),
+    ])
+
+    var catalog = box.store.indexedProjectUpdates(hostHome: "/host").makeAsyncIterator()
+    let projects = try #require(try await catalog.next())
+    let project = try #require(projects.first { $0.path == "/synthetic/repo" })
+    var updates = try box.store.indexedProjectActivityUpdates(project.activityScope, limit: 4).makeAsyncIterator()
+    let before = try #require(try await updates.next())
+    #expect(before.map(\.id) == ["files", "orphan", "command", "message"])
+    #expect(before.first?.session == peer.key)
+    guard case let .files(paths, total) = before.first?.action else {
+        Issue.record("Structured file preview missing")
+        return
+    }
+    #expect(total == 4 && paths.map(\.added) == [1, 2, 3])
+    #expect(paths.map(\.removed) == [1, 1, 1] && before.first?.text == nil)
+    guard case let .command(pending) = before[2].action else {
+        Issue.record("Structured command preview missing")
+        return
+    }
+    #expect(pending.text == "synthetic command" && pending.exitCode == nil)
+
+    try box.store.write([event(primary.key, "completion", 3, 40, .system, meta: correlation, action: outcome)])
+    let after = try #require(try await updates.next())
+    #expect(after.map(\.id) == ["files", "orphan", "command", "message"])
+    #expect(after[2].timestamp == 20 && after[2].session == primary.key)
+    guard case let .command(resolved) = after[2].action else {
+        Issue.record("Command outcome did not refresh")
+        return
+    }
+    #expect(resolved.exitCode == 7 && resolved.durationMS == 983 && resolved.success == false)
+
+    try box.store.write([event(primary.key, "other-call", 4, 35, .toolCall, meta: correlation, action: command)])
+    let ambiguous = try #require(try await updates.next())
+    #expect(ambiguous.map(\.id) == ["completion", "other-call", "files", "orphan"])
+    guard case let .command(unresolved) = ambiguous[1].action else {
+        Issue.record("Ambiguous command row missing")
+        return
+    }
+    #expect(unresolved.exitCode == nil && unresolved.durationMS == nil)
+
+    // Even an identifiable wrapper remains in the timeline when it has
+    // substantive text not present in the command row.
+    let standalone = #"{"call_id":"with-text"}"#
+    try box.store.write([
+        event(primary.key, "with-text-command", 5, 41, .toolCall, meta: standalone, action: command),
+        event(primary.key, "with-text-result", 6, 42, .toolResult, text: "useful standalone output", meta: standalone, action: outcome),
+    ])
+    let retained = try #require(try await updates.next())
+    #expect(retained.first?.id == "with-text-result")
+    #expect(retained.first?.text == "useful standalone output")
+    guard case let .command(resolvedAgain) = retained[1].action else {
+        Issue.record("Matching command disappeared")
+        return
+    }
+    #expect(resolvedAgain.exitCode == 7)
+}
+
+@Test("§11.3: pinning uses the project identity, survives reopen and does not pin an isolated same-path workspace",
+      .timeLimit(.minutes(1)))
+func pinsPersistWithoutCrossingProjectScopes() async throws {
+    let box = try ProjectFixture()
+    defer { box.remove() }
+    let local = try box.source(.codex, label: "Local")
+    let remote = try box.source(.claudeCode, label: "Remote", environment: "VM")
+    let path = "/host/work/client"
+    let unpinned = box.session(.codex, local, "latest", "/host/work/latest", activity: 200)
+    let main = box.session(.codex, local, "host", path, activity: 100)
+    let separate = box.session(.claudeCode, remote, "remote", path, activity: 150, environment: "VM")
+    try box.store.write([.session(unpinned), .session(main), .session(separate)])
+    let initial = try await projects(in: box.store)
+    let chosen = try #require(initial.first { $0.sessions.map(\.id) == [main.key] })
+    try box.store.setProjectPinned(chosen.pinTarget, pinned: true, hostHome: "/host")
+
+    let reopened = try AgentStore(databaseURL: box.directory.appendingPathComponent("index.sqlite"))
+    let pinned = try await projects(in: reopened)
+    #expect(pinned.first?.id == chosen.id && pinned.first?.pinned == true)
+    #expect(pinned.first { $0.sessions.map(\.id) == [separate.key] }?.pinned == false)
+    try reopened.setProjectPinned(chosen.pinTarget, pinned: false, hostHome: "/host")
+    let restored = try await projects(in: reopened)
+    #expect(restored.first?.sessions.first?.id == unpinned.key)
+    #expect(restored.allSatisfy { !$0.pinned })
+}
+
+@Test("§11.3: a catalog pin uses the durable key, not a recycled catalog row number",
+      .timeLimit(.minutes(1)))
+func catalogPinRejectsReusedID() async throws {
+    let box = try ProjectFixture()
+    defer { box.remove() }
+    let source = try box.source(.codex, label: "Local")
+    let session = box.session(.codex, source, "client", "/host/work/client", activity: 100)
+    try box.store.write([.session(session)])
+    try await box.store.databasePool.write { db in
+        try db.execute(sql: """
+            INSERT INTO projects(id,key,display_name,root_path) VALUES(1,'fixture-one','First','/host/work/client');
+            UPDATE sessions SET project_id=1;
+            """)
+    }
+    let first = try #require(try await projects(in: box.store).first)
+    try box.store.setProjectPinned(first.pinTarget, pinned: true, hostHome: "/host")
+    try await box.store.databasePool.write { db in
+        try db.execute(sql: """
+            UPDATE sessions SET project_id=NULL;
+            DELETE FROM projects WHERE id=1;
+            INSERT INTO projects(id,key,display_name,root_path) VALUES(1,'fixture-two','Second','/host/work/client');
+            UPDATE sessions SET project_id=1;
+            """)
+    }
+    let replaced = try #require(try await projects(in: box.store).first)
+    #expect(replaced.id == first.id && !replaced.pinned)
+    #expect(throws: IndexedProjectFailure.selectionChanged) {
+        try box.store.setProjectPinned(first.pinTarget, pinned: true, hostHome: "/host")
+    }
+}
+
+@Test("SEC-3 / §11.3: project Finder targets require current confirmed host attribution",
+      .timeLimit(.minutes(1)))
+func onlyProvenHostGroupsOfferDirectoryTargets() async throws {
+    let box = try ProjectFixture()
+    defer { box.remove() }
+    let local = try box.source(.codex, label: "Local")
+    let mapped = try box.source(.copilot, label: "Container", environment: "Container",
+                                mappings: [.init(from: "/workspace", to: "/host/work/client")])
+    let remote = try box.source(.claudeCode, label: "Remote", environment: "VM")
+    let path = "/host/work/client"
+    let main = box.session(.codex, local, "host", path, activity: 100)
+    let remoteMapped = box.session(.copilot, mapped, "mapped", "/workspace", activity: 110, environment: "Container")
+    let isolated = box.session(.claudeCode, remote, "remote", path, activity: 90, environment: "VM")
+    try box.store.write([.session(main), .session(remoteMapped), .session(isolated)])
+    let initial = try await projects(in: box.store)
+    let host = try #require(initial.first { $0.sessions.count == 2 })
+    let separate = try #require(initial.first { $0.sessions.count == 1 })
+    #expect(host.canRevealDirectory && !separate.canRevealDirectory)
+    #expect(try box.store.projectDirectoryTarget(host.pinTarget, hostHome: "/host")?.path == path)
+    #expect(try box.store.projectDirectoryTarget(separate.pinTarget, hostHome: "/host") == nil)
+    try box.store.removeRegisteredSource(local)
+    #expect(try box.store.projectDirectoryTarget(host.pinTarget, hostHome: "/host")?.path == path)
+    try box.store.removeRegisteredSource(mapped)
+    #expect(try box.store.projectDirectoryTarget(host.pinTarget, hostHome: "/host") == nil)
+}

@@ -85,16 +85,18 @@ public struct EventRecord: Codable, Equatable, Sendable {
     public var transcriptChannel: TranscriptChannel?
     public var toolOutput: ToolOutputCapture?
     public var toolInput: ToolInputCapture?
+    public var toolAction: ToolActionEvidence?
     /// Create a normalized value without performing file access.
     public init(session: SessionKey, sequence: Int64, timestamp: Int64, kind: EventKind,
                 toolName: String? = nil, text: String? = nil, metadataJSON: String? = nil, dedupeKey: String,
                 recordedOwnership: RecordedSessionOwnership? = nil, transcriptChannel: TranscriptChannel? = nil,
-                toolOutput: ToolOutputCapture? = nil, toolInput: ToolInputCapture? = nil) {
+                toolOutput: ToolOutputCapture? = nil, toolInput: ToolInputCapture? = nil, toolAction: ToolActionEvidence? = nil) {
         self.session = session; self.sequence = sequence; self.timestamp = timestamp; self.kind = kind
         self.toolName = toolName; self.text = text; self.metadataJSON = metadataJSON; self.dedupeKey = dedupeKey
         self.recordedOwnership = recordedOwnership; self.transcriptChannel = transcriptChannel
         self.toolOutput = toolOutput
         self.toolInput = toolInput
+        self.toolAction = toolAction
     }
 }
 

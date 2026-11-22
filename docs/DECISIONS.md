@@ -496,3 +496,64 @@ boundaries. Show at most 256 KiB of complete input after applying the privacy
 policy; do not show malformed JSON fragments or follow paths printed by tools.
 Discard read bodies when the view closes. Retain an honest preview if the
 original is gone or exceeds the limit.
+
+## DEV-072 — Project typed tool actions from their indexed event identity
+
+Store bounded action evidence with the deduplicated event. Maintain a
+per-event file target ledger and incremental path/operation rollups in the
+same write transaction. Unknown edit counts stay unknown and are never
+treated as zero when aggregating. Use the event reference for each command.
+Read outcomes by the specific same-session call ID and source sequence;
+require a unique call and a unique later typed completion. Do not infer
+paths from shell text, success from output prose, or a duration from time gaps.
+Privacy redaction reprojects these same facts without keeping raw shadow rows.
+
+## DEV-073 — Use the same typed facts in the multi-agent project timeline
+
+Use the session overview's indexed proof for command outcomes and the original
+event's file ledger rather than project-wide file counts. Rank eligible events
+by timestamp and event ID before fetching content. Keep the original call time
+and origin session when a late completion changes its status. Elide empty
+wrappers only when a unique visible call covers them. Show up to three file
+targets per event with a count of the remainder, and preserve separate result
+text or unresolved entries. Apply the normal masking policy before excerpting.
+
+## DEV-074 — Scope project charts to membership and retained identity
+
+Build the project usage list and the selected chart from one consistent
+snapshot. Use canonical live session membership and retained scope
+fingerprints, never a display path or the unclassified catalog bucket.
+Batch list totals in SQL; only draw the selected project's chart while
+the Usage tab is visible. Exact half-open bounds and current display
+zone drive the existing UsageWindow buckets. Keep cache inclusive totals,
+stored quote amounts and unknown price disclosure. Include undated records
+only in All totals. Retained-only projects show numeric history without
+bringing back expired sessions. Refresh on observed index changes; no
+periodic polling is required.
+
+## DEV-075 — Save project pins by durable identity and reveal confirmed host paths
+
+Use app-owned preference fingerprints for pins. Workspace and retained identities
+use the retained fingerprint; catalog projects include their stable catalog key
+rather than an integer row number. Pins do not store raw project paths. Recheck
+the selected identity inside the write transaction. The list keeps its existing
+activity order within pinned and unpinned groups.
+
+Finder needs a current source-backed host path or an explicit mapping, not a
+remote path with similar spelling. On click confirm the catalog target again,
+walk only directory metadata without following symlinks, and reject known
+remote or automounted paths before opening them. Hand the verified directory
+to Finder without requesting a new grant or launching a shell.
+
+## DEV-076 — Refresh deterministic topics from changed indexed documents
+
+Queue only changed indexed conversations or distinct touched paths. Compute
+off the ingestion writer from complete logical messages and known file names,
+then apply only if the queued revision still matches. Keep per-session term
+counts and exact document frequencies with cascading updates. Manual rebuild
+uses the same ledger. Privacy changes invalidate counts and queue fresh masked
+work. A session still being refreshed does not display outdated computed
+labels. Rank with the existing TF-IDF rule, return at most five distinguishable
+labels with literal search proof, and aggregate project labels only from a
+current canonical member scope. Cap candidate reads, assembled message sizes,
+and the distinct term set; use no polling while idle.

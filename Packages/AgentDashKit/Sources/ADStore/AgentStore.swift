@@ -167,6 +167,24 @@ public final class AgentStore: Sendable {
         migrator.registerMigration("original_tool_input") { db in
             try db.execute(sql: "ALTER TABLE events ADD COLUMN tool_input_origin TEXT")
         }
+        migrator.registerMigration("structured_tool_actions") { db in
+            guard let file = Bundle.module.url(forResource: "structured_tool_actions", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: file, encoding: .utf8))
+        }
+        migrator.registerMigration("project_usage_scope_edges") { db in
+            try db.execute(sql: "CREATE INDEX retained_archive_usage_scope_time ON retained_archive_usage(scope_id,ts)")
+        }
+        migrator.registerMigration("project_pin_preferences") { db in
+            try ProjectPinPreferences.migrate(db)
+        }
+        migrator.registerMigration("live_topic_index") { db in
+            guard let resource = Bundle.module.url(forResource: "live_topics", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -625,22 +643,37 @@ public final class AgentStore: Sendable {
         if value.kind == .toolCall, let address = value.toolInput?.origin {
             inputOrigin = String(decoding: try JSONEncoder().encode(address), as: UTF8.self)
         } else { inputOrigin = nil }
+        let toolAction = try encodedToolAction(value.toolAction)
         try db.cachedStatement(sql: """
             INSERT INTO events(session_id,seq,ts,kind,tool_name,text,meta_json,dedupe_key,transcript_channel,blob_id,
-                               tool_output_origin,tool_input_origin)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                               tool_output_origin,tool_input_origin,tool_action)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(dedupe_key) DO UPDATE SET session_id=excluded.session_id,seq=excluded.seq,ts=excluded.ts,
             kind=excluded.kind,tool_name=excluded.tool_name,text=excluded.text,meta_json=excluded.meta_json,
             transcript_channel=excluded.transcript_channel,blob_id=excluded.blob_id,tool_output_origin=excluded.tool_output_origin,
-            tool_input_origin=excluded.tool_input_origin
+            tool_input_origin=excluded.tool_input_origin,tool_action=excluded.tool_action
             WHERE NOT ? AND ((events.session_id=excluded.session_id AND NOT ?)
                 OR (events.session_id<>excluded.session_id AND ?))
             """).execute(arguments: [session, value.sequence, value.timestamp, value.kind.rawValue,
                                       value.toolName, value.text, value.metadataJSON, value.dedupeKey,
-                                      value.transcriptChannel?.rawValue, blob, origin, inputOrigin,
+                                      value.transcriptChannel?.rawValue, blob, origin, inputOrigin, toolAction,
                                       value.session.agent == .copilot, value.recordedOwnership == .inherited,
                                       value.recordedOwnership != nil])
-        if value.transcriptChannel == .preferred && db.changesCount == 1 {
+        let accepted = db.changesCount == 1
+        let inheritedClaude = value.session.agent == .claudeCode && value.recordedOwnership == .inherited
+            && value.dedupeKey.hasPrefix("claude:event:") && !value.dedupeKey.hasPrefix("claude:event:file:")
+        if !accepted, value.session.agent == .copilot || inheritedClaude, let toolAction {
+            // Backfill only the same producer event and preview. A Claude
+            // resume copy need not have the original's physical file position;
+            // keep the existing timestamp, order and owner.
+            try db.cachedStatement(sql: """
+                UPDATE events SET tool_action=?
+                WHERE dedupe_key=? AND session_id=? AND (seq=? OR ?) AND kind=? AND text IS ?
+                    AND tool_name IS ? AND meta_json IS ? AND tool_action IS NULL
+                """).execute(arguments: [toolAction, value.dedupeKey, session, value.sequence, inheritedClaude,
+                                          value.kind.rawValue, value.text, value.toolName, value.metadataJSON])
+        }
+        if value.transcriptChannel == .preferred && accepted {
             // FTS triggers remove the superseded copies in the same writer transaction.
             try db.cachedStatement(sql: "DELETE FROM events WHERE session_id=? AND transcript_channel='fallback'")
                 .execute(arguments: [session])
@@ -648,7 +681,7 @@ public final class AgentStore: Sendable {
         if value.kind == .toolResult {
             // Copilot display rows are immutable. Attach a missing archive only
             // when this replay agrees with the indexed owner, sequence and preview.
-            if db.changesCount == 0, value.session.agent == .copilot, origin != nil || blob != nil {
+            if !accepted, value.session.agent == .copilot, origin != nil || blob != nil {
                 try db.cachedStatement(sql: """
                     UPDATE events SET blob_id=?,tool_output_origin=coalesce(tool_output_origin,?)
                     WHERE dedupe_key=? AND session_id=? AND seq=? AND kind='tool_result' AND text IS ?
@@ -659,7 +692,7 @@ public final class AgentStore: Sendable {
             try ToolOutputArchive.removeUnreferenced(blob, db: db)
             return
         }
-        if value.kind == .toolCall, db.changesCount == 0, value.session.agent == .copilot, let inputOrigin {
+        if value.kind == .toolCall, !accepted, value.session.agent == .copilot, let inputOrigin {
             // Existing Copilot display rows are immutable. Backfill only the
             // locator of the same event, owner, file position and preview.
             try db.cachedStatement(sql: """
@@ -673,7 +706,7 @@ public final class AgentStore: Sendable {
         // A same-owner Claude copy cannot replace an earlier event. It can
         // supply a missing message ID for the same producer record UUID.
         // The file/sequence fallback does not identify a stable producer record.
-        guard db.changesCount == 0, value.recordedOwnership == .inherited,
+        guard !accepted, value.recordedOwnership == .inherited,
               value.session.agent == .claudeCode, value.kind == .assistant,
               !value.dedupeKey.hasPrefix("claude:event:file:"), let metadata = value.metadataJSON,
               let fields = try? JSONDecoder().decode([String: String].self, from: Data(metadata.utf8)),
@@ -686,6 +719,13 @@ public final class AgentStore: Sendable {
                 THEN json_type(meta_json)='object' AND json_type(meta_json,'$.claude_message_id') IS NULL
                 ELSE 0 END
             """).execute(arguments: [messageID, value.dedupeKey, session])
+    }
+
+    static func encodedToolAction(_ evidence: ToolActionEvidence?) throws -> String? {
+        guard let evidence, !evidence.isEmpty else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(evidence), as: UTF8.self)
     }
 
     private static func save(_ sample: RateLimitSnapshot, db: Database) throws {

@@ -278,7 +278,6 @@ struct SessionExclusionGate {
                     AND NOT EXISTS(SELECT 1 FROM retained_archive_usage WHERE project_id=?1)
                 """, arguments: [projectID])
         }
-        try db.execute(sql: "DELETE FROM term_df WHERE term NOT IN (SELECT term FROM session_keywords)")
     }
 
     private mutating func decision(_ path: String, sourceID: Int64, db: Database) throws -> PathExclusions.Decision {
