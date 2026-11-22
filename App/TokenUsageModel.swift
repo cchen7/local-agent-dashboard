@@ -135,6 +135,9 @@ final class TokenUsageModel {
         do {
             let snapshot = try await Self.background {
                 let window = try request.window(in: store, now: now, zone: zone)
+                #if AGENTDASH_SYNTHETIC_ONLY
+                SyntheticResourceFixture.reportVisibleUsage("usage-report-read")
+                #endif
                 let report = try store.usage(window: window, filter: request.filter, metric: request.metric,
                                              grouping: request.grouping, reusing: base?.chart,
                                              liveAt: request.period == .custom ? nil : now)
@@ -159,6 +162,9 @@ final class TokenUsageModel {
         let now = Int64(Date().timeIntervalSince1970 * 1_000)
         let zone = TimeZone.current
         guard let latest = try? await Self.background({
+            #if AGENTDASH_SYNTHETIC_ONLY
+            SyntheticResourceFixture.reportVisibleUsage("usage-chart-read")
+            #endif
             let chart = try store.usageChart(period: request.period, now: now, timeZone: zone,
                                              filter: request.filter, reusing: base.chart)
             return UsageLiveChart(chart: chart, plot: UsagePlot(chart: chart, period: request.period,
@@ -182,7 +188,10 @@ final class TokenUsageModel {
         let store = self.store
         let now = Int64(Date().timeIntervalSince1970 * 1_000)
         return try? await Self.background {
-            try store.usageLimitReadings(now: now, agent: agent, includeThroughput: includeThroughput)
+            #if AGENTDASH_SYNTHETIC_ONLY
+            SyntheticResourceFixture.reportVisibleUsage("usage-limits-read")
+            #endif
+            return try store.usageLimitReadings(now: now, agent: agent, includeThroughput: includeThroughput)
         }
     }
 

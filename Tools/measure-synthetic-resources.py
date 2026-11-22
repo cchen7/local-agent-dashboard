@@ -2,6 +2,7 @@
 """Measure NFR-6 and NFR-7 on the signed SyntheticQA app with 1M indexed events."""
 
 import argparse
+from collections import Counter
 from contextlib import contextmanager
 import ctypes
 import os
@@ -18,6 +19,9 @@ from synthgen import resource_session_messages
 
 
 PREFIX = b"synthetic-resources: "
+USAGE_READS = (b"usage-report-read", b"usage-chart-read", b"usage-limits-read")
+VISUAL_TICK = b"usage-visual-tick"
+RESOURCE_LIMITS = {"dashboard": 400_000_000, "menu-only": 150_000_000, "usage": 400_000_000}
 
 
 class ProcessUsage(ctypes.Structure):
@@ -57,28 +61,43 @@ def process_usage_reader():
     return read, timebase.numerator / timebase.denominator
 
 
-def expect(child, expected, timeout):
-    pending = b""
-    marker = PREFIX + expected.encode()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and child.poll() is None:
-        left = min(1, max(0, deadline - time.monotonic()))
-        ready, _, _ = select.select([child.stdout], [], [], left)
+class ResourceMarkers:
+    def __init__(self, child, expected):
+        self.child = child
+        self.expected = expected.encode()
+        self.pending = b""
+        self.counts = Counter()
+
+    def read(self, timeout):
+        ready, _, _ = select.select([self.child.stdout], [], [], timeout)
         if not ready:
-            continue
-        block = os.read(child.stdout.fileno(), 4096)
+            return False
+        block = os.read(self.child.stdout.fileno(), 4096)
         if not block:
-            break
-        pending += block
-        while b"\n" in pending:
-            line, pending = pending.split(b"\n", 1)
-            if line == marker:
-                return
+            return False
+        self.pending += block
+        while b"\n" in self.pending:
+            line, self.pending = self.pending.split(b"\n", 1)
             if line.startswith(PREFIX):
-                raise RuntimeError(f"Unexpected QA result: {line.decode()}")
-        if len(pending) > 16_384:
+                marker = line[len(PREFIX):]
+                if marker not in (self.expected, VISUAL_TICK, *USAGE_READS):
+                    raise RuntimeError(f"Unexpected QA result: {line.decode()}")
+                self.counts[marker] += 1
+        if len(self.pending) > 16_384:
             raise RuntimeError("Unexpected output from the synthetic app")
-    raise RuntimeError(f"Missing QA readiness marker: {expected}")
+        return True
+
+    def drain(self):
+        while self.read(0):
+            pass
+
+    def expect(self, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and self.child.poll() is None:
+            self.read(min(1, max(0, deadline - time.monotonic())))
+            if self.counts[self.expected]:
+                return
+        raise RuntimeError(f"Missing QA readiness marker: {self.expected.decode()}")
 
 
 def fixture_env(identity, mode):
@@ -105,8 +124,12 @@ def launch(executable, identity, mode, stdin=subprocess.DEVNULL):
                 child.wait()
 
 
-def sample(child, duration, read_usage, nanoseconds_per_tick):
+def sample(child, duration, read_usage, nanoseconds_per_tick, markers, mode):
     time.sleep(4)  # Leave render/close and startup work outside the measured interval.
+    markers.drain()
+    baseline = markers.counts.copy()
+    if mode == "usage" and not (baseline[b"usage-report-read"] and baseline[b"usage-limits-read"]):
+        raise RuntimeError("Usage chart did not make the expected initial report and headroom reads")
     first = read_usage(child.pid)
     start = time.monotonic_ns()
     deadline = start + duration * 1_000_000_000
@@ -119,6 +142,7 @@ def sample(child, duration, read_usage, nanoseconds_per_tick):
             time.sleep(min(remaining / 1e9, 0.5))
         if child.poll() is not None:
             raise RuntimeError("QA app exited during sampling")
+        markers.drain()
         last = read_usage(child.pid)
         end = time.monotonic_ns()
         if last.start_time != first.start_time or last.footprint_bytes == 0:
@@ -139,13 +163,23 @@ def sample(child, duration, read_usage, nanoseconds_per_tick):
         f"{last.written_bytes - first.written_bytes} write bytes",
         flush=True,
     )
-    return peak_footprint, cpu
+    visible_usage_passed = True
+    if mode == "usage":
+        delta = markers.counts - baseline
+        reads = [delta[name] for name in USAGE_READS]
+        ticks = delta[VISUAL_TICK]
+        print(f"  {ticks} NOW visual ticks; index reads for report/chart/headroom: {reads[0]}/{reads[1]}/{reads[2]}",
+              flush=True)
+        visible_usage_passed = not any(reads) and ticks >= duration // 5 - 1
+    return peak_footprint, cpu, visible_usage_passed
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path, help="path to the signed, optimized SyntheticQA bundle")
     parser.add_argument("--seconds", type=int, choices=range(15, 41), default=20, metavar="15–40")
+    parser.add_argument("--mode", choices=RESOURCE_LIMITS, action="append",
+                        help="repeat to choose lanes; default: dashboard and menu-only")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("this resource budget uses macOS process accounting")
@@ -167,15 +201,16 @@ def main():
                 corpus.write(resource_session_messages(session))
             corpus.seek(0)
             with launch(executable, identity, "prepare", stdin=corpus) as child:
-                expect(child, "prepared 1000000 events", timeout=180)
+                ResourceMarkers(child, "prepared 1000000 events").expect(timeout=180)
                 prepared = True
-        print("Verified 1,000,000 stored events. Reopening the same fixture for both readings.", flush=True)
-        for mode, maximum in (("dashboard", 400_000_000), ("menu-only", 150_000_000)):
+        print("Verified 1,000,000 stored events. Reopening the same fixture for the requested readings.", flush=True)
+        for mode in args.mode or ("dashboard", "menu-only"):
             with launch(executable, identity, mode) as child:
-                expect(child, f"{mode} ready", timeout=15)
+                markers = ResourceMarkers(child, f"{mode} ready")
+                markers.expect(timeout=15)
                 print(f"{mode}:", end=" ", flush=True)
-                footprint, cpu = sample(child, args.seconds, read_usage, nanoseconds_per_tick)
-                passed = (footprint < maximum and cpu < 1) and passed
+                footprint, cpu, usage_passed = sample(child, args.seconds, read_usage, nanoseconds_per_tick, markers, mode)
+                passed = (footprint < RESOURCE_LIMITS[mode] and cpu < 1 and usage_passed) and passed
     finally:
         if prepared:
             subprocess.run(

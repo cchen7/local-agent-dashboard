@@ -115,6 +115,11 @@ struct UsageView: View {
                     firstTimestamp: data.window.range.lowerBound, timeZone: .current)
                 UsageChart(data: data, plot: plot, request: snapshot.request, currency: model.usageCurrency,
                            redlines: model.usageRedlines, displayRange: visibleWindow?.range)
+                    #if AGENTDASH_SYNTHETIC_ONLY
+                    .onChange(of: visibleWindow?.range.upperBound, initial: true) { _, _ in
+                        SyntheticResourceFixture.reportVisibleUsage("usage-visual-tick")
+                    }
+                    #endif
             }
         } else {
             UsageChart(data: data, plot: plot, request: snapshot.request,
@@ -556,6 +561,13 @@ struct UsageChart: View {
             chart.frame(minHeight: DashboardLayoutRules.minimumPlotHeight, idealHeight: DashboardLayoutRules.minimumPlotHeight,
                         maxHeight: .infinity)
                 .layoutPriority(1)
+                #if AGENTDASH_SYNTHETIC_ONLY
+                .background {
+                    if SyntheticResourceFixture.current?.mode == .usage {
+                        SyntheticRowDrawMarker(event: "synthetic-resources: usage ready")
+                    }
+                }
+                #endif
             let overflow = peaks.filter { peakOverflow.contains($0.id) }
             if !overflow.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {

@@ -16,7 +16,7 @@ struct SyntheticResourceFixture: Sendable {
     private static let first = SessionKey(agent: .codex, nativeID: "resource-preview-0")
     private static let firstTitle = "Synthetic resource baseline"
 
-    enum Mode: String, Sendable { case prepare, dashboard, menuOnly = "menu-only", cleanup }
+    enum Mode: String, Sendable { case prepare, dashboard, menuOnly = "menu-only", usage, cleanup }
     let mode: Mode
     let root: URL
     private var receipt: URL { root.appendingPathComponent("verified-event-count") }
@@ -38,7 +38,7 @@ struct SyntheticResourceFixture: Sendable {
         case .prepare:
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
                                                     attributes: [.posixPermissions: 0o700])
-        case .dashboard, .menuOnly:
+        case .dashboard, .menuOnly, .usage:
             try verifyPrepared()
         case .cleanup:
             throw StoreError.invalidLocation
@@ -63,8 +63,11 @@ struct SyntheticResourceFixture: Sendable {
     func seed(_ store: AgentStore) async throws {
         var complete = false
         defer { if !complete { try? FileManager.default.removeItem(at: root) } }
-        let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic resources",
-            rootURL: root.appendingPathComponent("unused-source"), environment: "Synthetic"))
+        let sources = try [AgentKind.codex, .claudeCode, .copilot].map { agent in
+            let source = try store.upsertSource(.init(agent: agent, label: "Synthetic resources",
+                rootURL: root.appendingPathComponent("unused-source-\(agent.rawValue)"), environment: "Synthetic"))
+            return (agent, source)
+        }
         let dayOld = Int64(Date().timeIntervalSince1970 * 1_000) - 86_400_000
         let decoder = JSONDecoder()
         for row in 0..<Self.sessions {
@@ -72,7 +75,8 @@ struct SyntheticResourceFixture: Sendable {
             let messages = try decoder.decode([String].self, from: Data(line.utf8))
             guard messages.count == Self.eventsPerSession,
                   messages.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 512 }) else { throw StoreError.invalidStoredValue }
-            let key = row == 0 ? Self.first : SessionKey(agent: .codex, nativeID: "resource-preview-\(row)")
+            let (agent, source) = sources[row % sources.count]
+            let key = row == 0 ? Self.first : SessionKey(agent: agent, nativeID: "resource-preview-\(row)")
             let time = dayOld - Int64(row) * 3_600_000
             var records: [NormalizedRecord] = [
                 .session(.init(key: key, sourceID: source, environment: "Synthetic",
@@ -84,7 +88,10 @@ struct SyntheticResourceFixture: Sendable {
                 records.append(.event(.init(session: key, sequence: Int64(i), timestamp: time - 60_000 + Int64(i) * 60,
                     kind: i.isMultiple(of: 2) ? .user : .assistant, text: message, dedupeKey: "resource:\(row):\(i)")))
             }
-            records.append(.tokens(.init(session: key, timestamp: time, model: "gpt-6.2-sol",
+            // Cover most of the 24H chart with real buckets. These tokens are
+            // outside the last minute but will not age out during a sample.
+            let usageAt = dayOld + 1_800_000 + Int64(row) * 79_000
+            records.append(.tokens(.init(session: key, timestamp: usageAt, model: "gpt-6.2-sol",
                                 counts: .init(inputFresh: 73, cacheRead: 21, output: 31), dedupeKey: "resource:\(row):usage")))
             try store.write(records)
             guard try store.events(in: key).count == Self.eventsPerSession else { throw StoreError.invalidStoredValue }
@@ -117,7 +124,7 @@ struct SyntheticResourceFixture: Sendable {
                 }
                 Self.report(window.isVisible || contentVisible ? "close failed" : "menu-only ready")
             }
-        case .cleanup: break
+        case .usage, .cleanup: break
         }
     }
 
@@ -135,6 +142,10 @@ struct SyntheticResourceFixture: Sendable {
 
     static func report(_ marker: String) {
         FileHandle.standardOutput.write(Data("synthetic-resources: \(marker)\n".utf8))
+    }
+
+    static func reportVisibleUsage(_ marker: String) {
+        if current?.mode == .usage { report(marker) }
     }
 }
 #endif

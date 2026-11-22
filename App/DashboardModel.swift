@@ -265,6 +265,9 @@ final class DashboardModel {
                query.utf8.count <= 512 {
                 replaceSearchQuery(query)
             }
+            #if AGENTDASH_SYNTHETIC_ONLY
+            if SyntheticResourceFixture.current?.mode == .usage { page = .tokens }
+            #endif
             store = result.0
             restartMenuBarThroughput()
             sources = result.1

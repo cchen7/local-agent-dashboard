@@ -718,6 +718,12 @@ keyboard input is used. This tests a stable library with the menu panel
 closed; rendering the panel and workloads that change the library are
 separate cases.
 
+Pass `--mode usage` to sample the visible 24H chart on the same fixture.
+Its three series contain older in-period usage, with no expiry during the
+sample. QA-only markers verify initial report and headroom reads, a
+drawn chart, continuing NOW ticks and zero additional usage reads after
+settling. Process I/O alone cannot establish that a cached index was not read.
+
 ## DEV-088 — Schedule usage reads at changes and real deadlines
 
 Menu usage, the optional throughput label and limit cards observe owned
