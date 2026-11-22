@@ -717,3 +717,17 @@ cumulative user and system time. No accessibility access, screen capture or
 keyboard input is used. This tests a stable library with the menu panel
 closed; rendering the panel and workloads that change the library are
 separate cases.
+
+## DEV-088 — Schedule usage reads at changes and real deadlines
+
+Menu usage, the optional throughput label and limit cards observe owned
+index changes. Readings include the next change caused by the clock;
+one-shot wakeups handle trailing-window entry and expiry, quota reset or
+freshness, displayed session minutes and local midnight. Empty readings
+without a known change have no timer. Nearby expiries can share a read.
+
+The Usage page refreshes its report when period or comparison membership
+changes, and refreshes only the chart when its trailing minute changes.
+Its five-second NOW animation moves the range used for drawing, without
+querying usage or rebuilding the plot. Clock or time-zone changes resample
+the visible consumers; custom reports do not acquire a rolling deadline.

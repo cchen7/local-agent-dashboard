@@ -55,11 +55,12 @@ func millionUsagePeriodQueries() throws {
                 """, arguments: [window.range.lowerBound, window.range.upperBound])
             return (row?["cost"] ?? 0, row?["savings"] ?? 0, row?["measured"] ?? 0)
         }
-        _ = try store.usage(window: window, metric: metric)
+        let liveAt = period == .custom ? nil : now
+        _ = try store.usage(window: window, metric: metric, liveAt: liveAt)
         var samples: [Double] = []
         for _ in 0..<10 {
             let start = clock.now
-            let report = try store.usage(window: window, metric: metric)
+            let report = try store.usage(window: window, metric: metric, liveAt: liveAt)
             let duration = start.duration(to: clock.now).components
             samples.append(Double(duration.seconds) * 1000 + Double(duration.attoseconds) / 1e15)
             #expect(report.totals.records == count && report.totals.counts.total == Int64(count) * 15)

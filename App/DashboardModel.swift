@@ -368,44 +368,18 @@ final class DashboardModel {
         menuBarTokensPerMinute = nil
         guard showsMenuBarThroughput, let store else { return }
         menuBarThroughputTask = Task(priority: .utility) { [weak self] in
-            let (signals, send) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    defer { send.finish() }
-                    do {
-                        for try await _ in store.menuBarThroughputChanges() { send.yield(()) }
-                    } catch { /* The consumer drops the numeric label. */ }
+            var lastRead: ContinuousClock.Instant?
+            await UsageRefresh.follow(store.menuBarThroughputChanges(), refresh: {
+                if let lastRead, lastRead.duration(to: .now) < .seconds(1) {
+                    try? await Task.sleep(until: lastRead.advanced(by: .seconds(1)), clock: .continuous)
                 }
-                var expiry: Task<Void, Never>?
-                defer {
-                    expiry?.cancel()
-                    send.finish()
-                    group.cancelAll()
-                }
-                var lastRead: ContinuousClock.Instant?
-                for await _ in signals {
-                    if let lastRead, lastRead.duration(to: .now) < .seconds(1) {
-                        try? await Task.sleep(until: lastRead.advanced(by: .seconds(1)), clock: .continuous)
-                    }
-                    guard !Task.isCancelled, self != nil else { return }
-                    expiry?.cancel()
-                    lastRead = .now
-                    let now = Int64(Date().timeIntervalSince1970 * 1000)
-                    let tokens = try? await store.menuBarThroughput(now: now)
-                    guard !Task.isCancelled else { return }
-                    self?.menuBarTokensPerMinute = tokens
-                    if let tokens, tokens > 0 {
-                        // Age out a nonzero reading. Zero waits only for new usage.
-                        expiry = Task {
-                            do {
-                                try await Task.sleep(for: .seconds(5))
-                                send.yield(())
-                            } catch { /* A newer snapshot superseded this expiry. */ }
-                        }
-                    }
-                }
-                if !Task.isCancelled { self?.menuBarTokensPerMinute = nil }
-            }
+                guard !Task.isCancelled, self != nil else { return nil }
+                lastRead = .now
+                let reading = try? await store.menuBarThroughputReading(now: UsageRefresh.now)
+                guard !Task.isCancelled else { return nil }
+                self?.menuBarTokensPerMinute = reading?.tokens
+                return reading?.nextChangeAt
+            }, unavailable: { self?.menuBarTokensPerMinute = nil })
         }
     }
 
@@ -872,9 +846,15 @@ final class DashboardModel {
                     dedupeKey: "preview-usage:\(index):\(sample)")))
             }
         }
+        #if AGENTDASH_SYNTHETIC_ONLY
+        let resetAfter: Int64 = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_LIMIT_EXPIRY"] == "1"
+            ? 16_000 : 3_600_000
+        #else
+        let resetAfter: Int64 = 3_600_000
+        #endif
         records.append(.rateLimit(.init(agent: .codex, limitID: "synthetic-preview", window: .primary,
                                         timestamp: now - 60_000, windowMinutes: 300, usedPercent: 42,
-                                        resetsAt: now + 3_600_000, planType: "Synthetic")))
+                                        resetsAt: now + resetAfter, planType: "Synthetic")))
         try store.write(records)
     }
 

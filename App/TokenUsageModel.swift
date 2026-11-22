@@ -15,6 +15,7 @@ struct UsageNavigationRequest: Equatable, Sendable {
     let customStart: Date
     let customEnd: Date
     let revision: Int64
+    var clockVersion: UInt64 = 0
 
     func sameDisplayScope(as other: Self) -> Bool {
         period == other.period && metric == other.metric && grouping == other.grouping &&
@@ -59,6 +60,7 @@ final class TokenUsageModel {
     private(set) var usageRedlines: [AgentKind: Int64] = [:]
     private(set) var projects: [UsageProjectOption] = []
     private(set) var usageVersion: Int64 = 0
+    private var clockVersion: UInt64 = 0
 
     let pricing: PricingModel
 
@@ -72,8 +74,10 @@ final class TokenUsageModel {
     var usageRequest: UsageNavigationRequest {
         .init(period: usagePeriod, metric: usageMetric, grouping: usageGrouping,
               filter: .init(agent: usageAgent, projectID: usageProjectID), customStart: usageCustomStart,
-              customEnd: usageCustomEnd, revision: usageVersion)
+              customEnd: usageCustomEnd, revision: usageVersion, clockVersion: clockVersion)
     }
+
+    func clockChanged() { clockVersion &+= 1 }
 
     func observeUsage() async {
         let store = self.store
@@ -103,7 +107,24 @@ final class TokenUsageModel {
         }
     }
 
-    func loadUsage(_ request: UsageNavigationRequest) async {
+    func followUsage(_ request: UsageNavigationRequest) async {
+        await loadUsage(request)
+        while !Task.isCancelled, usageRequest == request, let chart = liveUsageChart?.chart {
+            let reportChange = usagePage?.report.chart.nextRangeChangeAt ?? chart.nextRangeChangeAt
+            guard let deadline = [reportChange, chart.nextRecentChangeAt].compactMap({ $0 }).min() else { return }
+            guard await UsageRefresh.wait(until: deadline) else { return }
+            guard usageRequest == request else { return }
+            if let reportChange, reportChange <= UsageRefresh.now {
+                await loadUsage(request)
+            } else {
+                await refreshUsageChart(request)
+            }
+            guard liveUsageChart?.chart.id != chart.id else { return }
+        }
+    }
+
+    private func loadUsage(_ request: UsageNavigationRequest) async {
+        guard !Task.isCancelled, usageRequest == request else { return }
         usageLoading = true
         usageError = nil
         defer { if usageRequest == request { usageLoading = false } }
@@ -131,7 +152,7 @@ final class TokenUsageModel {
         }
     }
 
-    func refreshUsageChart(_ request: UsageNavigationRequest) async {
+    private func refreshUsageChart(_ request: UsageNavigationRequest) async {
         guard !usageLoading, request.period != .custom, usageRequest == request,
               let base = liveUsageChart, base.request == request else { return }
         let store = self.store
@@ -148,7 +169,16 @@ final class TokenUsageModel {
         liveUsageChart = latest
     }
 
-    func loadUsageLimits(agent: AgentKind?, includeThroughput: Bool) async -> UsageLimitReadings? {
+    func observeUsageLimits(agent: AgentKind?, includeThroughput: Bool, show: @escaping (UsageLimitReadings?) -> Void) async {
+        await UsageRefresh.follow(store.usageLimitChanges(includeThroughput: includeThroughput), refresh: {
+            let reading = await self.loadUsageLimits(agent: agent, includeThroughput: includeThroughput)
+            guard !Task.isCancelled else { return nil }
+            show(reading)
+            return reading?.nextChangeAt
+        }, unavailable: { show(nil) })
+    }
+
+    private func loadUsageLimits(agent: AgentKind?, includeThroughput: Bool) async -> UsageLimitReadings? {
         let store = self.store
         let now = Int64(Date().timeIntervalSince1970 * 1_000)
         return try? await Self.background {
@@ -182,7 +212,66 @@ struct TokenUsageEntry: View {
         UsageView(model: model, editRedlines: editRedlines, openPricing: openPricing)
             .task { await model.observeUsage() }
             .task { await model.observeRedlines() }
-            .task(id: request) { await model.loadUsage(request) }
+            .task(id: request) { await model.followUsage(request) }
+            .onReceive(NotificationCenter.default.publisher(for: .NSSystemClockDidChange)) { _ in
+                Task { @MainActor in model.clockChanged() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+                Task { @MainActor in model.clockChanged() }
+            }
+    }
+}
+
+/// Each consumer has one read at a time and at most one timer. Changes during
+/// a read coalesce into one follow-up read; the last change is never dropped.
+enum UsageRefresh {
+    static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
+
+    static func wait(until deadline: Int64) async -> Bool {
+        let delay = deadline.subtractingReportingOverflow(now)
+        guard !delay.overflow else { return false }
+        do {
+            // Nearby expiries can share a read; a burst must not schedule one
+            // database transaction for every distinct millisecond timestamp.
+            try await Task.sleep(for: .milliseconds(max(250, delay.partialValue)), clock: .continuous)
+            return !Task.isCancelled
+        } catch { return false }
+    }
+
+    @MainActor static func follow<S: AsyncSequence & Sendable>(
+        _ changes: S, refresh: @escaping @MainActor () async -> Int64?,
+        unavailable: @escaping @MainActor () -> Void
+    ) async where S.Element == Void {
+        let (signals, send) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let center = NotificationCenter.default
+        let observers = [Notification.Name.NSSystemClockDidChange, .NSSystemTimeZoneDidChange].map { name in
+            center.addObserver(forName: name, object: nil, queue: nil) { _ in send.yield(true) }
+        }
+        defer { for observer in observers { center.removeObserver(observer) } }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do { for try await _ in changes { send.yield(true) } }
+                catch { send.yield(false) }
+                send.finish()
+            }
+            var timer: Task<Void, Never>?
+            defer {
+                timer?.cancel()
+                send.finish()
+                group.cancelAll()
+            }
+            for await wake in signals {
+                guard !Task.isCancelled else { return }
+                timer?.cancel()
+                guard wake else { unavailable(); return }
+                if let deadline = await refresh(), !Task.isCancelled {
+                    timer = Task {
+                        if await wait(until: deadline) { send.yield(true) }
+                    }
+                }
+            }
+        }
     }
 }
 

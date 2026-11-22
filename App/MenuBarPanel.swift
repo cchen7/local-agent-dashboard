@@ -17,7 +17,6 @@ struct MenuBarPanel: View {
     @State private var plot: UsagePlot?
     @State private var unavailable = false
     @State private var visible = false
-    @State private var refreshing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -58,21 +57,8 @@ struct MenuBarPanel: View {
         }
         .task(id: visible && model.store != nil) {
             guard visible, let store = model.store else { return }
-            let handle = Task { @MainActor in
-                while !Task.isCancelled {
-                    do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                    await refresh(store)
-                }
-            }
-            defer { handle.cancel() }
-            do {
-                for try await _ in store.menuUsageChanges() {
-                    try Task.checkCancellation()
-                    await refresh(store)
-                }
-            } catch {
-                if !Task.isCancelled { unavailable = true }
-            }
+            await UsageRefresh.follow(store.menuUsageChanges(), refresh: { await refresh(store) },
+                                      unavailable: { if visible { unavailable = true } })
         }
         .background(WindowConfigurationView(identifier: "menuBarPanel", updateVisibility: {
             if visible != $0 { visible = $0 }
@@ -235,10 +221,8 @@ struct MenuBarPanel: View {
         if tokens > 0 { Text("\(tokens.formatted(.number.notation(.compactName))) tok/min").font(.caption2).monospacedDigit() }
     }
 
-    private func refresh(_ store: AgentStore) async {
-        guard visible, !refreshing else { return }
-        refreshing = true
-        defer { refreshing = false }
+    private func refresh(_ store: AgentStore) async -> Int64? {
+        guard visible, !Task.isCancelled else { return nil }
         let base = reading?.chart
         let priorPlot = plot
         let now = Int64(Date().timeIntervalSince1970 * 1000)
@@ -247,15 +231,17 @@ struct MenuBarPanel: View {
                 let snapshot = try store.menuUsage(now: now, timeZone: .current, reusing: base)
                 return (snapshot, UsagePlot(chart: snapshot.chart, period: .day, metric: .tokens, reusing: priorPlot))
             }.value
-            guard visible, !Task.isCancelled else { return }
+            guard visible, !Task.isCancelled else { return nil }
             reading = snapshot
             plot = rendered
             unavailable = false
+            return snapshot.nextChangeAt
         } catch {
-            guard visible, !Task.isCancelled else { return }
+            guard visible, !Task.isCancelled else { return nil }
             reading = nil
             plot = nil
             unavailable = true
+            return nil
         }
     }
 

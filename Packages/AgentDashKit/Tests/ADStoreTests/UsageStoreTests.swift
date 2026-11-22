@@ -247,6 +247,7 @@ func nativeMenuBarThroughputMatchesThePanelAndExpires() async throws {
     var changes = store.menuBarThroughputChanges().makeAsyncIterator()
     _ = try await changes.next()
     #expect(try await store.menuBarThroughput(now: now) == 0)
+    #expect(try await store.menuBarThroughputReading(now: now).nextChangeAt == nil)
     try store.write([
         .tokens(.init(session: session, timestamp: now - 60_001, counts: .init(output: 91), dedupeKey: "older")),
         .tokens(.init(session: session, timestamp: now - 60_000,
@@ -261,6 +262,128 @@ func nativeMenuBarThroughputMatchesThePanelAndExpires() async throws {
     #expect(try await store.menuBarThroughput(now: now) == 17)
     let panel = try store.menuUsage(now: now, timeZone: .gmt)
     #expect(panel.currentTokens == 17)
+    #expect(panel.nextChangeAt == now + 1)
     #expect(try await store.menuBarThroughput(now: now + 1) == 20)
+    #expect(try await store.menuBarThroughputReading(now: now + 1).nextChangeAt == now + 60_000)
     #expect(try await store.menuBarThroughput(now: now + 60_001) == 0)
+    #expect(try await store.menuBarThroughputReading(now: now + 60_001).nextChangeAt == nil)
+}
+
+@Test("NFR-7: quota resets, fallback winners and freshness publish the next actual limit change")
+func usageLimitDeadlines() throws {
+    try withUsageStore { store, _, _ in
+        let now: Int64 = 200_000_000
+        #expect(try store.usageLimitReadings(now: now, agent: nil, includeThroughput: true).nextChangeAt == nil)
+        try store.write([
+            .rateLimit(.init(agent: .codex, limitID: "slow", window: .primary, timestamp: now - 1_000,
+                             usedPercent: 50)),
+            .rateLimit(.init(agent: .codex, limitID: "tight", window: .primary, timestamp: now,
+                             usedPercent: 90, resetsAt: now + 10_000)),
+            .rateLimit(.init(agent: .codex, limitID: "future", window: .secondary, timestamp: now + 15_000,
+                             usedPercent: 70, resetsAt: now + 20_000)),
+        ])
+        func read(_ at: Int64) throws -> UsageLimitReadings {
+            try store.usageLimitReadings(now: at, agent: .codex, includeThroughput: false)
+        }
+        let before = try read(now)
+        #expect(before.codex.map(\.usedPercent) == [90])
+        #expect(before.nextChangeAt == now + 10_000)
+        let reset = try read(now + 10_000)
+        #expect(reset.codex.map(\.usedPercent) == [50])
+        #expect(reset.nextChangeAt == now + 15_000)
+        let arrived = try read(now + 15_000)
+        #expect(arrived.codex.count == 2 && arrived.nextChangeAt == now + 20_000)
+        let freshness = now - 1_000 + 86_400_000
+        #expect(try read(now + 20_000).nextChangeAt == freshness)
+        let stale = try read(freshness)
+        #expect(stale.codex.isEmpty && stale.nextChangeAt == nil)
+        #expect(try store.usageLimitReadings(now: now, agent: .copilot, includeThroughput: false).nextChangeAt == nil)
+    }
+}
+
+@Test("NFR-7: a limit-only commit wakes headroom without waiting for usage or a clock tick",
+      .timeLimit(.minutes(1)))
+func limitOnlyCommitWakesHeadroom() async throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-limits-wake-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let store = try AgentStore(databaseURL: temp.appendingPathComponent("index.sqlite"))
+    var changes = store.usageLimitChanges(includeThroughput: false).makeAsyncIterator()
+    let initial: Void? = try await changes.next()
+    #expect(initial != nil)
+    try store.write([.rateLimit(.init(agent: .codex, limitID: "synthetic", window: .secondary,
+                                     timestamp: 900, usedPercent: 40))])
+    let wake: Void? = try await changes.next()
+    #expect(wake != nil)
+    #expect(try store.usageLimitReadings(now: 901, agent: .codex, includeThroughput: false).codex.first?.usedPercent == 40)
+}
+
+@Test("NFR-7: menu wakes at midnight for Today's data; an empty day waits for a real change")
+func menuDeadlines() throws {
+    try withUsageStore { store, a, _ in
+        let zone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let formatter = ISO8601DateFormatter()
+        let beforeDate = try #require(formatter.date(from: "2026-03-09T06:59:59Z"))
+        let nextDate = try #require(formatter.date(from: "2026-03-09T07:00:00Z"))
+        let before = Int64(beforeDate.timeIntervalSince1970 * 1_000)
+        let midnight = Int64(nextDate.timeIntervalSince1970 * 1_000)
+        #expect(try store.menuUsage(now: before, timeZone: zone).nextChangeAt == nil)
+        try store.write([.tokens(.init(session: a, timestamp: before - 5_000, counts: .init(output: 31),
+                                       precision: .checkpoint, dedupeKey: "synthetic-day-total"))])
+        let today = try store.menuUsage(now: before, timeZone: zone)
+        #expect(today.today.counts.total == 31 && today.currentTokens == 0)
+        #expect(today.nextChangeAt == midnight)
+        let tomorrow = try store.menuUsage(now: midnight, timeZone: zone)
+        #expect(tomorrow.today.counts.total == 0 && tomorrow.nextChangeAt == nil)
+
+        let sources = try store.sources()
+        let agent = try #require(sources.first { $0.agent == .codex })
+        let began = midnight + 1_000
+        try store.write([.session(.init(key: a, sourceID: try #require(agent.id), environment: "Synthetic",
+                                        startedAt: began, status: .waiting))])
+        let active = try store.menuUsage(now: began + 11_000, timeZone: zone)
+        #expect(active.sessionsToday == 1 && active.sessions.map(\.id) == [a])
+        #expect(active.nextChangeAt == began + 60_000)
+    }
+}
+
+@Test("NFR-7: live chart deadlines distinguish recent expiry from report and comparison boundaries")
+func usageChartDeadlines() throws {
+    try withUsageStore { store, a, b in
+        let now: Int64 = 10_800_000, hour: Int64 = 3_600_000, minute: Int64 = 60_000
+        let filter = UsageFilter(agent: .codex)
+        func report(_ at: Int64) throws -> UsageReport {
+            let window = try UsageWindow.make(.hour, now: at, timeZone: .gmt)
+            return try store.usage(window: window, filter: filter, liveAt: at)
+        }
+        func row(_ session: SessionKey, _ key: String, _ timestamp: Int64, _ tokens: Int64) -> NormalizedRecord {
+            .tokens(.init(session: session, timestamp: timestamp, counts: .init(output: tokens), dedupeKey: key))
+        }
+        try store.write([
+            row(a, "synthetic-recent", now - minute, 11),
+            row(a, "synthetic-current", now - hour + 3_000, 50),
+            row(a, "synthetic-previous", now - 2 * hour + 2_000, 90),
+            row(b, "synthetic-other-agent", now, 120),
+        ])
+        let initial = try report(now)
+        #expect(initial.chart.nextRecentChangeAt == now + 1)
+        #expect(initial.chart.nextRangeChangeAt == now + 2_001)
+        let recentExpired = try report(now + 1)
+        #expect(recentExpired.chart.recent?.counts.total == 0 && recentExpired.chart.nextRecentChangeAt == nil)
+        #expect(recentExpired.totals == initial.totals && recentExpired.previous == initial.previous)
+        let comparisonExpired = try report(now + 2_001)
+        #expect(comparisonExpired.previous?.counts.total == 0)
+        #expect(comparisonExpired.chart.nextRangeChangeAt == now + 3_001)
+        let moved = try report(now + 3_001)
+        #expect(moved.totals.counts.total == 11 && moved.previous?.counts.total == 50)
+        try store.write([row(a, "synthetic-future", now + 4_000, 6)])
+        let pending = try report(now + 4_000)
+        #expect(pending.chart.nextRangeChangeAt == now + 4_001)
+        #expect(try report(now + 4_001).totals.counts.total == 17)
+        let all = try store.usageChart(period: .all, now: now + 4_001, timeZone: .gmt, filter: filter)
+        #expect(all.nextRangeChangeAt == nil)
+        let custom = try UsageRange(lowerBound: 0, upperBound: now + 5_000)
+        let fixed = try store.usageChart(period: .custom, now: now, timeZone: .gmt, filter: filter, custom: custom)
+        #expect(fixed.nextRangeChangeAt == nil && fixed.nextRecentChangeAt == nil)
+    }
 }

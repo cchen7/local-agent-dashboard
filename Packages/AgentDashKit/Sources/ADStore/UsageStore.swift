@@ -49,6 +49,8 @@ public struct UsageChartSnapshot: Equatable, Sendable {
     public let reusedFrom: UUID?
     /// Inclusive call-precision amount in the trailing minute of a live chart.
     public let recent: UsageTotals?
+    public let nextRangeChangeAt: Int64?
+    public let nextRecentChangeAt: Int64?
     fileprivate let filter: UsageFilter
     fileprivate let origin: UUID
     fileprivate let revision: Int64?
@@ -119,6 +121,7 @@ public struct MenuUsageSnapshot: Sendable {
     public let limits: UsageLimitReadings
     public let redlines: [AgentKind: Int64]
     public let sessions: [MenuUsageSession]
+    public let nextChangeAt: Int64?
 }
 
 public extension AgentStore {
@@ -134,16 +137,19 @@ public extension AgentStore {
     /// The opt-in status label observes only columns used by the rolling rate.
     /// Quote, status and configuration changes do not need another sample.
     func menuBarThroughputChanges() -> some AsyncSequence<Void, any Error> & Sendable {
-        let inputs = Table("token_events").select(
-            Column("ts"), Column("precision"), Column("input_fresh"), Column("cache_read"),
-            Column("cache_write"), Column("cache_write_1h"), Column("output"))
-        return ValueObservation.tracking(region: inputs, fetch: { _ in () })
+        ValueObservation.tracking(region: UsageLimitsStore.throughputInputs, fetch: { _ in () })
             .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
     }
 
     func menuBarThroughput(now: Int64) async throws -> Int64 {
+        try await menuBarThroughputReading(now: now).tokens
+    }
+
+    func menuBarThroughputReading(now: Int64) async throws -> (tokens: Int64, nextChangeAt: Int64?) {
         try await databasePool.read { db in
-            try UsageLimitsStore.totalThroughput(UsageLimitsStore.throughput(db, now: now, agent: nil))
+            var deadline = UsageDeadline(now: now)
+            let rates = try UsageLimitsStore.throughput(db, now: now, agent: nil, change: &deadline)
+            return (try UsageLimitsStore.totalThroughput(rates), deadline.next)
         }
     }
 
@@ -152,9 +158,9 @@ public extension AgentStore {
     func menuUsage(now: Int64, timeZone: TimeZone, reusing chart: UsageChartSnapshot? = nil) throws -> MenuUsageSnapshot {
         let window = try UsageWindow.today(now: now, timeZone: timeZone)
         return try databasePool.read { db in
-            let rates = try UsageLimitsStore.throughput(db, now: now, agent: nil)
-            let current = try UsageLimitsStore.totalThroughput(rates)
-            let earliest = now.subtractingReportingOverflow(60_000)
+            let limits = try UsageLimitsStore.snapshot(db, now: now, agent: nil, includeThroughput: true)
+            let current = try UsageLimitsStore.totalThroughput(limits.throughput)
+            let earliest = now.subtractingReportingOverflow(UsageLimitsStore.minute)
             let sessions = try Row.fetchAll(db, sql: """
                 WITH recent AS (
                     SELECT session_id,sum(input_fresh+cache_read+cache_write+cache_write_1h+output) AS tokens
@@ -179,12 +185,31 @@ public extension AgentStore {
                 FROM sessions s LEFT JOIN source_files f ON f.id=s.file_id
                 WHERE f.role IS NOT 'prompt_history'
                 """, arguments: [window.range.lowerBound, now])
-            return .init(today: try UsageCoverage(window.range, filter: .init(), hourly: true).totals(db),
+            let today = try UsageCoverage(window.range, filter: .init(), hourly: true).totals(db)
+            let sessionsToday: Int = counts?["today"] ?? 0
+            var deadline = UsageDeadline(now: now)
+            deadline.include(limits.nextChangeAt)
+            // Local midnight matters if something is currently shown for Today.
+            // Future-dated events can still arrive at a midnight boundary.
+            if today.records > 0 || sessionsToday > 0 {
+                deadline.include(try UsageWindow.nextLocalDayBoundary(after: now, timeZone: timeZone))
+            }
+            deadline.include(try UsageCoverage.firstInTime(db, lower: now, predicate: UsagePredicate(.init())), after: 1)
+            deadline.include(try Int64.fetchOne(db, sql: """
+                SELECT min(s.started_at) FROM sessions s LEFT JOIN source_files f ON f.id=s.file_id
+                WHERE s.started_at>=? AND f.role IS NOT 'prompt_history'
+                """, arguments: [now]), after: 1)
+            for row in sessions {
+                guard let began = row.session.startedAt, began >= 0 else { continue }
+                if began > now { deadline.include(began) }
+                else { deadline.include(now, after: UsageLimitsStore.minute - (now - began) % UsageLimitsStore.minute) }
+            }
+            return .init(today: today,
                          chart: try buildUsageChart(db, window: window, filter: .init(), hourly: false, reusing: chart),
-                         sessionsToday: counts?["today"] ?? 0, running: counts?["running"] ?? 0,
+                         sessionsToday: sessionsToday, running: counts?["running"] ?? 0,
                          waiting: counts?["waiting"] ?? 0, currentTokens: current,
-                         limits: .init(measuredAt: now, codex: try UsageLimitsStore.codexHeadroom(db, now: now), throughput: rates),
-                         redlines: try UsageLimitsStore.readRedlines(db), sessions: sessions)
+                         limits: limits, redlines: try UsageLimitsStore.readRedlines(db), sessions: sessions,
+                         nextChangeAt: deadline.next)
         }
     }
 
@@ -263,20 +288,39 @@ public extension AgentStore {
     private func buildUsageChart(_ db: Database, window: UsageWindow, filter: UsageFilter, hourly: Bool,
                                  reusing base: UsageChartSnapshot?, liveAt: Int64? = nil) throws -> UsageChartSnapshot {
         let revision = try UsageChartChanges.revision(db)
+        var rangeChange: Int64?
+        var recentChange: Int64?
         let recent = try liveAt.flatMap { observed -> UsageTotals? in
-            let earliest = observed.subtractingReportingOverflow(60_000)
+            let predicate = UsagePredicate(filter)
+            var bounds = UsageDeadline(now: observed)
+            bounds.include(try UsageCoverage.firstInTime(db, lower: window.range.upperBound, predicate: predicate), after: 1)
+            if let previous = window.previous {
+                for range in [window.range, previous] {
+                    let first = try UsageCoverage.firstInTime(db, lower: range.lowerBound, upper: range.upperBound,
+                                                               predicate: predicate)
+                    // An inclusive lower bound loses this row one millisecond after it reaches the row.
+                    if let first {
+                        bounds.include(observed, after: first - range.lowerBound + 1)
+                    }
+                }
+            }
+            rangeChange = bounds.next
+            let earliest = observed.subtractingReportingOverflow(UsageLimitsStore.minute)
             let start = max(window.range.lowerBound, earliest.overflow ? Int64.min : earliest.partialValue)
             let end = min(observed, window.range.upperBound)
             guard start < end else { return nil }
-            let predicate = UsagePredicate(filter)
             let row = try Row.fetchOne(db, sql: """
                 WITH recent AS (\(UsageCoverage.rawFacts(predicate, precise: true)))
-                SELECT \(UsageCoverage.sums) FROM recent
+                SELECT min(ts) AS oldest,\(UsageCoverage.sums) FROM recent
                 """, arguments: UsageCoverage.rawArguments(start, end, predicate: predicate))
+            var expiry = UsageDeadline(now: observed)
+            expiry.include(row?["oldest"] as Int64?, after: UsageLimitsStore.minute + 1)
+            recentChange = expiry.next
             return row.map(UsageCoverage.readTotals)
         }
         func snapshot(_ points: [UsagePoint], reused: Set<Int64> = [], from baseID: UUID? = nil) -> UsageChartSnapshot {
             UsageChartSnapshot(id: UUID(), window: window, points: points, reusedBuckets: reused, reusedFrom: baseID, recent: recent,
+                               nextRangeChangeAt: rangeChange, nextRecentChangeAt: recentChange,
                                filter: filter, origin: usageChartIdentity, revision: revision)
         }
         func read(_ range: UsageRange) throws -> [UsagePoint] {
@@ -353,6 +397,20 @@ private struct UsageCoverage {
                 SELECT min(ts) FROM retained_archive_usage WHERE 1=1 \(predicate.sql)
             )
             """, arguments: predicate.arguments + predicate.arguments)
+    }
+
+    /// The exact timestamp index can find a boundary without scanning the
+    /// whole report or treating rollup bucket starts as record timestamps.
+    static func firstInTime(_ db: Database, lower: Int64, upper: Int64 = .max,
+                            predicate: UsagePredicate) throws -> Int64? {
+        let once = StatementArguments([lower, upper]) + predicate.arguments
+        return try Int64.fetchOne(db, sql: """
+            SELECT min(first) FROM (
+                SELECT min(ts) AS first FROM token_events WHERE ts>=? AND ts<? \(predicate.sql)
+                UNION ALL
+                SELECT min(ts) FROM retained_archive_usage WHERE ts>=? AND ts<? \(predicate.sql)
+            )
+            """, arguments: once + once)
     }
 
     static func rawFacts(_ predicate: UsagePredicate, precise: Bool = false) -> String {
@@ -696,6 +754,7 @@ extension UsageChartSnapshot {
     /// Identifiers for workspace charts never match a broad or catalog cache.
     static func project(window: UsageWindow, points: [UsagePoint]) -> Self {
         .init(id: UUID(), window: window, points: points, reusedBuckets: [], reusedFrom: nil,
-              recent: nil, filter: .init(), origin: UUID(), revision: nil)
+              recent: nil, nextRangeChangeAt: nil, nextRecentChangeAt: nil,
+              filter: .init(), origin: UUID(), revision: nil)
     }
 }

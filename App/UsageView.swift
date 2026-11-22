@@ -97,30 +97,28 @@ struct UsageView: View {
             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
     }
 
-    private struct ChartRefreshKey: Equatable {
-        let scope: UsageNavigationRequest
-        let tick: Int64
-    }
-
-    private func liveChart(_ snapshot: UsagePageSnapshot) -> some View {
-        TimelineView(.periodic(from: .now, by: 5)) { tick in
-            let live = model.liveUsageChart.flatMap { $0.request == snapshot.request ? $0 : nil }
-            let data = live?.chart ?? snapshot.report.chart
-            let plot = live?.plot ?? snapshot.plot
-            Group {
-                if snapshot.request.metric == .cost && !data.points.contains(where: { $0.totals.hasPricedUsage }) {
-                    Text("No priced usage in this period.").font(.callout).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, minHeight: DashboardLayoutRules.minimumPlotHeight,
-                               idealHeight: DashboardLayoutRules.minimumPlotHeight, maxHeight: .infinity)
-                        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
-                } else {
-                    UsageChart(data: data, plot: plot, request: snapshot.request,
-                               currency: model.usageCurrency, redlines: model.usageRedlines)
-                }
+    @ViewBuilder private func liveChart(_ snapshot: UsagePageSnapshot) -> some View {
+        let live = model.liveUsageChart.flatMap { $0.request == snapshot.request ? $0 : nil }
+        let data = live?.chart ?? snapshot.report.chart
+        let plot = live?.plot ?? snapshot.plot
+        if snapshot.request.metric == .cost && !data.points.contains(where: { $0.totals.hasPricedUsage }) {
+            Text("No priced usage in this period.").font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: DashboardLayoutRules.minimumPlotHeight,
+                       idealHeight: DashboardLayoutRules.minimumPlotHeight, maxHeight: .infinity)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+        } else if data.recent != nil {
+            // The moving NOW axis is presentation only. No index read or plot
+            // rebuild is scheduled by the clock tick.
+            TimelineView(.periodic(from: .now, by: 5)) { tick in
+                let now = max(data.window.range.upperBound, Int64(tick.date.timeIntervalSince1970 * 1000))
+                let visibleWindow = try? UsageWindow.make(snapshot.request.period, now: now,
+                    firstTimestamp: data.window.range.lowerBound, timeZone: .current)
+                UsageChart(data: data, plot: plot, request: snapshot.request, currency: model.usageCurrency,
+                           redlines: model.usageRedlines, displayRange: visibleWindow?.range)
             }
-            .task(id: ChartRefreshKey(scope: snapshot.request, tick: Int64(tick.date.timeIntervalSince1970 / 5))) {
-                await model.refreshUsageChart(snapshot.request)
-            }
+        } else {
+            UsageChart(data: data, plot: plot, request: snapshot.request,
+                       currency: model.usageCurrency, redlines: model.usageRedlines)
         }
     }
 
@@ -419,24 +417,17 @@ struct UsageHeadroomReadout: View {
     }
 
     private struct RefreshKey: Equatable {
-        let slot: Int64
-        let version: Int64
         let agent: AgentKind?
         let includeThroughput: Bool
     }
 
     var body: some View {
-        // Refresh this short snapshot only while the card is on screen.
-        // It never asks for the historical chart or overview again.
-        TimelineView(.periodic(from: .now, by: 5)) { tick in
-            let key = RefreshKey(slot: Int64(tick.date.timeIntervalSince1970 / 5),
-                                 version: model.usageVersion, agent: agent,
-                                 includeThroughput: model.usageRedlines.keys.contains { agent == nil || agent == $0 })
-            contents
-                .task(id: key) {
-                    let readings = await model.loadUsageLimits(agent: key.agent, includeThroughput: key.includeThroughput)
-                    if !Task.isCancelled { response = Response(agent: key.agent, readings: readings) }
-                }
+        let key = RefreshKey(agent: agent,
+                             includeThroughput: model.usageRedlines.keys.contains { agent == nil || agent == $0 })
+        contents.task(id: key) {
+            await model.observeUsageLimits(agent: key.agent, includeThroughput: key.includeThroughput) {
+                response = Response(agent: key.agent, readings: $0)
+            }
         }
     }
 
@@ -517,6 +508,7 @@ struct UsageChart: View {
     let request: UsageNavigationRequest
     let currency: PriceDisplayCurrency
     let redlines: [AgentKind: Int64]
+    var displayRange: UsageRange? = nil
     @State private var hovered: Int64?
     @State private var peakOverflow: [String] = []
 
@@ -528,6 +520,7 @@ struct UsageChart: View {
     }
 
     private var longPeriod: Bool { request.period == .month || request.period == .quarter }
+    private var visibleRange: UsageRange { displayRange ?? data.window.range }
     private var combined: [UsageDisplaySample] { plot.samples.filter { $0.agent == nil } }
     private var guides: [UsageRedlineGuide] {
         guard request.metric == .tokens else { return [] }
@@ -623,16 +616,16 @@ struct UsageChart: View {
                 }
             }
             if let hovered {
-                let position = max(hovered, data.window.range.lowerBound)
+                let position = max(hovered, visibleRange.lowerBound)
                 RuleMark(x: .value("Selected time", usageDate(position))).foregroundStyle(.secondary)
             }
             if data.recent != nil {
-                RuleMark(x: .value("Now", usageDate(data.window.range.upperBound)))
+                RuleMark(x: .value("Now", usageDate(visibleRange.upperBound)))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .foregroundStyle(Color.secondary)
             }
         }
-        .chartXScale(domain: usageDate(data.window.range.lowerBound)...usageDate(data.window.range.upperBound))
+        .chartXScale(domain: usageDate(visibleRange.lowerBound)...usageDate(visibleRange.upperBound))
         .chartYScale(domain: 0...ceiling * 1.08)
         .chartYAxis {
             if request.metric == .cost {
@@ -686,7 +679,7 @@ struct UsageChart: View {
                             guard let anchor = proxy.plotFrame, geometry[anchor].contains(location),
                                   let date = proxy.value(atX: location.x - geometry[anchor].minX, as: Date.self) else { hovered = nil; return }
                             let time = Int64((date.timeIntervalSince1970 * 1000).rounded(.down))
-                            let range = data.window.range
+                            let range = visibleRange
                             guard time >= range.lowerBound, time < range.upperBound else { hovered = nil; return }
                             hovered = try? data.window.bucketRange(containing: time).lowerBound
                         case .ended: hovered = nil
@@ -708,12 +701,12 @@ struct UsageChart: View {
     }
 
     private func plottedDate(_ timestamp: Int64) -> Date {
-        usageDate(max(timestamp, data.window.range.lowerBound))
+        usageDate(max(timestamp, visibleRange.lowerBound))
     }
 
     private func barCenter(_ sample: UsageDisplaySample) -> Date {
         let lower = plottedDate(sample.timestamp)
-        let upper = usageDate(min(sample.endTimestamp, data.window.range.upperBound))
+        let upper = usageDate(min(sample.endTimestamp, visibleRange.upperBound))
         return lower.addingTimeInterval(upper.timeIntervalSince(lower) / 2)
     }
 
@@ -758,7 +751,7 @@ struct UsageChart: View {
             // conservatively wider than the drawn bar.
             for sample in combined where sample.throughput > 0 {
                 guard let first = position(proxy, date: plottedDate(sample.timestamp), height: sample.throughput),
-                      let last = proxy.position(forX: usageDate(min(sample.endTimestamp, data.window.range.upperBound)))
+                      let last = proxy.position(forX: usageDate(min(sample.endTimestamp, visibleRange.upperBound)))
                 else { continue }
                 result.append(CGRect(x: first.x, y: first.y, width: max(0, last - first.x),
                                      height: max(0, baseline - first.y)).insetBy(dx: -clearance, dy: -clearance))
@@ -785,7 +778,7 @@ struct UsageChart: View {
                 result.append(contentsOf: PeakChipLayout.curveObstacles([start, end], clearance: clearance))
             }
         }
-        if data.recent != nil, let now = proxy.position(forX: usageDate(data.window.range.upperBound)) {
+        if data.recent != nil, let now = proxy.position(forX: usageDate(visibleRange.upperBound)) {
             result.append(CGRect(x: now - clearance, y: 0, width: 2 * clearance, height: bounds.height))
         }
         return result
@@ -866,7 +859,7 @@ struct UsageChart: View {
 
     private func nowReadout(_ recent: UsageTotals) -> some View {
         HStack(spacing: 8) {
-            Text("NOW \(usageDate(data.window.range.upperBound).formatted(clock.hour().minute()))")
+            Text("NOW \(usageDate(visibleRange.upperBound).formatted(clock.hour().minute()))")
             if request.metric == .cost {
                 if recent.hasPricedUsage {
                     Text("\(currency.formattedMicroUSD(Decimal(recent.costMicroUSD) * 60)) / h")

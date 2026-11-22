@@ -944,6 +944,18 @@ final class SmokeTests: XCTestCase {
         XCTAssertFalse(tokenAxis.exists)
     }
 
+    func testUsageHeadroomExpiresWithoutNewRecords() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_LIMIT_EXPIRY"] = "1"
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        openLibrary("tokens")
+        XCTAssertTrue(window.staticTexts["58.0%"].waitForExistence(timeout: 6))
+        XCTAssertFalse(element("usage.editRedlines").exists)
+        XCTAssertTrue(element("usage.editRedlines").waitForExistence(timeout: 20))
+        XCTAssertFalse(window.staticTexts["58.0%"].exists)
+        XCTAssertTrue(element("usage.chart").exists)
+    }
+
     func testUnpricedUsageOpensPricingSettings() throws {
         app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")

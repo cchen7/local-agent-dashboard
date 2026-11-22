@@ -108,6 +108,11 @@ public struct UsageWindow: Equatable, Sendable {
         return try UsageWindow(range: range, previous: previous, bucket: .fixed(milliseconds: 300_000))
     }
 
+    /// Exclusive end of the current Gregorian day in the supplied zone.
+    public static func nextLocalDayBoundary(after now: Int64, timeZone: TimeZone) throws -> Int64 {
+        try localDay(containing: now, timeZone: timeZone).upperBound
+    }
+
     /// Full chart bucket containing the timestamp. Intersect this with the exact
     /// report range before aggregation so partial first/last bars do not add events.
     public func bucketRange(containing timestamp: Int64) throws -> UsageRange {
