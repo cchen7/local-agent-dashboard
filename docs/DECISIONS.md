@@ -94,6 +94,29 @@ converts the 960×600 outer minimum to content constraints without a fixed toolb
 height. Its state belongs to window content; unchanged native values are not
 reassigned. All six size/appearance combinations were executed and visually checked.
 
+## DEV-047 — Register a custom source without replacing an existing one
+
+Sources → Add Source records the agent, label, environment and read-only
+permission after an explicit local folder choice. Read directory metadata
+under that authorization. The store atomically checks agent, persistent
+volume UUID, inode and directory creation time. An older row without stored
+identity can match by its existing authorized directory. If the selected
+folder occupies a registered pathname but does not match that source's
+identity, report a path conflict. Check the current occupant separately from
+the saved bookmark so aliases of the replacement also report a conflict.
+Both outcomes leave the existing permission, configuration, checkpoint and
+history intact. Registration does not read session files or start indexing.
+
+Grant access again uses the same directory identity. Update a renamed
+original in place and keep its identity, checkpoints and session history.
+If the saved path still identifies the selected directory, preserve that
+spelling so startup discovery and Projects continue to recognize a default root.
+For a legacy custom source, require the old bookmark to resolve without
+staleness to the same directory; a path match alone does not prove that.
+A default source with no prior bookmark remains defined by its configured
+path. The write checks that the source's saved path and permission still
+match the snapshot used to grant access.
+
 ## DEV-038 — Commit JSONL batches against the expected checkpoint
 
 Read the expected checkpoint before opening the pinned, read-only source

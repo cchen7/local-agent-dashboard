@@ -303,32 +303,97 @@ final class DashboardModel {
         }
     }
 
+    func chooseCustomSource(agent: AgentKind, name: String, environment: String) async -> SourceAdditionResult {
+        let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let environment = environment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty, !environment.isEmpty, store != nil else { return .storageFailed }
+        let panel = Self.sourceFolderPanel()
+        guard await panel.begin() == .OK, let url = panel.url else { return .cancelled }
+        guard Source.isLocalRoot(url) else { return .inaccessible }
+        let identity = await Task.detached { try? SourceFileReader.directoryIdentity(root: url) }.value
+        guard let identity else { return .inaccessible }
+        let bytes: Data
+        do {
+            bytes = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                         includingResourceValuesForKeys: nil, relativeTo: nil)
+        } catch { return .inaccessible }
+        return await registerCustomSource(.init(agent: agent, label: label, rootURL: url, environment: environment,
+                                                 access: .bookmark(bytes)), identity: identity)
+    }
+
+    /// Save metadata to the app's index only. Do not start a scan or verify access here.
+    func registerCustomSource(_ source: Source, identity: SourceRootIdentity) async -> SourceAdditionResult {
+        guard let store else { return .storageFailed }
+        do {
+            let (outcome, snapshot) = try await Task.detached {
+                let registered = try store.sources().filter { $0.agent == source.agent }
+                let existing = registered.first { SourceAccessProbe.directoryIdentity($0) == identity }
+                // Check the saved pathname independently of its bookmark. The
+                // newly selected folder can now occupy that pathname under a
+                // different spelling, while the bookmark follows the old one.
+                let occupiedPath = registered.first {
+                    (try? SourceFileReader.directoryIdentity(root: $0.rootURL)) == identity
+                }
+                let result = try store.registerCustomSource(source, identity: identity,
+                                                            existing: existing, occupiedPath: occupiedPath)
+                return (result, try store.sources())
+            }.value
+            sources = snapshot
+            switch outcome {
+            case .added: return .added
+            case .alreadyRegistered: return .duplicate
+            case .pathConflict: return .pathConflict
+            }
+        } catch { return .storageFailed }
+    }
+
     func grantAccess(to source: Source) async {
-        guard let store else { return }
+        guard store != nil else { return }
+        let panel = Self.sourceFolderPanel()
+        panel.directoryURL = source.rootURL
+        guard await panel.begin() == .OK, let url = panel.url else { return }
+        do {
+            let bookmark = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                                includingResourceValuesForKeys: nil, relativeTo: nil)
+            await applySourceGrant(to: source, selectedRoot: url, bookmark: bookmark)
+        } catch {
+            if let id = source.id { access[id] = .denied }
+        }
+    }
+
+    func applySourceGrant(to source: Source, selectedRoot: URL, bookmark: Data) async {
+        guard let store, let id = source.id else { return }
+        do {
+            let (result, snapshot) = try await Task.detached {
+                let identity = try SourceFileReader.directoryIdentity(root: selectedRoot)
+                let legacyIdentity: SourceRootIdentity?
+                if case .bookmark = source.access { legacyIdentity = SourceAccessProbe.directoryIdentity(source) }
+                else { legacyIdentity = nil }
+                let savedPathIdentity = try? SourceFileReader.directoryIdentity(root: source.rootURL)
+                let result = try store.renewSourceAccess(source, selectedRoot: selectedRoot, identity: identity,
+                                                         bookmark: bookmark, legacyBookmarkIdentity: legacyIdentity,
+                                                         savedPathIdentity: savedPathIdentity)
+                return (result, result == .renewed ? try store.sources() : [])
+            }.value
+            switch result {
+            case .renewed:
+                sources = snapshot
+                await verifyAccess()
+            case .wrongDirectory: access[id] = .wrongDirectory
+            case .pathConflict: access[id] = .pathConflict
+            }
+        } catch { access[id] = .denied }
+    }
+
+    private static func sourceFolderPanel() -> NSOpenPanel {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = true
         panel.resolvesAliases = false
-        panel.directoryURL = source.rootURL
         panel.message = String(localized: "Choose this agent's source directory. Access is read-only.")
-        guard await panel.begin() == .OK, let url = panel.url else { return }
-        guard url.standardizedFileURL == source.rootURL.standardizedFileURL else {
-            if let id = source.id { access[id] = .wrongDirectory }
-            return
-        }
-        do {
-            var updated = source
-            updated.rootURL = url
-            updated.access = .bookmark(try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-                                                           includingResourceValuesForKeys: nil, relativeTo: nil))
-            _ = try await Task.detached { [updated] in try store.upsertSource(updated) }.value
-            sources = try await Task.detached { try store.sources() }.value
-            await verifyAccess()
-        } catch {
-            if let id = source.id { access[id] = .denied }
-        }
+        return panel
     }
 }
 
@@ -337,6 +402,10 @@ struct SessionTranscriptSearch: Equatable, Sendable {
     let scope: IndexedSearchScope
     let firstMatchKey: String
     let count: Int
+}
+
+enum SourceAdditionResult: Equatable {
+    case added, duplicate, pathConflict, cancelled, inaccessible, storageFailed
 }
 
 enum SessionSearchState: Equatable {

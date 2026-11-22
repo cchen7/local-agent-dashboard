@@ -3,7 +3,7 @@ import Foundation
 import ADCore
 
 enum SourceAccessStatus: Equatable, Sendable {
-    case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory
+    case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
 }
 
 /// M0 access verification reads directory entry metadata only, never file contents.
@@ -44,6 +44,22 @@ enum SourceAccessProbe {
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return .missing }
         catch { return .denied }
+    }
+
+    /// Match older rows without an identity, using only their existing
+    /// access. No prompts, volume mounting, or session file reads.
+    static func directoryIdentity(_ source: Source) -> SourceRootIdentity? {
+        switch source.access {
+        case .defaultLocation:
+            return try? SourceFileReader.directoryIdentity(root: source.rootURL)
+        case .bookmark(let data):
+            var stale = false
+            guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+                                     relativeTo: nil, bookmarkDataIsStale: &stale),
+                  !stale, url.startAccessingSecurityScopedResource() else { return nil }
+            defer { url.stopAccessingSecurityScopedResource() }
+            return try? SourceFileReader.directoryIdentity(root: url)
+        }
     }
 
     private static func countEntries(at root: URL) throws -> SourceAccessStatus {

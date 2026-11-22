@@ -41,6 +41,21 @@ public enum AccessKind: Codable, Equatable, Sendable {
     case bookmark(Data)
 }
 
+/// Stable identity supplied after an authorized metadata lookup of a directory.
+public struct SourceRootIdentity: Equatable, Sendable {
+    public let volume: UUID
+    public let inode: Int64
+    public let birthSeconds: Int64
+    public let birthNanoseconds: Int64
+
+    public init(volume: UUID, inode: Int64, birthSeconds: Int64, birthNanoseconds: Int64) {
+        self.volume = volume
+        self.inode = inode
+        self.birthSeconds = birthSeconds
+        self.birthNanoseconds = birthNanoseconds
+    }
+}
+
 /// One agent family, local root, and environment. New sources have no database ID.
 public struct Source: Codable, Equatable, Sendable, Identifiable {
     public var id: Int64?
@@ -52,6 +67,13 @@ public struct Source: Codable, Equatable, Sendable, Identifiable {
     public var environmentRules: [EnvironmentRule]
     public var access: AccessKind
     public var enabled: Bool
+
+    /// Validate URL metadata without resolving or opening a directory.
+    public static func isLocalRoot(_ url: URL) -> Bool {
+        let host = url.host(percentEncoded: false)?.lowercased()
+        return url.isFileURL && (host == nil || host == "" || host == "localhost") &&
+            url.path.hasPrefix("/") && !url.path.utf8.contains(0)
+    }
 
     /// Create a normalized value without performing file access.
     public init(id: Int64? = nil, agent: AgentKind, label: String, rootURL: URL,
