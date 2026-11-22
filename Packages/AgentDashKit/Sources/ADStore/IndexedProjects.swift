@@ -86,7 +86,7 @@ public extension AgentStore {
         }, by: { $0.0 }).compactMapValues { claims in claims.count == 1 ? claims.first?.1 : nil }
 
         let rows = try Row.fetchCursor(db, sql: """
-            SELECT s.id,s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.started_at,
+            SELECT s.id,s.agent,s.native_id,s.title,s.cwd,s.git_branch,s.environment,s.status,s.status_reason,s.started_at,
                    coalesce(s.last_event_at,s.started_at) AS activity,s.source_deleted_at,s.source_id,s.project_id,
                    source.label AS source_label,source.environment AS source_environment,
                    source.agent AS source_agent,source.root_path AS source_root,source.path_mappings_json

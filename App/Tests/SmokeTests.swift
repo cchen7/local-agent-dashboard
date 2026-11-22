@@ -10,6 +10,25 @@ final class SmokeTests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
     override func tearDown() async throws { app.terminate() }
 
+    func testStorageRebuildKeepsSyntheticSearchResult() throws {
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        openSyntheticChineseSearch()
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Storage"].click()
+        let size = element("indexStorageSize")
+        XCTAssertTrue(size.waitForExistence(timeout: 5))
+        let rebuild = settings.buttons["rebuildLocalIndex"]
+        XCTAssertTrue(rebuild.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        rebuild.click()
+        XCTAssertTrue(element("indexRebuildSucceeded").waitForExistence(timeout: 10))
+        settings.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(window.exists)
+        XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("transcript.match.position").wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+    }
+
     func testIndexedProjectsTimelineOpensLatestSession() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
         app.typeKey("2", modifierFlags: .command)
@@ -38,6 +57,33 @@ final class SmokeTests: XCTestCase {
                 app.terminate()
             }
         }
+    }
+
+    func testSourceEditorSavesMetadataAndReopensWithSavedValues() throws {
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Sources"].click()
+        let edit = settings.buttons["source.edit"].firstMatch
+        XCTAssertTrue(edit.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        edit.click()
+        let name = app.textFields["source.edit.name"]
+        let save = app.buttons["source.edit.save"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["source.edit.addRule"].exists)
+        name.click()
+        name.typeKey("a", modifierFlags: .command)
+        name.typeKey(XCUIKeyboardKey.delete, modifierFlags: [])
+        XCTAssertTrue(save.wait(for: \.isEnabled, toEqual: false, timeout: 5))
+        name.typeText("Synthetic edited source")
+        XCTAssertTrue(save.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        save.click()
+        XCTAssertTrue(name.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(settings.staticTexts["Synthetic edited source"].waitForExistence(timeout: 5))
+        edit.click()
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertEqual(name.value as? String, "Synthetic edited source")
     }
 
     func testEmptyNavigationAndSettingsReopening() throws {
@@ -74,6 +120,83 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(toggle.wait(for: \.isEnabled, toEqual: true, timeout: 5))
         toggle.click()
         XCTAssertTrue(pending.waitForNonExistence(timeout: 5))
+    }
+
+    func testRegisteredSyntheticSourceStartsAndStopsOnlyOnRequest() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Sources"].click()
+        let start = settings.buttons["source.startIndexing"]
+        let live = settings.descendants(matching: .any)["source.watching"].firstMatch
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        XCTAssertFalse(live.exists)
+        start.click()
+        XCTAssertTrue(live.waitForExistence(timeout: 5))
+        settings.buttons["source.stopIndexing"].click()
+        XCTAssertTrue(settings.staticTexts["source.stopped"].waitForExistence(timeout: 5))
+        XCTAssertTrue(start.exists)
+        XCTAssertFalse(live.exists)
+    }
+
+    func testOnboardingShowsFileCountAndStartsSelectedSource() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", onboarding: true)
+        let choose = app.buttons["onboarding.chooseSources"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 5))
+        choose.click()
+        XCTAssertTrue(app.staticTexts["Discovered session files: 1"].waitForExistence(timeout: 5))
+        let start = app.buttons["onboarding.startIndexing"]
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        start.click()
+        let open = app.buttons["onboarding.openDashboard"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+        XCTAssertTrue(window.exists)
+        XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
+    }
+
+    func testRescanOfStoppedSourceDoesNotStartWatching() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Sources"].click()
+        let rescan = settings.buttons["source.rescan"]
+        XCTAssertTrue(rescan.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        rescan.click()
+        XCTAssertTrue(settings.staticTexts["source.rescanned"].waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.buttons["source.startIndexing"].isEnabled)
+        XCTAssertFalse(settings.descendants(matching: .any)["source.watching"].firstMatch.exists)
+    }
+
+    func testRegisteredSyntheticCodexSourceCanBeStarted() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_CODEX_SOURCE"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Sources"].click()
+        XCTAssertTrue(settings.staticTexts["Synthetic Codex source"].waitForExistence(timeout: 5))
+        settings.buttons["source.startIndexing"].click()
+        XCTAssertTrue(settings.descendants(matching: .any)["source.watching"].firstMatch.waitForExistence(timeout: 5))
+    }
+
+    func testSyntheticUsageShowsTheChartAndSwitchesToCost() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.typeKey("3", modifierFlags: .command)
+        XCTAssertTrue(element("usage.presented").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("usage.chart.plot").waitForExistence(timeout: 5))
+        let metric = app.popUpButtons["Metric"].firstMatch
+        XCTAssertTrue(metric.waitForExistence(timeout: 3))
+        metric.click()
+        app.menuItems["Cost"].click()
+        XCTAssertTrue(app.staticTexts["Peak spend rate"].waitForExistence(timeout: 5))
+        XCTAssertTrue(element("usage.chart.plot").waitForExistence(timeout: 5))
     }
 
     func testSessionOverviewShowsProgressAndMasksToolOutput() throws {
@@ -270,17 +393,21 @@ final class SmokeTests: XCTestCase {
         }
         XCTAssertTrue(panel.waitForExistence(timeout: 5))
         XCTAssertEqual(panel.frame.width, 360, accuracy: 1)
+        XCTAssertTrue(panel.textFields["menu.search"].exists)
+        XCTAssertTrue(element("menu.usage").waitForExistence(timeout: 5))
+        XCTAssertTrue(panel.staticTexts["No active sessions"].exists)
         app.buttons["openDashboard"].click()
         XCTAssertTrue(window.waitForExistence(timeout: 5))
         XCTAssertTrue(element("empty.sessions").waitForExistence(timeout: 3))
     }
 
     private func launch(size: CGSize, appearance: String, populated: Bool = false,
-                        projects: Bool = false) throws -> XCUIElement {
+                        projects: Bool = false, onboarding: Bool = false) throws -> XCUIElement {
         app.launchArguments = ["--synthetic", "--window-size", "\(Int(size.width))x\(Int(size.height))", "--appearance", appearance,
                                "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         if populated { app.launchArguments.append("--synthetic-sessions") }
         if projects { app.launchArguments.append("--synthetic-projects") }
+        if onboarding { app.launchArguments.append("--synthetic-onboarding") }
         app.launch()
         app.activate()
         let window = app.windows["dashboardWindow"]

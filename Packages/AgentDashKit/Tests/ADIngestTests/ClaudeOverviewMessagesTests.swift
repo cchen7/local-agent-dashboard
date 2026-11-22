@@ -62,7 +62,7 @@ func claudeOverviewPreservesSplitResponseAcrossRecords() async throws {
         #"{"type":"assistant","uuid":"initial-response","timestamp":9,"message":{"id":"separate","content":"Prior response"}}"#,
         #"{"type":"assistant","uuid":"answer-start","timestamp":20,"message":{"id":"split","content":[{"type":"text","text":"First "},{"type":"text","text":"part. "}]}}"#,
         #"{"type":"assistant","uuid":"tool-block","timestamp":18,"message":{"id":"split","content":[{"type":"tool_use","name":"Synthetic","id":"call","input":{}}]}}"#,
-        #"{"type":"assistant","uuid":"answer-end","timestamp":10,"message":{"id":"split","content":"Closing fragment"}}"#,
+        #"{"type":"assistant","uuid":"answer-end","timestamp":10,"message":{"id":"split","model":"synthetic-context","content":"Closing fragment","usage":{"input_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":7,"output_tokens":2}}}"#,
     ]
     let data = Data((input.joined(separator: "\n") + "\n").utf8)
     try data.write(to: fixture)
@@ -99,6 +99,9 @@ func claudeOverviewPreservesSplitResponseAcrossRecords() async throws {
     let after = try #require(try await updates.next() ?? nil)
     #expect(after.lastReply == "First part. Closing fragment")
     #expect(try store.events(in: key).filter { $0.kind == .assistant }.count == 4)
+    var contexts = store.sessionContextUpdates(in: key).makeAsyncIterator()
+    let context = try #require(try await contexts.next() ?? nil)
+    #expect(context.input == 15 && context.capacity == nil && context.model == "synthetic-context")
 
     let more = #"{"type":"assistant","uuid":"newest","timestamp":8,"message":{"id":"distinct","content":"New response"}}"# + "\n"
     let handle = try FileHandle(forWritingTo: fixture)
@@ -111,7 +114,7 @@ func claudeOverviewPreservesSplitResponseAcrossRecords() async throws {
 }
 
 @Test("ADP-CC: replay of only the retained copy restores reply metadata without replacing archived records",
-      .timeLimit(.minutes(1)), arguments: [3, 4])
+      .timeLimit(.minutes(1)), arguments: [3, 4, 6])
 func claudeOverviewBackfillsRetainedCopy(legacyVersion: Int) async throws {
     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("claude-copy-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: tmp) }
@@ -139,19 +142,20 @@ func claudeOverviewBackfillsRetainedCopy(legacyVersion: Int) async throws {
         source.id = sourceID
         old = SourceFile(sourceID: sourceID, relativePath: path, role: .session, parserVersion: legacyVersion)
         var decoder = try adapter.makeDecoder(for: old, in: source)
-        // Reproduce v3's missing metadata (also left behind by the old v4 replay).
+        // Reproduce the missing ID in v3 and earlier replayed copies.
         let previous = try JSONLFileImporter.importFile(old, authorizedRoot: root, store: store) { frame, context in
             let decoded = try decoder.decode(frame, context: context)
             return .init(records: decoded.records.map {
                 if case .event(var event) = $0, event.kind == .assistant {
-                    event.metadataJSON = nil
+                    event.metadataJSON = legacyVersion == 6 ? #"{"signal":"assistant.turn_end"}"# : nil
                     return .event(event)
                 }
                 return $0
             }, timestamp: decoded.timestamp, state: decoded.state, isUnknown: decoded.isUnknown)
         }
         #expect(previous.completeLines == 2 && previous.checkpoint.parserVersion == legacyVersion)
-        #expect(try store.events(in: key).map(\.metadataJSON) == [nil, nil])
+        let previousMetadata: String? = legacyVersion == 6 ? #"{"signal":"assistant.turn_end"}"# : nil
+        #expect(try store.events(in: key).map(\.metadataJSON) == [previousMetadata, previousMetadata])
         if legacyVersion == 4 {
             // The original had different text and positions before it went away.
             try await store.databasePool.write { db in
@@ -165,8 +169,16 @@ func claudeOverviewBackfillsRetainedCopy(legacyVersion: Int) async throws {
     let rerun = try JSONLFileImporter.importFile(old, from: source, authorizedRoot: root, store: store, adapter: adapter)
     #expect(rerun.checkpoint.parserVersion == ClaudeCodeAdapter.parserVersion && rerun.completeLines == 2)
     let updated = try store.events(in: key)
-    #expect(updated.map(\.metadataJSON) == Array(repeating: #"{"claude_message_id":"retained-response"}"#, count: 2))
-    #expect(updated.map { var row = $0; row.metadataJSON = nil; return row } == before)
+    let metadata = try updated.map { row in
+        let json = try #require(row.metadataJSON)
+        return try JSONDecoder().decode([String: String].self, from: Data(json.utf8))
+    }
+    let expectedMetadata = legacyVersion == 6
+        ? ["claude_message_id": "retained-response", "signal": "assistant.turn_end"]
+        : ["claude_message_id": "retained-response"]
+    #expect(metadata == [expectedMetadata, expectedMetadata])
+    let previousMetadata: String? = legacyVersion == 6 ? #"{"signal":"assistant.turn_end"}"# : nil
+    #expect(updated.map { var row = $0; row.metadataJSON = previousMetadata; return row } == before)
     #expect(try store.events(in: .init(agent: .claudeCode, nativeID: resumed)).isEmpty)
     var upgradedUpdates = store.sessionOverviewUpdates(in: key).makeAsyncIterator()
     let upgraded = try #require(try await upgradedUpdates.next() ?? nil)

@@ -103,8 +103,8 @@ func customSourceSharesDirectoryIdentityAcrossAPFSAliases() throws {
     let aliasPath = "/System/Volumes/Data" + folder.path
     let dataAlias = URL(fileURLWithPath: aliasPath, isDirectory: true)
     let upper = firstURL.deletingLastPathComponent().appendingPathComponent("SOURCEALIASTEST", isDirectory: true)
-    let identity = try SourceFileReader.directoryIdentity(root: firstURL)
-    #expect(try SourceFileReader.directoryIdentity(root: dataAlias) == identity)
+    let identity = try SourceFileReader.registrationIdentity(root: firstURL)
+    #expect(try SourceFileReader.registrationIdentity(root: dataAlias) == identity)
 
     var original = box.custom(.codex, label: "Original", environment: "Synthetic")
     original.rootURL = firstURL
@@ -117,7 +117,7 @@ func customSourceSharesDirectoryIdentityAcrossAPFSAliases() throws {
     #expect(registered.count == 1)
     let saved = try #require(registered.first)
     #expect(saved.id == id)
-    #expect(try SourceFileReader.directoryIdentity(root: saved.rootURL) == identity)
+    #expect(try SourceFileReader.registrationIdentity(root: saved.rootURL) == identity)
     #expect(saved.label == original.label && saved.access == original.access)
     var duplicate = original
     duplicate.rootURL = dataAlias
@@ -128,14 +128,14 @@ func customSourceSharesDirectoryIdentityAcrossAPFSAliases() throws {
 
     // On case-sensitive APFS, the alternate spelling may identify a different
     // directory; do not fold case in storage or in lookup.
-    if let caseIdentity = try? SourceFileReader.directoryIdentity(root: upper) {
+    if let caseIdentity = try? SourceFileReader.registrationIdentity(root: upper) {
         #expect(caseIdentity == identity)
         duplicate.rootURL = upper
         #expect(try index.registerCustomSource(duplicate, identity: caseIdentity) == .alreadyRegistered(id))
         #expect(try index.sources() == registered)
     } else {
         try FileManager.default.createDirectory(at: upper, withIntermediateDirectories: false)
-        let distinct = try SourceFileReader.directoryIdentity(root: upper)
+        let distinct = try SourceFileReader.registrationIdentity(root: upper)
         #expect(distinct != identity)
         duplicate.rootURL = upper
         guard case .added = try index.registerCustomSource(duplicate, identity: distinct) else {
@@ -208,7 +208,7 @@ func customSourceDistinguishesReusedAPFSPath(useDataAliasFirst: Bool) throws {
     let dataAlias = URL(fileURLWithPath: "/System/Volumes/Data" + atStart.path, isDirectory: true)
     let files = FileManager.default
     try files.createDirectory(at: atStart, withIntermediateDirectories: false)
-    let oldIdentity = try SourceFileReader.directoryIdentity(root: atStart)
+    let oldIdentity = try SourceFileReader.registrationIdentity(root: atStart)
     var source = box.custom(.codex, label: "Original", environment: "Synthetic")
     source.rootURL = useDataAliasFirst ? dataAlias : atStart
     guard case .added(let id) = try box.store.registerCustomSource(source, identity: oldIdentity) else {
@@ -227,10 +227,10 @@ func customSourceDistinguishesReusedAPFSPath(useDataAliasFirst: Bool) throws {
     let registeredBeforeMove = try box.store.sources()
     try files.moveItem(at: atStart, to: moved)
     try files.createDirectory(at: atStart, withIntermediateDirectories: false)
-    #expect(try SourceFileReader.directoryIdentity(root: moved) == oldIdentity)
-    let replacement = try SourceFileReader.directoryIdentity(root: atStart)
+    #expect(try SourceFileReader.registrationIdentity(root: moved) == oldIdentity)
+    let replacement = try SourceFileReader.registrationIdentity(root: atStart)
     #expect(replacement != oldIdentity)
-    #expect(try SourceFileReader.directoryIdentity(root: dataAlias) == replacement)
+    #expect(try SourceFileReader.registrationIdentity(root: dataAlias) == replacement)
 
     let store = try AgentStore(databaseURL: box.index)
     var choice = box.custom(.codex, label: "Replacement", environment: "Other")
@@ -239,7 +239,7 @@ func customSourceDistinguishesReusedAPFSPath(useDataAliasFirst: Bool) throws {
     choice.rootURL = useDataAliasFirst ? atStart : dataAlias
     let registered = try store.sources()
     let occupiedPath = try #require(registered.first {
-        (try? SourceFileReader.directoryIdentity(root: $0.rootURL)) == replacement
+        (try? SourceFileReader.registrationIdentity(root: $0.rootURL)) == replacement
     })
     #expect(try store.registerCustomSource(choice, identity: replacement, occupiedPath: occupiedPath) == .pathConflict)
     // A live match against the saved path cannot override a known identity.
@@ -260,7 +260,7 @@ func renewAccessFollowsTheOriginalDirectory() throws {
     let moved = box.directory.appendingPathComponent("Moved", isDirectory: true)
     let files = FileManager.default
     try files.createDirectory(at: old, withIntermediateDirectories: false)
-    let original = try SourceFileReader.directoryIdentity(root: old)
+    let original = try SourceFileReader.registrationIdentity(root: old)
     var source = box.custom(.codex, label: "Original", environment: "Work")
     source.rootURL = old
     source.enabled = false
@@ -278,8 +278,8 @@ func renewAccessFollowsTheOriginalDirectory() throws {
     try box.store.write([.session(.init(key: session, sourceID: id, fileID: fileID, environment: "Work")), .event(event)])
     try files.moveItem(at: old, to: moved)
     try files.createDirectory(at: old, withIntermediateDirectories: false)
-    let replacement = try SourceFileReader.directoryIdentity(root: old)
-    let relocated = try SourceFileReader.directoryIdentity(root: moved)
+    let replacement = try SourceFileReader.registrationIdentity(root: old)
+    let relocated = try SourceFileReader.registrationIdentity(root: moved)
     #expect(relocated == original && replacement != original)
     let newBookmark = Data([0x34, 0x57])
     #expect(try box.store.renewSourceAccess(before, selectedRoot: old, identity: replacement,
@@ -333,8 +333,8 @@ func renewDefaultSourceThroughAliasKeepsProject() async throws {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     try FileManager.default.createDirectory(at: peer, withIntermediateDirectories: false)
     let alias = URL(fileURLWithPath: "/System/Volumes/Data" + root.path, isDirectory: true)
-    let savedIdentity = try SourceFileReader.directoryIdentity(root: root)
-    let selectedIdentity = try SourceFileReader.directoryIdentity(root: alias)
+    let savedIdentity = try SourceFileReader.registrationIdentity(root: root)
+    let selectedIdentity = try SourceFileReader.registrationIdentity(root: alias)
     try #require(savedIdentity == selectedIdentity)
     let store = fixture.store
     let codex = try store.upsertSource(.init(agent: .codex, label: "Codex", rootURL: root))

@@ -79,11 +79,15 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
 
         func fileEventID() -> String { "file:\(file.sourceID):\(file.relativePath):\(frame.sequence)" }
         let eventID = Self.id(row["uuid"]) ?? fileEventID()
+        let assistantCounts = !frame.isTruncated && type == "assistant"
+            ? (message["usage"] as? [String: Any]).flatMap(Self.counts) : nil
+        let contextInput = ownership != .inherited ? assistantCounts.flatMap(Self.contextInput) : nil
         var records: [NormalizedRecord] = [
             .session(.init(key: key, sourceID: file.sourceID, fileID: context.fileID, environment: environment,
                            cwd: metadata.cwd, startedAt: metadata.started, lastEventAt: metadata.last,
                            gitBranch: metadata.branch, cliVersion: metadata.version, model: metadata.model,
-                           parentNativeID: parent))
+                           parentNativeID: parent, contextUsed: contextInput,
+                           contextModel: contextInput == nil ? nil : Self.metadata(message["model"], maximum: 256)))
         ]
         if ownership == .inherited {
             records.append(.session(.init(key: owner, sourceID: file.sourceID, environment: environment,
@@ -102,7 +106,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         case "user", "assistant":
             let isUser = type == "user"
             let isMeta = (row["isMeta"] as? Bool) == true
-            let textMetadata = isUser || frame.isTruncated ? nil : Self.messageMetadata(message["id"])
+            let textMetadata = isUser || frame.isTruncated ? nil : Self.messageMetadata(message)
             if !frame.isTruncated, let text = message["content"] as? String {
                 if !isUser || !isMeta { records.append(event(isUser ? .user : .assistant, text, metadata: textMetadata)) }
             } else if let blocks = message["content"] as? [[String: Any]] {
@@ -135,7 +139,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             } else {
                 unknown = true
             }
-            if !frame.isTruncated, !isUser, let usage = message["usage"] as? [String: Any], let counts = Self.counts(usage),
+            if let counts = assistantCounts,
                let id = Self.id(message["id"]) ?? Self.id(row["requestId"]) ?? Self.id(row["uuid"]) {
                 records.append(.tokens(.init(session: owner, timestamp: time ?? 0,
                                              model: Self.metadata(message["model"], maximum: 256),
@@ -232,6 +236,16 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         return .init(inputFresh: input, cacheRead: read, cacheWrite: aggregate, output: output)
     }
 
+    private static func contextInput(_ counts: TokenCounts) -> Int64? {
+        var input: Int64 = 0
+        for part in [counts.inputFresh, counts.cacheRead, counts.cacheWrite, counts.cacheWrite1h] {
+            let next = input.addingReportingOverflow(part)
+            if next.overflow { return nil }
+            input = next.partialValue
+        }
+        return input
+    }
+
     private static func count(_ raw: Any?) -> Int64? {
         guard raw != nil else { return 0 }
         guard let value = integer(raw), value >= 0 else { return nil }
@@ -250,9 +264,12 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         }.joined(separator: "\n")
     }
 
-    private static func messageMetadata(_ raw: Any?) -> String? {
-        guard let id = Self.id(raw),
-              let data = try? JSONSerialization.data(withJSONObject: ["claude_message_id": id]) else { return nil }
+    private static func messageMetadata(_ message: [String: Any]) -> String? {
+        var fields: [String: String] = [:]
+        if let id = Self.id(message["id"]) { fields["claude_message_id"] = id }
+        if message["stop_reason"] as? String == "end_turn" { fields["signal"] = "assistant.turn_end" }
+        guard !fields.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 

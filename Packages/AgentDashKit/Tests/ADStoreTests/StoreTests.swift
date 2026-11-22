@@ -33,10 +33,11 @@ func freshAndReopened() throws {
             #expect(try String.fetchOne(db, sql: "PRAGMA journal_mode") == "wal")
             #expect(try Int.fetchOne(db, sql: "PRAGMA foreign_keys") == 1)
             #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY identifier") ==
-                ["source_root_identity", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint"])
+                ["context_measurement_model", "copilot_accounting", "saved_search_sidebar_filter", "source_removal", "source_root_identity", "status_inference", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint", "v4_codex_index", "v9_token_minutes",
+                 "v10_usage_readouts", "v11_token_quotes", "v12_cache_savings", "v13_usage_chart_changes"].sorted())
             for name in ["sources", "source_root_identities", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
                          "file_touches", "commands", "token_events", "token_minute", "rate_limit_snapshots",
-                         "session_keywords", "term_df", "saved_searches", "app_meta"] {
+                         "session_keywords", "term_df", "saved_searches", "app_meta", "copilot_usage_snapshots"] {
                 #expect(try db.tableExists(name))
             }
             #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?", arguments: ["登录"]) == 1)
@@ -45,7 +46,7 @@ func freshAndReopened() throws {
     }
 }
 
-@Test("ADP-2: upgrading an existing v1 database retains its source progress")
+@Test("ADP-2 / FR-TK: upgrading a v1 database retains its source progress and projects existing tokens")
 func upgradesLegacyCheckpoint() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jsonl-migration-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -69,6 +70,11 @@ func upgradesLegacyCheckpoint() throws {
                 INSERT INTO source_files(id,source_id,rel_path,role,inode,size,mtime_ns,read_offset,
                                          last_seq,previous_ts,parser_version,state,unknown_records)
                 VALUES(1,1,'file.jsonl','session',17,12,100,10,3,200,2,'partial',1);
+                INSERT INTO sessions(id,agent,native_id,source_id,environment,status)
+                VALUES(1,'codex','synthetic-legacy',1,'Test','completed');
+                INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,output,reasoning,
+                    cost_micro_usd,price_status,price_ref,dedupe_key)
+                VALUES(1,'codex','synthetic',60001,5,4,3,2,17,'priced','synthetic-legacy','legacy-usage');
                 """)
         }
     }
@@ -77,6 +83,10 @@ func upgradesLegacyCheckpoint() throws {
     #expect(try upgraded.checkpoint(for: 1) == Checkpoint(inode: 17, size: 12, offset: 10, parserVersion: 2,
                                                          sequence: 3, previousTimestamp: 200,
                                                          modificationTimeNS: 100, unknownRecords: 1))
+    let window = try UsageWindow.make(.hour, now: 90_000, timeZone: .gmt)
+    let report = try upgraded.usage(window: window)
+    #expect(report.totals.counts.total == 12)
+    #expect(report.totals.costMicroUSD == 17 && report.totals.unpricedTokens == 0)
 }
 
 @Test("ADP-2/3: a stale batch cannot write records or overwrite the winning checkpoint")

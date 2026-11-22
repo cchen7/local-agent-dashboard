@@ -280,10 +280,30 @@ message ID rules. Normalized text blocks share the physical record's sequence an
 (`claude:event:<record identity>:`); the final numeric component orders the
 blocks. The Overview rejoins assistant text across records when the ID is
 available, or within one physical record otherwise, before masking and
-excerpting it. Version 5 replays v3 and v4 file checkpoints. A retained
+excerpting it. Public v5 replays v3 and v4 file checkpoints. The integrated
+v7 also replays locally indexed v6 files for this repair. A retained
 resume copy can backfill a missing ID on a matching assistant record UUID
 for the same owner, even if the original file is no longer present. The
 backfill leaves the stored text, order, event keys and token accounting intact.
+
+Codex context samples use cache-inclusive `last_token_usage.input_tokens`
+and `info.model_context_window` for the sampled model. A subsequent
+different model starts with no inherited capacity. Claude context samples
+sum fresh input, cache reads and cache creation from the assistant usage
+record; its capacity comes from a local model rule when available.
+These measurements do not replace token-event accounting or dedupe.
+
+Copilot session records are read from `session-state/<session-id>/events.jsonl`.
+The normalized stream keeps typed turn/shutdown evidence and uses
+`user.message.data.content`, never `transformedContent`. Per-model
+`modelMetrics.<model>.usage` snapshots retain their file position; the
+app-owned store subtracts earlier exact calls to avoid double counting.
+Per-call and child-event accounting are covered by synthetic fixtures.
+This import does not parse `workspace.yaml` or the optional metadata DB.
+
+Claude parser v5 also records a typed turn-end hint on assistant text
+when `message.stop_reason` is `end_turn`. A turn end does not end the
+session. An absent stop reason is ordinary assistant activity.
 
 Tool results can contain a string or an array of text blocks. Field order
 is not assumed: `tool_use_id`, `is_error` and the outer record identity can
@@ -293,6 +313,16 @@ same line. Unrelated payload fields do not consume this preview budget. A v2
 overflow that lost the JSON envelope wrote an empty marker keyed by source,
 relative file path and physical sequence. In-place v3 replay reconciles that
 marker when it recovers the same line.
+
+## Local Codex port
+
+Ordinary and compressed captures were sanitized before comparison; privately
+derived details remain in the local format report. The local adapter keeps
+session metadata, turn model and last-usage counters, and treats compressed
+files as immutable. A session can have usage and task events without usable
+transcript messages in that channel. The local writer therefore chooses a
+transcript based on usable text and supersedes fallback content transactionally.
+This section and implementation are not cleared for publication.
 
 ## Local source availability for M0
 

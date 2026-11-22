@@ -40,7 +40,7 @@ public extension AgentStore {
                        coalesce(f.unknown,0) AS unknown,
                        coalesce(t.sessions,0) AS sessions,coalesce(t.archived,0) AS archived
                 FROM sources s LEFT JOIN file_stats f ON f.source_id=s.id
-                LEFT JOIN session_stats t ON t.source_id=s.id ORDER BY s.id
+                LEFT JOIN session_stats t ON t.source_id=s.id WHERE s.removed=0 ORDER BY s.id
                 """, arguments: [SourceFile.Role.promptHistory.rawValue]).map { row in
                     IndexedSourceStatus(id: row["id"], trackedFiles: row["tracked"], indexedFiles: row["indexed"],
                                         partialFiles: row["partial"], failedFiles: row["failed"], goneFiles: row["gone"],

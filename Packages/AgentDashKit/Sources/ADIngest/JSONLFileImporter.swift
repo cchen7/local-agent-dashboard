@@ -1,6 +1,7 @@
 import ADAdapters
 import ADCore
 import ADStore
+import ADZstd
 import Foundation
 
 /// ADP-1…5. Categories only; never carry source paths or record bytes.
@@ -24,12 +25,14 @@ public enum JSONLFileImporter {
     /// Connect a discovered file to its adapter and the transactional store.
     @discardableResult
     public static func importFile<A: AgentAdapter>(_ file: SourceFile, from source: Source,
-                                                   authorizedRoot: URL, store: AgentStore, adapter: A)
+                                                   authorizedRoot: URL, expectedRoot: SourceFileReader.DirectoryIdentity? = nil,
+                                                   replay: Bool = false, store: AgentStore, adapter: A)
     throws -> JSONLImportResult {
         var versioned = file
         versioned.parserVersion = A.parserVersion
         var decoder = try adapter.makeDecoder(for: versioned, in: source)
-        return try importFile(versioned, authorizedRoot: authorizedRoot, store: store) {
+        return try importFile(versioned, authorizedRoot: authorizedRoot, expectedRoot: expectedRoot,
+                              encoding: adapter.storageEncoding(for: versioned), replay: replay, store: store) {
             try decoder.decode($0, context: $1)
         }
     }
@@ -37,17 +40,22 @@ public enum JSONLFileImporter {
     /// Import one discovered file beneath a root the caller already authorized.
     /// Run off the UI actor. Never pass an unverified watcher hint as a file.
     /// A decoder can mark malformed/truncated input unknown and continue.
-    /// Files are assumed append-only between scans unless metadata shows a
-    /// replacement, shrink, same-size rewrite or parser-version change.
+    /// Plain JSONL is append-only. A compressed file is an immutable snapshot:
+    /// validate it fully before publishing any batches, and skip it after EOF
+    /// only while its physical identity, size, mtime and parser match.
     @discardableResult
-    public static func importFile(_ file: SourceFile, authorizedRoot: URL, store: AgentStore,
+    public static func importFile(_ file: SourceFile, authorizedRoot: URL,
+                                  expectedRoot: SourceFileReader.DirectoryIdentity? = nil,
+                                  encoding: JSONLStorageEncoding = .plain, replay: Bool = false, store: AgentStore,
                                   decode: (JSONLFrame, JSONLDecodeContext) throws -> DecodedJSONLFrame)
     throws -> JSONLImportResult {
-        try importFile(file, authorizedRoot: authorizedRoot, store: store,
-                       snapshot: { try $0.snapshot() }, decode: decode)
+        try importFile(file, authorizedRoot: authorizedRoot, expectedRoot: expectedRoot, encoding: encoding,
+                       replay: replay, store: store, snapshot: { try $0.snapshot() }, decode: decode)
     }
 
-    static func importFile(_ file: SourceFile, authorizedRoot: URL, store: AgentStore,
+    static func importFile(_ file: SourceFile, authorizedRoot: URL,
+                           expectedRoot: SourceFileReader.DirectoryIdentity? = nil,
+                           encoding: JSONLStorageEncoding = .plain, replay: Bool = false, store: AgentStore,
                            snapshot: (SourceFileReader) throws -> SourceFileReader.Snapshot,
                            decode: (JSONLFrame, JSONLDecodeContext) throws -> DecodedJSONLFrame)
     throws -> JSONLImportResult {
@@ -57,12 +65,26 @@ public enum JSONLFileImporter {
         // concurrent append can make older bytes look like a legitimate shrink.
         let fileID = try store.upsertFile(file, checkpoint: nil)
         var saved = try store.checkpoint(for: fileID)
-        let reader = try SourceFileReader(root: authorizedRoot, relativePath: file.relativePath)
+        let reader = try SourceFileReader(root: authorizedRoot, relativePath: file.relativePath, expectedRoot: expectedRoot)
         let initial = try snapshot(reader)
         let sameFile = saved.flatMap { canReusePrefix($0, snapshot: initial) ? $0 : nil }
-        let resume = sameFile.flatMap { $0.parserVersion == file.parserVersion ? $0 : nil }
+        let matched = replay ? nil : sameFile.flatMap {
+            !$0.sourceFileWasMissing && $0.parserVersion == file.parserVersion ? $0 : nil
+        }
+        if encoding == .zstd {
+            if let matched, matched.size == initial.size, matched.offset == initial.size {
+                return .init(fileID: fileID, checkpoint: matched, completeLines: 0, bytesRead: 0)
+            }
+            // A corrupt frame can be discovered after provisional output.
+            // Preflight the pinned descriptor without handing any records to the writer.
+            try inflate(reader, size: initial.size) { _ in }
+            guard try reader.snapshot() == initial else { throw JSONLImportFailure.sourceChanged }
+        }
+        let resume = encoding == .plain ? matched : nil
+        // Compressed checkpoint offsets are physical bytes, not frame positions.
+        // Never use them to reconcile a logical prefix or read a JSONL tail.
         let replayedPrefix: JSONLDecodeContext.ReplayedPrefix? = sameFile.flatMap {
-            guard $0.parserVersion < file.parserVersion, $0.offset > 0 else { return nil }
+            guard encoding == .plain, $0.parserVersion < file.parserVersion, $0.offset > 0 else { return nil }
             return .init(parserVersion: $0.parserVersion, endOffset: $0.offset)
         }
         var next = Checkpoint(inode: initial.inode, size: initial.size, offset: resume?.offset ?? 0,
@@ -72,8 +94,7 @@ public enum JSONLFileImporter {
                               unknownRecords: resume?.unknownRecords ?? 0)
         var framer = JSONLFramer(offset: next.offset, sequence: next.sequence, prefixLimit: prefixLimit)
         let startingOffset = next.offset
-        var readOffset = next.offset
-        var lineStart = next.offset
+        var lineStart = startingOffset
         var lines: Int64 = 0
         var batchLines = 0
         var batch: [NormalizedRecord] = []
@@ -83,8 +104,10 @@ public enum JSONLFileImporter {
             try Task.checkCancellation()
             guard next != saved || !batch.isEmpty else { return }
             let latest = try reader.snapshot()
-            guard latest.size >= initial.size,
-                  latest.size != initial.size || latest.modificationTimeNS == initial.modificationTimeNS
+            let unchanged = encoding == .zstd ? latest == initial :
+                latest.size >= initial.size &&
+                    (latest.size != initial.size || latest.modificationTimeNS == initial.modificationTimeNS)
+            guard unchanged
             else { throw JSONLImportFailure.sourceChanged }
             try store.commitFileBatch(batch, for: fileID, from: saved, to: next)
             saved = next
@@ -93,14 +116,11 @@ public enum JSONLFileImporter {
             batchStarted = .now
         }
 
-        while readOffset < initial.size {
-            try Task.checkCancellation()
-            let target = Int(min(Int64(chunkSize), initial.size - readOffset))
-            let chunk = try reader.read(upToCount: target, offset: readOffset)
-            guard chunk.count == target else { throw JSONLImportFailure.sourceChanged }
+        func consume(_ chunk: Data) throws {
             try framer.push(chunk) { framed in
                 try Task.checkCancellation()
-                let line = framed.isTruncated ? withOverflow(framed, start: lineStart, reader: reader) : framed
+                let line = encoding == .plain && framed.isTruncated
+                    ? withOverflow(framed, start: lineStart, reader: reader) : framed
                 lineStart = line.endOffset
                 let decoded = try decode(line, .init(fileID: fileID, previousTimestamp: next.previousTimestamp,
                                                      state: next.decoderState, replayedPrefix: replayedPrefix))
@@ -109,7 +129,7 @@ public enum JSONLFileImporter {
                 else { throw JSONLImportFailure.stateLimit }
                 if batch.count + decoded.records.count > batchLimit { try commit() }
                 batch.append(contentsOf: decoded.records)
-                next.offset = line.endOffset
+                if encoding == .plain { next.offset = line.endOffset }
                 next.sequence = line.sequence
                 next.previousTimestamp = decoded.timestamp ?? next.previousTimestamp
                 next.decoderState = decoded.state
@@ -125,10 +145,46 @@ public enum JSONLFileImporter {
                     try commit()
                 }
             }
-            readOffset += Int64(chunk.count)
+        }
+        let bytesRead: Int64
+        if encoding == .zstd {
+            // Replay from the beginning after interruption; dedupe keys are stable.
+            // Keep the physical cursor at zero until the immutable snapshot is complete.
+            try inflate(reader, size: initial.size, emit: consume)
+            next.offset = initial.size
+            let (total, overflow) = initial.size.multipliedReportingOverflow(by: 2)
+            bytesRead = overflow ? Int64.max : total
+        } else {
+            try readChunks(reader, size: initial.size, from: startingOffset, emit: consume)
+            bytesRead = initial.size - startingOffset
         }
         try commit()
-        return .init(fileID: fileID, checkpoint: next, completeLines: lines, bytesRead: readOffset - startingOffset)
+        return .init(fileID: fileID, checkpoint: next, completeLines: lines, bytesRead: bytesRead)
+    }
+
+    private static func readChunks(_ reader: SourceFileReader, size: Int64, from start: Int64,
+                                   emit: (Data) throws -> Void) throws {
+        var offset = start
+        while offset < size {
+            try Task.checkCancellation()
+            let target = Int(min(Int64(chunkSize), size - offset))
+            let chunk = try reader.read(upToCount: target, offset: offset)
+            guard chunk.count == target else { throw JSONLImportFailure.sourceChanged }
+            try emit(chunk)
+            offset += Int64(chunk.count)
+        }
+    }
+
+    private static func inflate(_ reader: SourceFileReader, size: Int64,
+                                emit: (Data) throws -> Void) throws {
+        let decoder = try ZstdStreamDecoder()
+        try readChunks(reader, size: size, from: 0) { compressed in
+            try decoder.write(compressed) { plain in
+                try Task.checkCancellation()
+                try emit(plain)
+            }
+        }
+        try decoder.finish()
     }
 
     private static func withOverflow(_ frame: JSONLFrame, start: Int64, reader: SourceFileReader) -> JSONLFrame {

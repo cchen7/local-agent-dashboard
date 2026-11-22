@@ -1,9 +1,14 @@
 import Darwin
 import Foundation
+import ADAdapters
 import ADCore
 
 enum SourceAccessStatus: Equatable, Sendable {
     case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
+}
+
+enum SourceFilePreview: Equatable, Sendable {
+    case available(Int), unsupported, unavailable
 }
 
 /// M0 access verification reads directory entry metadata only, never file contents.
@@ -46,19 +51,64 @@ enum SourceAccessProbe {
         catch { return .denied }
     }
 
+    /// Keep a read-only bookmark active until scanning and watching have both stopped.
+    static func withIndexingAccess<Value: Sendable>(to source: Source, _ run: (URL) async throws -> Value)
+        async throws -> Value {
+        switch source.access {
+        case .defaultLocation:
+            return try await run(source.rootURL)
+        case .bookmark(let data):
+            var stale = false
+            let root: URL
+            do {
+                root = try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+                               relativeTo: nil, bookmarkDataIsStale: &stale)
+            } catch {
+                throw IndexAccessFailure.denied
+            }
+            guard !stale else { throw IndexAccessFailure.staleBookmark }
+            guard root.standardizedFileURL == source.rootURL.standardizedFileURL else {
+                throw IndexAccessFailure.rootChanged
+            }
+            guard root.startAccessingSecurityScopedResource() else { throw IndexAccessFailure.denied }
+            defer { root.stopAccessingSecurityScopedResource() }
+            return try await run(root)
+        }
+    }
+
+    /// Count discovered session files without opening any session content.
+    static func preview(_ source: Source) async -> SourceFilePreview {
+        if source.agent == .grokBuild { return .unsupported }
+        do {
+            return try await withIndexingAccess(to: source) { root in
+                try Task.checkCancellation()
+                let identity = try SourceFileReader.directoryIdentity(root: root)
+                let files: [SourceFile]
+                switch source.agent {
+                case .claudeCode: files = try ClaudeCodeAdapter().discover(in: source, authorizedRoot: root)
+                case .codex: files = try CodexAdapter().discover(in: source, authorizedRoot: root)
+                case .copilot: files = try CopilotAdapter().discover(in: source, authorizedRoot: root)
+                case .grokBuild: return .unsupported
+                }
+                guard try SourceFileReader.directoryIdentity(root: root) == identity else { return .unavailable }
+                return .available(files.lazy.filter { $0.role == .session || $0.role == .subagent }.count)
+            }
+        } catch { return .unavailable }
+    }
+
     /// Match older rows without an identity, using only their existing
     /// access. No prompts, volume mounting, or session file reads.
     static func directoryIdentity(_ source: Source) -> SourceRootIdentity? {
         switch source.access {
         case .defaultLocation:
-            return try? SourceFileReader.directoryIdentity(root: source.rootURL)
+            return try? SourceFileReader.registrationIdentity(root: source.rootURL)
         case .bookmark(let data):
             var stale = false
             guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
                                      relativeTo: nil, bookmarkDataIsStale: &stale),
                   !stale, url.startAccessingSecurityScopedResource() else { return nil }
             defer { url.stopAccessingSecurityScopedResource() }
-            return try? SourceFileReader.directoryIdentity(root: url)
+            return try? SourceFileReader.registrationIdentity(root: url)
         }
     }
 

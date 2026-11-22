@@ -173,6 +173,7 @@ Scenarios covered (FR-SRC-1):
 4. **Desktop apps / other entry points:** Codex desktop app and Copilot App share the CLI's directory. The record's origin field (Codex `originator`, Copilot `producer`) distinguishes them; the UI shows them as entry points of the same agent.
 5. **Data not on this Mac** (remote servers, cloud sandboxes): not supported in v1 (no network). The user may sync the directory locally and use scenario 3.
 6. **Several environments mixed in one directory:** e.g. several Codex profiles sharing `~/.codex`. `environmentRules` tag sessions by record fields (such as `model_provider` or `originator`); rules are editable in Settings.
+   Sources settings can edit path mappings and Codex rules for model provider and originator. Saving configuration preserves source permissions and does not rebuild indexed sessions.
 
 #### 5.1.1 Exploration task EXP-1: the user's two Codex environments (do this on the developer machine before M1)
 
@@ -201,6 +202,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 - If a different directory occupies a registered pathname, adding it reports a path conflict (including equivalent path spellings) and preserves the original source and its history.
 - Grant access again matches the same physical directory as Add Source. If the original moved, update its path and bookmark on the same source ID; choosing a replacement keeps the existing access and history. Selecting another spelling of the same directory preserves its saved path. Older bookmark sources without an identity need a live match from their existing bookmark. A default source's first bookmark may be granted for its configured path.
 - The first-run onboarding (§11.7) lists the detected locations and their session-file counts.
+- Removing a source stops its worker and forgets the stored bookmark without deleting indexed sessions or original files. Default discovery does not re-add it. Explicitly choosing the same directory path again restores the existing registration and checkpoint with a fresh read-only grant.
 
 ### 5.3 General parsing rules (all adapters)
 
@@ -244,7 +246,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | Envelope | `{ "timestamp", "type", "payload" }` |
 | `session_meta` | `payload.id` (session id), `cwd`, `originator` (CLI vs desktop app etc.), `cli_version`, `source`, `model_provider`, and git info when present (commit, branch, repository URL). |
 | `turn_context` | `model`, `effort`, `approval_policy`, `sandbox_policy`, `cwd`: the model used per turn. |
-| Transcript text | **Use `event_msg`:** `user_message` (`payload.message`) and `agent_message` (`payload.message`). `response_item` records with `type = message` are model-facing copies (assistant ones duplicate `agent_message`; user ones are mostly injected environment context). **Never index both channels or every reply appears twice.** Fall back to `response_item` only for sessions that have no `event_msg` at all. |
+| Transcript text | **Use `event_msg`:** `user_message` (`payload.message`) and `agent_message` (`payload.message`). `response_item` records with `type = message` are model-facing copies (assistant ones duplicate `agent_message`; user ones are mostly injected environment context). **Never index both channels.** Fall back to usable `response_item` text until the session has a usable `event_msg` transcript message; token and task records alone do not pick the transcript channel. |
 | Tools | `response_item` `function_call` / `custom_tool_call` (`name`, `arguments` as a JSON string, `call_id`) paired with `*_output` by `call_id`. `exec_command` → command; `apply_patch` → file changes (parse patch headers for paths and +/- line counts). MCP calls: join `namespace` and `name` into `mcp__<server>__<tool>`. |
 | Other events | `task_started`, `task_complete` (`last_agent_message`, `duration_ms`), `exec_command_end`, `patch_apply_end`, error events, `compacted` (compaction summary). |
 | Tokens | `event_msg` with `payload.type = token_count`: **use only `info.last_token_usage`** (this response); `info.total_token_usage` is for reconciliation only. `input_tokens` **includes** cached input: `input_fresh = input_tokens − cached_input_tokens`, `cache_read = cached_input_tokens`, `output = output_tokens`, `reasoning = reasoning_output_tokens` (part of output — do not add it again). |
@@ -502,6 +504,7 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);   -- incl. pricing_has
 ### 6.4 Archive and retention (FR-STO-1)
 
 - When an agent deletes a raw file (file gone, parent folder still present), mark the session `source_deleted_at`, **keep its content in the database**, and show an "Archived" marker in the UI.
+  Confirm absence below the pinned, accessible source parent. An unavailable parent or a symlink is insufficient. If the file returns, replay it and clear the archive marker only for sessions found in that file.
 - Retention setting: forever (default) / 365 / 180 / 90 days. Expired sessions are deleted with their events and token records; rollup tables are kept so long-range charts stay continuous.
 - Settings shows the database size and offers: "Clear a project's data", "Clear a source's data", "Clear everything".
 
@@ -511,6 +514,12 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);   -- incl. pricing_has
 |---|---|---|
 | Rebuild index | Rebuild `events_fts`, `token_minute` and keywords from the `events` / `token_events` tables | No |
 | Full rescan | Re-parse raw files (idempotent upserts); archived sessions are kept | No |
+
+Rebuild runs in one app-index transaction, uses stored quotes and masked
+topic inputs, and refuses replacement when historical usage is unbacked.
+Full rescan replays files in enabled Claude, Codex and Copilot sources using their current
+read-only authorization. A watched source replays in its existing worker;
+a stopped source runs one pass and stays stopped afterward.
 
 ### 6.6 Reading other apps' SQLite (Codex `state.sqlite`, Copilot `session-store.db`)
 
@@ -665,7 +674,9 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 - Compute exact totals before limiting the displayed groups. Mask the complete snippet candidate before highlighting or taking an excerpt.
 - Opening a session scrolls the transcript to the first match. The up/down buttons move between matching events in that session using transcript order and show the current position. Only a bounded transcript page is loaded at each match. When the index changes, keep the current event if it still matches; otherwise restart at the first match.
 - Sort: relevance (default) / most recent / token volume.
+  Sort matching sessions before paging. Token volume includes cached input and output; changing sort does not change match order inside a transcript.
 - A query can be saved as a "Smart Group" in the sidebar.
+  Save the validated query as entered with its sort order, then run it against the current index whenever the group is opened. Removing a group removes only the saved query.
 
 ### 9.2 Chinese tokenization (must be done right)
 
@@ -745,6 +756,10 @@ becomes `unknown`. At exactly 15 s the silence-based approval inference does not
 an explicit "needs approval" signal, or "waiting for your reply"; preserve the
 inference qualification in the displayed evidence.
 
+Settings → Thresholds applies validated whole-second values to both
+existing and new indexed sessions. The default thresholds above remain
+in effect until changes are saved.
+
 ### 10.5 Files and commands
 
 Extracted from tool calls: Claude `Read`/`Edit`/`Write`/`MultiEdit`/`Bash`, Codex `exec_command`/`apply_patch`, Grok Build tool calls in `updates.jsonl`, Copilot `tool.execution_*`. Line counts: Claude `Edit` diffs `old_string` vs `new_string` by line; Codex `apply_patch` counts `+`/`-` lines in the patch.
@@ -752,6 +767,11 @@ Extracted from tool calls: Claude `Read`/`Edit`/`Write`/`MultiEdit`/`Bash`, Code
 ### 10.6 Context usage
 
 Shown only when determinable: "latest request's total input ÷ model context window". Codex provides `model_context_window`; for other agents use the local "model → context window" table in Settings (user-editable, prefix match on model name). Otherwise show "—".
+
+Use cache-inclusive input for the measured request, excluding output.
+Source-reported capacity takes priority. Otherwise use the longest
+case-sensitive prefix for the model attached to that request. A newer
+request for another model cannot reuse the older model's reported capacity.
 
 ---
 
@@ -779,6 +799,9 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
   - **Environments:** only when there is more than one
   - **Status:** Running / Waiting / Completed / Failed
   - **Smart Groups:** saved searches
+  - Sidebar filters narrow the Sessions list even when a session has no
+    transcript. A typed query stays within the chosen sidebar filter;
+    Smart Groups also save that scope.
 - Window default 1120×720, minimum 960×600, no maximum; remember last size and position.
 
 ### 11.2 Sessions page
@@ -789,9 +812,11 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 
 - Header: avatar, title, `agent · full path · branch · environment`, status badge (hover shows inference evidence).
 - Meta grid: Started, Turns, Tokens · Cost (two lines in one cell: total tokens including cache / list-price cost estimate; hover shows the breakdown), Context window.
+  Count each user record once by file sequence. Use stored event quotes and label a subset of priced tokens as a partial estimate.
 - Live activity bar (running only): current action + command + elapsed time + "last event 3s ago". **No process ID** (the sandbox cannot see it).
 - Two tabs: **Overview** | **Transcript**.
   - Overview: main-topic chips, latest progress (§10.3), touched files (top 10, with +/-), commands run (top 10), mini token chart for this session.
+    Plot up to 72 buckets for the selected session; distinguish session-level estimates. Records without a timestamp still count in the total.
   - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to full input/output; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
     Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Seek straight to a selected match without reading intervening pages. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor or empties the current older/newer page.
 - Bottom buttons:
@@ -865,6 +890,7 @@ Per prototype `31:847`:
 - Today's mini chart + legend.
 - Active sessions (max 6, then scroll): title, project, status and duration, current rate or "Needs input". Clicking opens the main window on that session.
 - Footer: Open Dashboard ⌘D, Settings… ⌘,, Quit ⌘Q.
+- Read menu data only while the panel is visible. “Now” is rolling 60-second call-level throughput; “Today” starts at local midnight and includes all recorded precision levels.
 - MAY: option to show current tok/min next to the menu bar icon.
 - SHOULD: local notification (UserNotifications, local only) when a session starts needing approval; off by default.
 
@@ -873,7 +899,7 @@ Per prototype `31:847`:
 | Tab | Content |
 |---|---|
 | General | Launch at login, menu bar display, time format |
-| Sources | Source list (agent, path, environment, status, files, sessions, last scan, unknown records, errors); add / remove / rescan; edit path mappings and environment rules |
+| Sources | Source list (agent, path, environment, status, files, sessions, last scan, unknown records, errors); start / stop indexing, add / remove / rescan; edit path mappings and environment rules |
 | Thresholds | Per-agent redline (tok/min); status-inference thresholds; model → context-window table |
 | Storage | Database size; archive retention; tool-output size limit; rebuild index; full rescan; clear by project / source / all |
 | Privacy | Secret masking (default on); index thinking blocks (default off); excluded paths or projects (globs) |
@@ -884,6 +910,10 @@ The Sources index counts come from committed checkpoints and session rows,
 separate from checking directory access. Show a scan time only when the
 index contains one, and report errors without exposing raw source details.
 
+An empty redline in Thresholds disables the manual limit for that agent.
+Use positive whole tokens per minute; apply saved values to the menu and
+Token Usage without rebuilding indexed usage.
+
 Launch at login is off until the user requests it in General. Use
 `SMAppService.mainApp` and show the observed macOS registration status,
 including any required approval in System Settings. Disabling it unregisters
@@ -893,6 +923,10 @@ and requests no new entitlement for this feature.
 ### 11.7 First-run onboarding
 
 Three steps: ① privacy promise (zero network, read-only, data stays on this Mac) → ② detected agent directories with file counts; add other directories (containers, VMs, other `CODEX_HOME`s) with environment labels → ③ start indexing with progress; recent sessions appear first and the user can enter the main window immediately.
+
+Preview counts enumerate authorized directories without opening session
+contents. Start only the selected sources, or continue without indexing.
+Keep this decision in the app index; an existing indexed library skips setup.
 
 ### 11.8 Responsive rules (final in Figma `46:2400`)
 

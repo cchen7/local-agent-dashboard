@@ -1,9 +1,21 @@
 import ADCore
+import ADPrivacy
 import ADSearch
+import ADStore
 import SwiftUI
 
 struct MainWindow: View {
     @Bindable var model: DashboardModel
+    @Environment(\.openSettings) private var openSettings
+    @State private var searchToSave: SearchToSave?
+    @State private var removalFailed = false
+
+    private struct SearchToSave: Identifiable {
+        let id = UUID()
+        let query: String
+        let order: SessionSearchOrder
+        let filter: SessionLibraryFilter?
+    }
 
     var body: some View {
         Group {
@@ -11,10 +23,19 @@ struct MainWindow: View {
                 NavigationSplitView {
                     sidebar
                 } detail: {
-                    EmptyPanel(title: "No token usage yet", symbol: "gauge.with.needle",
-                               message: "Usage and list-price estimates will appear after indexing.")
-                        .accessibilityIdentifier("empty.tokens")
-                        .navigationTitle("Token Usage")
+                    Group {
+                        if let store = model.usageStore {
+                            TokenUsageEntry(store: store) {
+                                model.settingsPage = .thresholds
+                                openSettings()
+                            }
+                        } else {
+                            EmptyPanel(title: "No token usage yet", symbol: "gauge.with.needle",
+                                       message: "Usage and list-price estimates will appear after indexing.")
+                                .accessibilityIdentifier("empty.tokens")
+                        }
+                    }
+                    .navigationTitle("Token Usage")
                 }
             } else if model.page == .projects {
                 ProjectsBrowser(store: model.store, hostHome: model.projectPathHome,
@@ -33,7 +54,8 @@ struct MainWindow: View {
                         let search = model.selectedTranscriptSearch
                         if let session = model.selectedSession, let store = model.store,
                            !model.isSearchingSessions || search != nil {
-                            SessionTranscript(session: session, store: store, search: search)
+                            SessionTranscript(session: session, store: store, search: search,
+                                              contextWindowRules: model.contextWindowRules)
                                 .id(TranscriptSelection(session: session.id, query: search?.query))
                         } else {
                             emptyDetail
@@ -42,13 +64,18 @@ struct MainWindow: View {
                 }
                 .searchable(text: $model.sessionSearchText, prompt: Text("Search Sessions"))
                 .task(id: SearchInput(text: model.sessionSearchText, offset: model.sessionSearchOffset,
+                                       order: model.sessionSearchOrder,
+                                       filter: model.libraryFilter,
                                        ready: model.store != nil)) { [text = model.sessionSearchText,
-                                                                    offset = model.sessionSearchOffset] in
-                    await model.observeSessionSearch(text, offset: offset)
+                                                                    offset = model.sessionSearchOffset,
+                                                                    order = model.sessionSearchOrder,
+                                                                    filter = model.libraryFilter] in
+                    await model.observeSessionSearch(text, offset: offset, order: order, filter: filter)
                 }
             }
         }
         .task(id: model.store != nil) { await model.observeSessionIndex() }
+        .task(id: model.store != nil) { await model.observeSmartGroups() }
         .environment(\.sessionOverviewOptions,
                      .init(enabled: !model.isSearchingSessions, searchTopic: { term in
                         model.searchFromTopic(term)
@@ -60,11 +87,40 @@ struct MainWindow: View {
             }
         }
         .toolbar {
+            if model.page == .sessions, model.isSearchingSessions {
+                ToolbarItem {
+                    Picker("Search Sort", selection: $model.sessionSearchOrder) {
+                        Text("Relevance").tag(SessionSearchOrder.relevance)
+                        Text("Most Recent").tag(SessionSearchOrder.recent)
+                        Text("Token Volume").tag(SessionSearchOrder.tokens)
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("search.sort")
+                }
+                ToolbarItem {
+                    Button("Save Search…", systemImage: "bookmark") {
+                        searchToSave = .init(query: model.sessionSearchText, order: model.sessionSearchOrder, filter: model.libraryFilter)
+                    }
+                    .accessibilityIdentifier("search.saveSmartGroup")
+                    .disabled(!canSaveSearch)
+                }
+            }
             ToolbarItem {
                 SettingsLink { Label("Source Access", systemImage: "folder.badge.gearshape") }
                     .accessibilityIdentifier("openSettings")
             }
         }
+        .sheet(item: $searchToSave) { search in
+            SmartGroupSaveSheet(query: search.query) { name, query in
+                try await model.saveSmartGroup(name: name, query: query, order: search.order, filter: search.filter)
+            }
+        }
+        .alert("Could not remove the smart group.", isPresented: $removalFailed) {}
+    }
+
+    private var canSaveSearch: Bool {
+        if case .results = model.sessionSearchState { return model.store != nil }
+        return false
     }
 
     @ViewBuilder private var sessionColumn: some View {
@@ -134,9 +190,13 @@ struct MainWindow: View {
             EmptyPanel(title: "No sessions yet", symbol: "bubble.left.and.text.bubble.right",
                        message: "Your local library is empty.")
                 .accessibilityIdentifier("empty.sessions")
+        } else if model.visibleSessions.isEmpty {
+            EmptyPanel(title: "No sessions in this filter", symbol: "line.3.horizontal.decrease.circle",
+                       message: "Choose another filter or show all sessions.")
+                .accessibilityIdentifier("empty.sessionFilter")
         } else {
             List(selection: $model.selectedSessionID) {
-                ForEach(model.sessions) { session in
+                ForEach(model.visibleSessions) { session in
                     SessionListCell(session: session).tag(session.id)
                 }
             }
@@ -167,14 +227,149 @@ struct MainWindow: View {
                     Label { Text(page.title) } icon: { Image(systemName: page.symbol) }.tag(page)
                 }
             }
+            if model.libraryFilter != nil {
+                Button { model.openLibraryFilter(nil) } label: {
+                    Label("Clear Sidebar Filter", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("sidebar.filter.clear")
+            }
+            if !model.sidebarAgents.isEmpty {
+                Section("Agents") {
+                    ForEach(model.sidebarAgents) { row in
+                        sidebarFilter(.agent(row.id), icon: "smallcircle.filled.circle",
+                                      identifier: "sidebar.agent.\(row.id.rawValue)") {
+                            Text(verbatim: row.id.sessionName)
+                            Spacer()
+                            Text(row.count.formatted()).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }
+                }
+            }
+            if model.sidebarEnvironments.count > 1 {
+                Section("Environments") {
+                    ForEach(model.sidebarEnvironments) { row in
+                        sidebarFilter(row.filter, icon: "shippingbox", identifier: "sidebar.environment") {
+                            Text(verbatim: row.label)
+                        }
+                    }
+                }
+            }
+            Section("Status") {
+                ForEach([SessionStatus.running, .waiting, .completed, .failed], id: \.self) { status in
+                    sidebarFilter(.status(status), icon: status.sidebarSymbol,
+                                  identifier: "sidebar.status.\(status.rawValue)") {
+                        Text(status.label)
+                    }
+                }
+            }
+            if !model.smartGroups.isEmpty {
+                Section("Smart Groups") {
+                    ForEach(model.smartGroups) { group in
+                        Button { model.openSmartGroup(group) } label: {
+                            Label { Text(verbatim: SecretMasker.mask(group.name)) } icon: {
+                                Image(systemName: "bookmark")
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button("Remove Smart Group", role: .destructive) {
+                                Task {
+                                    do { try await model.removeSmartGroup(group) }
+                                    catch { removalFailed = true }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
+    }
+
+    private func sidebarFilter<Title: View>(_ filter: SessionLibraryFilter, icon: String, identifier: String,
+                                            @ViewBuilder title: () -> Title) -> some View {
+        Button {
+            model.openLibraryFilter(filter)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                title()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(model.page == .sessions && model.libraryFilter == filter ? Color.accentColor.opacity(0.15) : .clear)
+        .accessibilityAddTraits(model.page == .sessions && model.libraryFilter == filter ? .isSelected : [])
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+private extension SessionStatus {
+    var sidebarSymbol: String {
+        switch self {
+        case .running: "play.circle"
+        case .waiting: "clock"
+        case .completed: "checkmark.circle"
+        case .failed: "exclamationmark.circle"
+        case .unknown: "questionmark.circle"
+        }
+    }
+}
+
+private struct SmartGroupSaveSheet: View {
+    let query: String
+    let save: (String, String) async throws -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var saving = false
+    @State private var failure: LocalizedStringResource?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Save Smart Group").font(.title2)
+            TextField("Smart Group Name", text: $name)
+                .accessibilityIdentifier("smartGroup.name")
+            if let failure { Text(failure).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { Task { await saveGroup() } }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("smartGroup.save")
+                    .disabled(SavedSessionSearch.validName(name) == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+    }
+
+    private func saveGroup() async {
+        guard !saving, let label = SavedSessionSearch.validName(name) else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            try await save(label, query)
+            dismiss()
+        } catch SavedSessionSearchFailure.duplicate {
+            failure = "This smart group is already saved."
+        } catch SavedSessionSearchFailure.limitReached {
+            failure = "Remove a smart group before saving another."
+        } catch {
+            failure = "Could not save the smart group."
+        }
     }
 }
 
 private struct SearchInput: Equatable {
     let text: String
     let offset: Int
+    let order: SessionSearchOrder
+    let filter: SessionLibraryFilter?
     let ready: Bool
 }
 

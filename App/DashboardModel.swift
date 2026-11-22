@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import ADCore
+import ADInsights
 import ADPrivacy
 import ADSearch
 import ADStore
@@ -27,35 +28,62 @@ enum DashboardPage: String, CaseIterable, Identifiable {
 
 @MainActor @Observable
 final class DashboardModel {
+    let sourceIndexing = SourceIndexingController()
+    private(set) var editingSourceIDs: Set<Int64> = []
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
     var access: [Int64: SourceAccessStatus] = [:]
+    var settingsPage: SettingsPage = .general
+    private(set) var contextWindowRules: [ModelContextWindow] = []
+    private static let contextWindowPreferenceKey = "modelContextWindowRules"
     var selectedProjectID: IndexedProject.ID?
     var storageFailed = false
     var verifying = false
+    private(set) var onboardingRequired = false
+    private(set) var onboardingSaving = false
+    private(set) var onboardingChoice: Set<Int64> = []
+    private(set) var sourcePreviews: [Int64: SourceFilePreview] = [:]
     private(set) var sessions: [SessionListItem] = []
     var selectedSessionID: SessionKey?
     private(set) var sessionIndexLoaded = false
     private(set) var sessionIndexFailed = false
     private var loaded = false
+    @ObservationIgnored private var statusTask: Task<Void, Never>?
+    private var statusPipeline: SessionStatusPipeline?
+    private(set) var statusThresholds = StatusInferenceThresholds.default
+    private(set) var savingStatusThresholds = false
+    private static let statusPreferenceKey = "statusInferenceThresholdsSeconds"
+    private var synthetic: Bool { CommandLine.arguments.contains("--synthetic") }
     private(set) var store: AgentStore?
+    var usageStore: AgentStore? { store }
     var sessionSearchText = "" {
         didSet { if sessionSearchText != oldValue { sessionSearchOffset = 0 } }
+    }
+    var sessionSearchOrder: SessionSearchOrder = .relevance {
+        didSet { if sessionSearchOrder != oldValue { sessionSearchOffset = 0 } }
     }
     static let sessionSearchPageSize = 50
     private(set) var sessionSearchOffset = 0
     private var searchForText: String?
     private var searchForOffset = 0
+    private var searchForOrder: SessionSearchOrder = .relevance
+    private var searchForFilter: SessionLibraryFilter?
     private var lastSearchState: SessionSearchState = .waiting
     private var lastSearchScope: IndexedSearchScope?
     private var searchHome: String?
+    private(set) var smartGroups: [SavedSessionSearch] = []
+    private(set) var libraryFilter: SessionLibraryFilter?
+    private(set) var visibleSessions: [SessionListItem] = []
+    private(set) var sidebarAgents: [SidebarAgent] = []
+    private(set) var sidebarEnvironments: [SidebarEnvironment] = []
 
     var projectPathHome: String? { searchHome }
 
     var isSearchingSessions: Bool { !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var sessionSearchState: SessionSearchState {
-        searchForText == sessionSearchText && searchForOffset == sessionSearchOffset ? lastSearchState : .waiting
+        searchForText == sessionSearchText && searchForOffset == sessionSearchOffset &&
+            searchForOrder == sessionSearchOrder && searchForFilter == libraryFilter ? lastSearchState : .waiting
     }
 
     var selectedTranscriptSearch: SessionTranscriptSearch? {
@@ -65,7 +93,7 @@ final class DashboardModel {
     }
 
     var selectedSession: SessionListItem? {
-        sessions.first { $0.id == selectedSessionID }
+        visibleSessions.first { $0.id == selectedSessionID }
     }
 
     func load() async {
@@ -84,12 +112,29 @@ final class DashboardModel {
                 }
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 let store = try AgentStore(databaseURL: directory.appendingPathComponent("index.sqlite"))
+                let previewUsage = CommandLine.arguments.contains("--synthetic") &&
+                    (CommandLine.arguments.contains("--synthetic-usage") ||
+                     ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_USAGE"] == "1")
+                if previewUsage || !CommandLine.arguments.contains("--synthetic") {
+                    BundledUsagePricing.activate(in: store)
+                }
+                if previewUsage { try Self.prepareUsageFixture(in: directory, store: store) }
+                if CommandLine.arguments.contains("--synthetic"),
+                   CommandLine.arguments.contains("--synthetic-indexing-source") ||
+                   ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] == "1" {
+                    try Self.prepareIndexingFixture(in: directory, store: store)
+                }
+                if CommandLine.arguments.contains("--synthetic"),
+                   CommandLine.arguments.contains("--synthetic-indexing-codex") ||
+                   ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_CODEX_SOURCE"] == "1" {
+                    try Self.prepareCodexIndexingFixture(in: directory, store: store)
+                }
+                if synthetic && CommandLine.arguments.contains("--synthetic-indexing-copilot") {
+                    try Self.prepareCopilotIndexingFixture(in: directory, store: store)
+                }
                 // This writes only app-owned configuration. No source directory is read at launch.
-                let existing = try store.sources()
                 let defaults = synthetic ? [] : try SourceAccessProbe.defaultSources()
-                for source in defaults where !existing.contains(where: {
-                    $0.agent == source.agent && $0.rootURL.standardizedFileURL == source.rootURL.standardizedFileURL
-                }) { try store.upsertSource(source) }
+                if !defaults.isEmpty { try store.installDefaultSources(defaults) }
                 if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
                     try Self.seedProjects(store)
                 } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
@@ -100,13 +145,73 @@ final class DashboardModel {
                     try Self.seedIndexStatus(store, in: directory)
                 }
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
-                return (store, try store.sources(), home)
+                let needsOnboarding = try store.needsSourceOnboarding()
+                let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
+                                           : needsOnboarding
+                return (store, try store.sources(), home, onboarding)
             }.value
             store = result.0
             sources = result.1
             searchHome = result.2
+            onboardingRequired = result.3
+            if !synthetic, let data = UserDefaults.standard.data(forKey: Self.contextWindowPreferenceKey),
+               data.count <= 131_072, let rules = try? JSONDecoder().decode([ModelContextWindow].self, from: data),
+               ModelContextWindow.areValid(rules) {
+                contextWindowRules = rules
+            }
+            if !synthetic || CommandLine.arguments.contains("--synthetic-status") {
+                statusThresholds = loadStatusThresholds()
+                let initial = statusThresholds
+                let pipeline = SessionStatusPipeline(store: result.0)
+                statusTask = Task { [weak self] in
+                    do {
+                        try await pipeline.configure(initial)
+                        try Task.checkCancellation()
+                        self?.statusPipeline = pipeline
+                        try await pipeline.run()
+                    } catch { self?.statusPipeline = nil }
+                }
+            }
         } catch { storageFailed = true }
     }
+
+    deinit { statusTask?.cancel() }
+
+    func saveContextWindowRules(_ rules: [ModelContextWindow]) throws {
+        guard ModelContextWindow.areValid(rules) else { throw ContextWindowSettingsFailure.invalidRules }
+        let data = try JSONEncoder().encode(rules)
+        if !synthetic { UserDefaults.standard.set(data, forKey: Self.contextWindowPreferenceKey) }
+        contextWindowRules = rules
+    }
+
+    private func loadStatusThresholds() -> StatusInferenceThresholds {
+        guard !synthetic,
+              let values = UserDefaults.standard.array(forKey: Self.statusPreferenceKey) as? [Int],
+              values.count == 4 else { return .default }
+        return (try? Self.statusThresholds(seconds: values)) ?? .default
+    }
+
+    static func statusThresholds(seconds: [Int]) throws -> StatusInferenceThresholds {
+        guard seconds.count == 4, seconds.allSatisfy({ (1...604_800).contains($0) }) else {
+            throw StatusSettingsFailure.outOfRange
+        }
+        return try .init(approvalSilenceMilliseconds: Int64(seconds[0]) * 1000,
+                         recentActivityMilliseconds: Int64(seconds[1]) * 1000,
+                         pendingToolLifetimeMilliseconds: Int64(seconds[2]) * 1000,
+                         turnCompletionSilenceMilliseconds: Int64(seconds[3]) * 1000)
+    }
+
+    func saveStatusThresholds(_ seconds: [Int]) async throws {
+        guard !savingStatusThresholds, let pipeline = statusPipeline else { throw StatusSettingsFailure.unavailable }
+        let value = try Self.statusThresholds(seconds: seconds)
+        savingStatusThresholds = true
+        defer { savingStatusThresholds = false }
+        try await pipeline.configure(value)
+        if !synthetic { UserDefaults.standard.set(seconds, forKey: Self.statusPreferenceKey) }
+        statusThresholds = value
+    }
+
+    var canEditStatusThresholds: Bool { statusPipeline != nil }
 
     nonisolated private static func seedIndexStatus(_ store: AgentStore, in directory: URL) throws {
         let sourceID = try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic indexed source",
@@ -126,13 +231,16 @@ final class DashboardModel {
         guard let store else { return }
         do {
             for try await rows in store.indexedSessionUpdates() {
-                let displayed = await Task.detached { rows.map(SessionListItem.init) }.value
+                let snapshot = await Task.detached { SidebarLibrarySnapshot(rows) }.value
                 guard !Task.isCancelled else { return }
-                sessions = displayed
+                sessions = snapshot.sessions
+                sidebarAgents = snapshot.agents
+                sidebarEnvironments = snapshot.environments
+                refreshVisibleSessions()
                 if isSearchingSessions, case .results(let results) = sessionSearchState {
                     selectSearchHit(results)
-                } else if !isSearchingSessions && !displayed.contains(where: { $0.id == selectedSessionID }) {
-                    selectedSessionID = displayed.first?.id
+                } else if !isSearchingSessions {
+                    selectVisibleSession()
                 }
                 sessionIndexLoaded = true
                 sessionIndexFailed = false
@@ -143,36 +251,39 @@ final class DashboardModel {
         }
     }
 
-    func observeSessionSearch(_ text: String, offset: Int) async {
-        guard let store, searchIsCurrent(text, offset: offset) else { return }
+    func observeSessionSearch(_ text: String, offset: Int, order: SessionSearchOrder = .relevance,
+                              filter: SessionLibraryFilter? = nil) async {
+        guard let store, searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            if !sessions.contains(where: { $0.id == selectedSessionID }) { selectedSessionID = sessions.first?.id }
+            selectVisibleSession()
             searchForText = nil
             lastSearchState = .waiting
             return
         }
         do {
             if text != searchForText { try await Task.sleep(for: .milliseconds(150)) }
-            for try await _ in store.searchIndexChanges() {
-                guard searchIsCurrent(text, offset: offset) else { return }
+            for try await _ in store.searchIndexChanges(order: order) {
+                guard searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
                 let scope = IndexedSearchScope(now: Int64(Date().timeIntervalSince1970 * 1000),
-                                               timeZone: .current, hostHome: searchHome)
+                                               timeZone: .current, hostHome: searchHome, libraryFilter: filter)
                 let limit = Self.sessionSearchPageSize
                 let work = Task.detached(priority: .userInitiated) {
-                    try SessionSearch.run(text, in: store, scope: scope, limit: limit, offset: offset)
+                    try SessionSearch.run(text, in: store, scope: scope, order: order, limit: limit, offset: offset)
                 }
                 let found = try await withTaskCancellationHandler {
                     try await work.value
                 } onCancel: {
                     work.cancel()
                 }
-                guard searchIsCurrent(text, offset: offset) else { return }
+                guard searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
                 if offset > 0 && found.hits.isEmpty {
                     sessionSearchOffset = 0
                     return
                 }
                 searchForText = text
                 searchForOffset = offset
+                searchForOrder = order
+                searchForFilter = filter
                 lastSearchScope = scope
                 lastSearchState = .results(found)
                 selectSearchHit(found)
@@ -181,16 +292,19 @@ final class DashboardModel {
                 try await Task.sleep(for: .milliseconds(150))
             }
         } catch {
-            guard searchIsCurrent(text, offset: offset) else { return }
+            guard searchIsCurrent(text, offset: offset, order: order, filter: filter) else { return }
             searchForText = text
             searchForOffset = offset
+            searchForOrder = order
+            searchForFilter = filter
             lastSearchState = error is SearchQuery.Failure || (error as? IndexedSearchFailure) == .invalidFilter
                 ? .invalid : .failed
         }
     }
 
-    private func searchIsCurrent(_ text: String, offset: Int) -> Bool {
-        !Task.isCancelled && text == sessionSearchText && offset == sessionSearchOffset
+    private func searchIsCurrent(_ text: String, offset: Int, order: SessionSearchOrder, filter: SessionLibraryFilter?) -> Bool {
+        !Task.isCancelled && text == sessionSearchText && offset == sessionSearchOffset && order == sessionSearchOrder
+            && filter == libraryFilter
     }
 
     func pageSessionSearch(forward: Bool) {
@@ -212,6 +326,37 @@ final class DashboardModel {
 
     func searchFromTopic(_ term: String) {
         sessionSearchText = SearchQuery.quotedLiteral(term)
+    }
+
+    func observeSmartGroups() async {
+        guard let store else { return }
+        do {
+            for try await groups in store.savedSessionSearches() {
+                guard !Task.isCancelled else { return }
+                smartGroups = groups
+            }
+        } catch {
+            if !Task.isCancelled { smartGroups = [] }
+        }
+    }
+
+    func saveSmartGroup(name: String, query: String, order: SessionSearchOrder = .relevance,
+                        filter: SessionLibraryFilter? = nil) async throws {
+        guard let store else { throw SavedSessionSearchFailure.invalidQuery }
+        try await Task.detached {
+            try store.saveSessionSearch(name: name, query: query, order: order, libraryFilter: filter)
+        }.value
+    }
+
+    func removeSmartGroup(_ group: SavedSessionSearch) async throws {
+        guard let store else { throw SavedSessionSearchFailure.invalidQuery }
+        try await Task.detached { try store.removeSessionSearch(group) }.value
+    }
+
+    func openSmartGroup(_ group: SavedSessionSearch) {
+        openMenuSearch(group.query)
+        sessionSearchOrder = group.order
+        setLibraryFilter(group.libraryFilter)
     }
 
     nonisolated private static func seedSessions(_ store: AgentStore, in directory: URL) throws {
@@ -256,6 +401,31 @@ final class DashboardModel {
         try store.write(records)
     }
 
+    nonisolated private static func prepareUsageFixture(in directory: URL, store: AgentStore) throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        var records: [NormalizedRecord] = []
+        for (index, agent, model) in [(0, AgentKind.claudeCode, "claude-haiku-5-5"), (1, .codex, "gpt-6.2-sol")] {
+            let sourceID = try store.upsertSource(.init(agent: agent, label: "Synthetic usage",
+                rootURL: directory.appendingPathComponent("synthetic-usage-\(index)"), environment: "Synthetic"))
+            let key = SessionKey(agent: agent, nativeID: "preview-usage-\(index)")
+            records.append(.session(.init(key: key, sourceID: sourceID, environment: "Synthetic")))
+            for sample in 0..<90 {
+                let timestamp = now - Int64(90 - sample) * 300_000 + Int64(index) * 10_000
+                let spike = (sample % 18) * (index + 2)
+                let fresh = 100 + spike * 40
+                let counts = TokenCounts(inputFresh: Int64(fresh), cacheRead: Int64(fresh * 2),
+                                         cacheWrite: Int64(25 + spike), output: Int64(50 + spike * 12))
+                records.append(.tokens(.init(session: key, timestamp: timestamp,
+                    model: sample == 0 ? "synthetic-unpriced" : model, counts: counts,
+                    dedupeKey: "preview-usage:\(index):\(sample)")))
+            }
+        }
+        records.append(.rateLimit(.init(agent: .codex, limitID: "synthetic-preview", window: .primary,
+                                        timestamp: now - 60_000, windowMinutes: 300, usedPercent: 42,
+                                        resetsAt: now + 3_600_000, planType: "Synthetic")))
+        try store.write(records)
+    }
+
     nonisolated private static func seedProjects(_ store: AgentStore) throws {
         let home = URL(fileURLWithPath: "/synthetic")
         let codex = try store.upsertSource(.init(agent: .codex, label: "Synthetic Codex",
@@ -288,9 +458,43 @@ final class DashboardModel {
     }
 
     func openProjectSession(_ id: SessionKey) {
+        setLibraryFilter(nil)
         sessionSearchText = ""
         selectedSessionID = id
         page = .sessions
+    }
+
+    func openMenuSearch(_ query: String) {
+        setLibraryFilter(nil)
+        page = .sessions
+        sessionSearchText = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        sessionSearchOffset = 0
+    }
+
+    func openLibraryFilter(_ filter: SessionLibraryFilter?) {
+        page = .sessions
+        setLibraryFilter(filter)
+    }
+
+    func setLibraryFilter(_ filter: SessionLibraryFilter?) {
+        guard filter != libraryFilter else { return }
+        libraryFilter = filter
+        sessionSearchOffset = 0
+        refreshVisibleSessions()
+        selectVisibleSession()
+    }
+
+    private func refreshVisibleSessions() {
+        guard let libraryFilter else { visibleSessions = sessions; return }
+        visibleSessions = sessions.filter { session in
+            libraryFilter.includes(agent: session.id.agent, environment: session.indexedEnvironment, status: session.status)
+        }
+    }
+
+    private func selectVisibleSession() {
+        if !visibleSessions.contains(where: { $0.id == selectedSessionID }) {
+            selectedSessionID = visibleSessions.first?.id
+        }
     }
 
     func verifyAccess() async {
@@ -303,6 +507,107 @@ final class DashboardModel {
         }
     }
 
+    func previewOnboardingSources() async {
+        guard onboardingRequired else { return }
+        let pending = sources.filter { source in
+            guard let id = source.id else { return false }
+            return sourcePreviews[id] == nil
+        }
+        for source in pending {
+            guard !Task.isCancelled, let id = source.id else { return }
+            guard sourcePreviews[id] == nil else { continue }
+            let task = Task.detached(priority: .utility) { await SourceAccessProbe.preview(source) }
+            let reading = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+            guard !Task.isCancelled, onboardingRequired else { return }
+            guard sources.contains(where: { $0.id == id && $0.access == source.access }) else { continue }
+            sourcePreviews[id] = reading
+            if case .available(let count) = reading, count > 0, source.enabled {
+                onboardingChoice.insert(id)
+            }
+        }
+    }
+
+    func setOnboardingSource(_ id: Int64, selected: Bool) {
+        guard !onboardingSaving, sources.contains(where: { $0.id == id && $0.enabled }),
+              case .available(let count) = sourcePreviews[id], count > 0 else { return }
+        if selected { onboardingChoice.insert(id) }
+        else { onboardingChoice.remove(id) }
+    }
+
+    func completeOnboarding(startSelected: Bool) async -> Bool {
+        guard onboardingRequired, !onboardingSaving, let store else { return false }
+        let targets = startSelected ? sources.filter { source in
+            guard source.enabled, let id = source.id, !editingSourceIDs.contains(id),
+                  case .available(let count) = sourcePreviews[id], count > 0 else { return false }
+            return onboardingChoice.contains(id)
+        } : []
+        guard !startSelected || !targets.isEmpty else { return false }
+        onboardingSaving = true
+        defer { onboardingSaving = false }
+        do {
+            try await Task.detached { try store.completeSourceOnboarding() }.value
+            onboardingRequired = false
+            targets.forEach(startIndexing)
+            return true
+        } catch { return false }
+    }
+
+    func startIndexing(_ selection: Source) {
+        guard !onboardingRequired, let store, let id = selection.id, !editingSourceIDs.contains(id),
+              let source = sources.first(where: { $0.id == id }) else { return }
+        sourceIndexing.start(source: source, store: store)
+    }
+
+    func canRescan(_ source: Source) -> Bool {
+        guard !onboardingRequired, let id = source.id, store != nil, !editingSourceIDs.contains(id) else { return false }
+        return sourceIndexing.canRescan(source)
+    }
+
+    var canRescanSources: Bool { sources.contains(where: canRescan) }
+
+    func rescanSource(_ selection: Source) {
+        guard let store, let source = sources.first(where: { $0.id == selection.id }), canRescan(source) else { return }
+        sourceIndexing.rescan(source: source, store: store)
+    }
+
+    func rescanSources() { for source in sources { rescanSource(source) } }
+
+    nonisolated private static func prepareIndexingFixture(in directory: URL, store: AgentStore) throws {
+        let root = directory.appendingPathComponent("synthetic-claude-source")
+        let project = root.appendingPathComponent("projects/synthetic")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let file = project.appendingPathComponent("00000000-0000-0000-0000-000000000033.jsonl")
+        let text = #"{"type":"user","uuid":"synthetic-index-selection","cwd":"/synthetic/test","message":{"content":"Selected source 索引验证"}}"#
+        try Data((text + "\n").utf8).write(to: file)
+        try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude source", rootURL: root,
+                                     environment: "Synthetic"))
+    }
+
+    nonisolated private static func prepareCodexIndexingFixture(in directory: URL, store: AgentStore) throws {
+        let root = directory.appendingPathComponent("synthetic-codex-source")
+        let day = root.appendingPathComponent("sessions/2026/01/01")
+        try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+        let lines = [
+            #"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"00000000-0000-0000-0000-000000000034","cwd":"/synthetic/test"}}"#,
+            #"{"type":"event_msg","payload":{"type":"user_message","message":"Selected Codex source 索引验证"}}"#,
+        ]
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: day.appendingPathComponent("rollout-synthetic.jsonl"))
+        try store.upsertSource(.init(agent: .codex, label: "Synthetic Codex source", rootURL: root, environment: "Synthetic"))
+    }
+
+    nonisolated private static func prepareCopilotIndexingFixture(in directory: URL, store: AgentStore) throws {
+        let root = directory.appendingPathComponent("synthetic-copilot-source")
+        let session = root.appendingPathComponent("session-state/synthetic-copilot")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let lines = [
+            #"{"type":"session.start","id":"start","data":{"sessionId":"synthetic-copilot","producer":"synthetic-cli","context":{"cwd":"/synthetic/test"}}}"#,
+            #"{"type":"user.message","id":"prompt","data":{"content":"Copilot 合成索引验证","transformedContent":"Synthetic injected text"}}"#,
+        ]
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: session.appendingPathComponent("events.jsonl"))
+        try store.upsertSource(.init(agent: .copilot, label: "Synthetic Copilot source", rootURL: root,
+                                     environment: "Synthetic"))
+    }
+
     func chooseCustomSource(agent: AgentKind, name: String, environment: String) async -> SourceAdditionResult {
         let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let environment = environment.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -310,7 +615,7 @@ final class DashboardModel {
         let panel = Self.sourceFolderPanel()
         guard await panel.begin() == .OK, let url = panel.url else { return .cancelled }
         guard Source.isLocalRoot(url) else { return .inaccessible }
-        let identity = await Task.detached { try? SourceFileReader.directoryIdentity(root: url) }.value
+        let identity = await Task.detached { try? SourceFileReader.registrationIdentity(root: url) }.value
         guard let identity else { return .inaccessible }
         let bytes: Data
         do {
@@ -332,7 +637,7 @@ final class DashboardModel {
                 // newly selected folder can now occupy that pathname under a
                 // different spelling, while the bookmark follows the old one.
                 let occupiedPath = registered.first {
-                    (try? SourceFileReader.directoryIdentity(root: $0.rootURL)) == identity
+                    (try? SourceFileReader.registrationIdentity(root: $0.rootURL)) == identity
                 }
                 let result = try store.registerCustomSource(source, identity: identity,
                                                             existing: existing, occupiedPath: occupiedPath)
@@ -347,29 +652,66 @@ final class DashboardModel {
         } catch { return .storageFailed }
     }
 
+    func saveSourceSettings(_ source: Source, replacement: SourceSettings) async throws {
+        guard let store, let id = source.id else { throw SourceSettingsEditFailure.missingSource }
+        guard sourceIndexing.progress[id]?.active != true, editingSourceIDs.insert(id).inserted else {
+            throw SourceSettingsCommitFailure.indexing
+        }
+        defer { editingSourceIDs.remove(id) }
+        let expected = SourceSettings(source)
+        let home = searchHome
+        do {
+            sources = try await Task.detached {
+                try store.updateSourceSettings(for: id, from: expected, to: replacement, hostHome: home)
+                return try store.sources()
+            }.value
+        } catch let failure as SourceSettingsEditFailure {
+            if let current = try? await Task.detached(operation: { try store.sources() }).value { sources = current }
+            throw failure
+        }
+    }
+
+    func removeSource(_ source: Source) async throws {
+        guard let store, let id = source.id, !verifying, !onboardingRequired,
+              sources.contains(where: { $0.id == id }), editingSourceIDs.insert(id).inserted
+        else { throw SourceSettingsEditFailure.missingSource }
+        defer { editingSourceIDs.remove(id) }
+        await sourceIndexing.stopAndWait(id: id)
+        sources = try await Task.detached {
+            try store.removeRegisteredSource(id)
+            return try store.sources()
+        }.value
+        access[id] = nil
+        sourcePreviews[id] = nil
+        onboardingChoice.remove(id)
+    }
+
     func grantAccess(to source: Source) async {
-        guard store != nil else { return }
+        guard store != nil, let id = source.id, sourceIndexing.progress[id]?.active != true,
+              editingSourceIDs.insert(id).inserted else { return }
         let panel = Self.sourceFolderPanel()
         panel.directoryURL = source.rootURL
-        guard await panel.begin() == .OK, let url = panel.url else { return }
+        let response = await panel.begin()
+        editingSourceIDs.remove(id)
+        guard response == .OK, let url = panel.url else { return }
         do {
             let bookmark = try url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
                                                 includingResourceValuesForKeys: nil, relativeTo: nil)
             await applySourceGrant(to: source, selectedRoot: url, bookmark: bookmark)
-        } catch {
-            if let id = source.id { access[id] = .denied }
-        }
+        } catch { access[id] = .denied }
     }
 
     func applySourceGrant(to source: Source, selectedRoot: URL, bookmark: Data) async {
-        guard let store, let id = source.id else { return }
+        guard let store, let id = source.id, sourceIndexing.progress[id]?.active != true,
+              editingSourceIDs.insert(id).inserted else { return }
+        defer { editingSourceIDs.remove(id) }
         do {
             let (result, snapshot) = try await Task.detached {
-                let identity = try SourceFileReader.directoryIdentity(root: selectedRoot)
+                let identity = try SourceFileReader.registrationIdentity(root: selectedRoot)
                 let legacyIdentity: SourceRootIdentity?
                 if case .bookmark = source.access { legacyIdentity = SourceAccessProbe.directoryIdentity(source) }
                 else { legacyIdentity = nil }
-                let savedPathIdentity = try? SourceFileReader.directoryIdentity(root: source.rootURL)
+                let savedPathIdentity = try? SourceFileReader.registrationIdentity(root: source.rootURL)
                 let result = try store.renewSourceAccess(source, selectedRoot: selectedRoot, identity: identity,
                                                          bookmark: bookmark, legacyBookmarkIdentity: legacyIdentity,
                                                          savedPathIdentity: savedPathIdentity)
@@ -378,7 +720,12 @@ final class DashboardModel {
             switch result {
             case .renewed:
                 sources = snapshot
-                await verifyAccess()
+                if onboardingRequired {
+                    sourcePreviews[id] = nil
+                    onboardingChoice.remove(id)
+                } else {
+                    await verifyAccess()
+                }
             case .wrongDirectory: access[id] = .wrongDirectory
             case .pathConflict: access[id] = .pathConflict
             }
@@ -396,6 +743,10 @@ final class DashboardModel {
         return panel
     }
 }
+
+enum SourceSettingsCommitFailure: Error { case indexing }
+enum StatusSettingsFailure: Error { case unavailable, outOfRange }
+enum ContextWindowSettingsFailure: Error { case invalidRules }
 
 struct SessionTranscriptSearch: Equatable, Sendable {
     let query: String
@@ -422,7 +773,9 @@ struct SessionListItem: Identifiable, Sendable {
     let path: String?
     let branch: String?
     let environment: String
+    fileprivate let indexedEnvironment: String
     let status: SessionStatus
+    let statusReason: String?
     let startedAt: Int64?
     let lastActivity: Int64?
     let archived: Bool
@@ -433,9 +786,41 @@ struct SessionListItem: Identifiable, Sendable {
         path = row.workspace.map(SecretMasker.mask)
         branch = row.branch.map(SecretMasker.mask)
         environment = SecretMasker.mask(row.environment)
+        indexedEnvironment = row.environment
         status = row.status
+        statusReason = row.statusReason
         startedAt = row.startedAt
         lastActivity = row.lastActivity
         archived = row.archived
+    }
+}
+
+struct SidebarAgent: Identifiable, Sendable {
+    let id: AgentKind
+    let count: Int
+}
+
+struct SidebarEnvironment: Identifiable, Sendable {
+    let id: [UInt8]
+    let label: String
+    var filter: SessionLibraryFilter { .environment(String(decoding: id, as: UTF8.self)) }
+}
+
+private struct SidebarLibrarySnapshot: Sendable {
+    let sessions: [SessionListItem]
+    let agents: [SidebarAgent]
+    let environments: [SidebarEnvironment]
+
+    init(_ rows: [IndexedSession]) {
+        var counts: [AgentKind: Int] = [:]
+        var names: Set<[UInt8]> = []
+        sessions = rows.map { row in
+            counts[row.id.agent, default: 0] += 1
+            names.insert(Array(row.environment.utf8))
+            return SessionListItem(row)
+        }
+        agents = AgentKind.allCases.compactMap { agent in counts[agent].map { .init(id: agent, count: $0) } }
+        environments = names.map { .init(id: $0, label: SecretMasker.mask(String(decoding: $0, as: UTF8.self))) }
+            .sorted { $0.label == $1.label ? $0.id.lexicographicallyPrecedes($1.id) : $0.label < $1.label }
     }
 }

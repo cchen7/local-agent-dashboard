@@ -120,6 +120,18 @@ public struct UsageWindow: Equatable, Sendable {
         }
     }
 
+    /// Full chart buckets intersecting this report, in display order.
+    public func chartBuckets() throws -> [UsageRange] {
+        var result: [UsageRange] = []
+        var cursor = range.lowerBound
+        while cursor < range.upperBound {
+            let bucket = try bucketRange(containing: cursor)
+            result.append(bucket)
+            cursor = bucket.upperBound
+        }
+        return result
+    }
+
     /// Floor a UTC epoch millisecond timestamp to a positive-width bucket anchored at epoch 0.
     /// Negative timestamps floor toward negative infinity. Invalid widths or an origin below
     /// Int64.min throw rather than trapping or returning a misaligned, saturated boundary.
@@ -161,6 +173,8 @@ public struct UsageWindow: Equatable, Sendable {
             // Reserve one point for the partial edges. This bound needs no widening loop.
             width = try multiply(ceilingQuotient(ceilingQuotient(range.duration, width: 499), width: minute), minute)
         }
+        // Use exact hour rollups for longer automatic windows.
+        if width >= 3_600_000 { return try multiply(ceilingQuotient(width, width: 3_600_000), 3_600_000) }
         return width
     }
 

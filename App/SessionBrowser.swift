@@ -1,6 +1,7 @@
 import ADCore
+import ADInsights
 import ADPrivacy
-import ADSearch
+import ADPricing
 import ADSearch
 import ADStore
 import AppKit
@@ -32,7 +33,7 @@ struct SessionListCell: View {
                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
                 HStack(spacing: 8) {
-                    SessionStatusPill(status: session.status)
+                    SessionStatusPill(status: session.status, reason: session.statusReason)
                     if session.archived {
                         Image(systemName: "archivebox")
                             .foregroundStyle(.secondary).accessibilityLabel("Archived")
@@ -68,6 +69,9 @@ struct SessionTranscript: View {
     let session: SessionListItem
     let store: AgentStore
     let search: SessionTranscriptSearch?
+    let contextWindowRules: [ModelContextWindow]
+    @State private var indexedContext: IndexedSessionContext?
+    @State private var usage: IndexedSessionUsage?
     @State private var request: TranscriptPageRequest
     @State private var loading = true
     @State private var failed = false
@@ -91,10 +95,12 @@ struct SessionTranscript: View {
         match?.eventKey ?? (resolvedLookup == nil ? search?.firstMatchKey : nil)
     }
 
-    init(session: SessionListItem, store: AgentStore, search: SessionTranscriptSearch? = nil) {
+    init(session: SessionListItem, store: AgentStore, search: SessionTranscriptSearch? = nil,
+         contextWindowRules: [ModelContextWindow] = []) {
         self.session = session
         self.store = store
         self.search = search
+        self.contextWindowRules = contextWindowRules
         _request = State(initialValue: search.map { .around($0.firstMatchKey) } ?? .first)
     }
 
@@ -111,15 +117,21 @@ struct SessionTranscript: View {
                             .textSelection(.enabled)
                     }
                     Spacer(minLength: 8)
-                    SessionStatusPill(status: session.status)
+                    SessionStatusPill(status: session.status, reason: session.statusReason)
                 }
-                if let startedAt = session.startedAt {
-                    LabeledContent("Started") {
-                        Text(sessionDate(startedAt), format: .dateTime.month(.abbreviated).day().hour().minute())
-                            .foregroundStyle(.secondary)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 16) {
+                        startFact
+                        turnsFact
+                        usageFact
+                        contextFact
                     }
-                    .font(.caption)
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                        GridRow { startFact; turnsFact }
+                        GridRow { usageFact; contextFact }
+                    }
                 }
+                .font(.caption)
             }
             .padding(.horizontal, 18).padding(.vertical, 14)
 
@@ -183,11 +195,101 @@ struct SessionTranscript: View {
                            message: "This indexed session does not have any transcript entries.")
             }
         }
+        .task(id: session.id) { await observeContext() }
+        .task(id: session.id) { await observeUsage() }
         .accessibilityIdentifier("session.transcript")
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: request) { [request] in await observePage(request) }
         .task(id: matchLookup) { [lookup = matchLookup] in
             if let lookup { await resolveMatch(lookup) }
+        }
+    }
+
+    private var startFact: some View {
+        sessionFact("Started") {
+            if let time = session.startedAt {
+                Text(sessionDate(time), format: .dateTime.month(.abbreviated).day().hour().minute())
+            } else { Text(verbatim: "—") }
+        }
+    }
+
+    private var turnsFact: some View {
+        sessionFact("Turns") { Text(verbatim: usage.map { $0.turns.formatted() } ?? "—") }
+    }
+
+    private var usageFact: some View {
+        sessionFact("Tokens · Cost") {
+            if let usage, usage.totals.records > 0 {
+                Text(usage.totals.counts.total.formatted())
+                    .monospacedDigit().accessibilityIdentifier("session.usage.total")
+                    .help(breakdown(usage.totals.counts))
+                if usage.totals.hasPricedUsage {
+                    let currency = PriceDisplayCurrency.usd.formattedMicroUSD(Decimal(usage.totals.costMicroUSD))
+                    Text(usage.totals.unpricedTokens > 0 ? "Partial estimate: \(currency)" : "List-price estimate: \(currency)")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("session.usage.cost")
+                        .help(Text("\(usage.totals.unpricedTokens.formatted()) unpriced tokens"))
+                    if usage.hasApproximateQuote {
+                        Text("Includes approximate quotes").font(.caption2).foregroundStyle(.secondary)
+                    }
+                } else if usage.totals.unpricedTokens > 0 {
+                    Text("Unpriced").foregroundStyle(.secondary)
+                } else { Text(verbatim: "—").foregroundStyle(.secondary) }
+            } else { Text(verbatim: "—").foregroundStyle(.secondary) }
+        }
+    }
+
+    private var contextFact: some View {
+        sessionFact("Context window") {
+            contextReading.accessibilityIdentifier("session.context")
+        }
+    }
+
+    private func sessionFact<Value: View>(_ label: LocalizedStringResource, @ViewBuilder value: () -> Value) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).foregroundStyle(.secondary)
+            value()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func breakdown(_ counts: TokenCounts) -> Text {
+        Text("Fresh: \(counts.inputFresh.formatted()) · Cache read: \(counts.cacheRead.formatted()) · Cache write: \((counts.cacheWrite + counts.cacheWrite1h).formatted()) · Output: \(counts.output.formatted())")
+    }
+
+    private func observeUsage() async {
+        usage = nil
+        do {
+            for try await reading in store.sessionUsageUpdates(in: session.id) {
+                guard !Task.isCancelled else { return }
+                usage = reading
+            }
+        } catch {
+            if !Task.isCancelled { usage = nil }
+        }
+    }
+
+    @ViewBuilder private var contextReading: some View {
+        if let value = SessionContextUsage(input: indexedContext?.input, recordedCapacity: indexedContext?.capacity,
+                                           model: indexedContext?.model, rules: contextWindowRules) {
+            Text("\(value.input.formatted()) / \(value.capacity.formatted()) tokens · \(value.fraction.formatted(.percent.precision(.fractionLength(1))))")
+                .monospacedDigit()
+                .lineLimit(1)
+                .help(Text(value.source == .recorded ? "Context capacity from the source" : "Context capacity from Settings"))
+        } else {
+            Text(verbatim: "—").foregroundStyle(.secondary)
+        }
+    }
+
+    private func observeContext() async {
+        indexedContext = nil
+        do {
+            for try await reading in store.sessionContextUpdates(in: session.id) {
+                guard !Task.isCancelled else { return }
+                indexedContext = reading
+            }
+        } catch {
+            if !Task.isCancelled { indexedContext = nil }
         }
     }
 
@@ -468,14 +570,43 @@ struct SessionAgentMark: View {
 
 private struct SessionStatusPill: View {
     let status: SessionStatus
+    let reason: String?
 
     var body: some View {
-        Label { Text(status.label) } icon: { Image(systemName: "circle.fill").imageScale(.small) }
+        Label { Text(label) } icon: { Image(systemName: "circle.fill").imageScale(.small) }
             .font(.caption2.weight(.medium))
             .foregroundStyle(status.color)
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(status.color.opacity(0.12), in: Capsule())
             .fixedSize()
+            .help(Text(evidence))
+            .accessibilityHint(Text(evidence))
+    }
+
+    private var label: LocalizedStringResource {
+        switch reason {
+        case StatusInferenceReason.possiblyNeedsApproval.rawValue: "Possibly needs approval"
+        case StatusInferenceReason.needsApproval.rawValue: "Needs approval"
+        default: status.label
+        }
+    }
+
+    private var evidence: LocalizedStringResource {
+        if reason == "archivedSession" { return "The source file was confirmed missing." }
+        return switch reason.flatMap(StatusInferenceReason.init(rawValue:)) {
+        case .apiError: "The source reported an API error."
+        case .turnError: "The source reported a failed turn."
+        case .toolResultError: "The latest tool result reported an error."
+        case .sessionEnded: "The source recorded a session end."
+        case .turnIdleCompleted: "The last turn ended normally and the session is idle."
+        case .possiblyNeedsApproval: "Possibly needs approval: a tool call is still unanswered."
+        case .needsApproval: "The source explicitly requested approval."
+        case .waitingForReply: "The last turn ended; waiting for your reply."
+        case .recentActivity: "The source contains recent activity."
+        case .toolInFlight: "The source has a tool call without a result yet."
+        case .pendingToolExpired: "The last unanswered tool call has expired."
+        default: "Status inferred from local file activity."
+        }
     }
 }
 

@@ -16,12 +16,15 @@ struct AgentDashboardApp: App {
                 Button("Sessions") { model.page = .sessions }.keyboardShortcut("1")
                 Button("Projects") { model.page = .projects }.keyboardShortcut("2")
                 Button("Token Usage") { model.page = .tokens }.keyboardShortcut("3")
+                Divider()
+                Button("Full Rescan") { model.rescanSources() }
+                    .keyboardShortcut("r")
+                    .disabled(!model.canRescanSources)
             }
         }
 
         MenuBarExtra("Agent Dashboard", systemImage: "gauge.with.needle") {
-            MenuBarPanel()
-                .background(WindowConfigurationView(identifier: "menuBarPanel"))
+            MenuBarPanel(model: model)
         }
         .menuBarExtraStyle(.window)
 
@@ -36,6 +39,7 @@ struct AgentDashboardApp: App {
 private struct DashboardWindowContent: View {
     let model: DashboardModel
     @State private var contentMinimum = CGSize(width: 960, height: 600)
+    @State private var showsSetup = false
 
     var body: some View {
         MainWindow(model: model)
@@ -45,6 +49,12 @@ private struct DashboardWindowContent: View {
                                                 contentMinimum: contentMinimum,
                                                 updateContentMinimum: { contentMinimum = $0 }))
             .task { await model.load() }
+            .onChange(of: model.onboardingRequired, initial: true) { _, required in
+                if required { showsSetup = true }
+            }
+            .sheet(isPresented: $showsSetup) {
+                SourceOnboardingView(model: model)
+            }
     }
 }
 
@@ -89,12 +99,13 @@ private struct SyntheticLaunchOptions {
 
 /// SwiftUI frame minimums apply to content; SPEC minimums describe the outer window.
 /// Native chrome measurements translate between them without a fixed titlebar height.
-private struct WindowConfigurationView: NSViewRepresentable {
+struct WindowConfigurationView: NSViewRepresentable {
     let identifier: String
     var size: CGSize? = nil
     var minimumOuterSize: CGSize? = nil
     var contentMinimum: CGSize? = nil
     var updateContentMinimum: ((CGSize) -> Void)? = nil
+    var updateVisibility: ((Bool) -> Void)? = nil
 
     func makeNSView(context: Context) -> WindowView { WindowView(configuration: self) }
     func updateNSView(_ nsView: WindowView, context: Context) {
@@ -119,6 +130,12 @@ private struct WindowConfigurationView: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if window == nil {
+                let update = configuration.updateVisibility
+                DispatchQueue.main.async { [weak self] in
+                    if self?.window == nil { update?(false) }
+                }
+            }
             guard let window, configuredWindow !== window else { return }
             configuredWindow = window
             appliedSyntheticFrame = false
@@ -141,6 +158,7 @@ private struct WindowConfigurationView: NSViewRepresentable {
 
         private func configureWindow() {
             guard let window else { return }
+            configuration.updateVisibility?(window.isVisible)
             if window.accessibilityIdentifier() != configuration.identifier {
                 window.setAccessibilityIdentifier(configuration.identifier)
             }

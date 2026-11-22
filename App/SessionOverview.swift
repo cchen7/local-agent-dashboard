@@ -1,6 +1,7 @@
 import ADCore
 import ADInsights
 import ADStore
+import Charts
 import SwiftUI
 
 struct SessionOverviewOptions: Sendable {
@@ -26,6 +27,7 @@ struct SessionOverview: View {
     @State private var value: SessionOverviewDisplay?
     @State private var loaded = false
     @State private var failed = false
+    @State private var usage: [SessionTokenBucket] = []
     nonisolated private static let scorer = try? TopicScorer()
 
     var body: some View {
@@ -35,7 +37,7 @@ struct SessionOverview: View {
                            message: "Select the session again to retry.")
             } else if !loaded {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let value, !value.isEmpty {
+            } else if let value, !value.isEmpty || !usage.isEmpty {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 15) {
                         if let activity = session.lastActivity, activity > 0 {
@@ -56,6 +58,7 @@ struct SessionOverview: View {
                         rows("Recent Actions", value.recentActions)
                         rows("Touched Files", value.files)
                         rows("Commands Run", value.commands)
+                        if !usage.isEmpty { tokenChart }
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -67,6 +70,42 @@ struct SessionOverview: View {
             }
         }
         .task(id: session.id) { await observe() }
+        .task(id: session.id) { await observeUsage() }
+    }
+
+    private var tokenChart: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Session Tokens").font(.headline)
+            Chart(usage) { point in
+                let date = Date(timeIntervalSince1970: Double(point.timestamp) / 1000)
+                if point.callTokens > 0 {
+                    BarMark(x: .value("Time", date), y: .value("Tokens", point.callTokens))
+                        .foregroundStyle(Color.accentColor)
+                }
+                if point.coarseTokens > 0 {
+                    BarMark(x: .value("Time", date), y: .value("Tokens", point.coarseTokens))
+                        .foregroundStyle(.secondary.opacity(0.55))
+                }
+            }
+            .frame(height: 88)
+            .accessibilityIdentifier("session.usage.chart")
+            if usage.contains(where: { $0.coarseTokens > 0 }) {
+                Label("Includes session-level estimates", systemImage: "square.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func observeUsage() async {
+        usage = []
+        do {
+            for try await buckets in store.sessionTokenChartUpdates(in: session.id) {
+                guard !Task.isCancelled else { return }
+                usage = buckets
+            }
+        } catch {
+            if !Task.isCancelled { usage = [] }
+        }
     }
 
     private func topicChips(_ topics: [String]) -> some View {

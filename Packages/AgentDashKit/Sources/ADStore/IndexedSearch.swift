@@ -7,16 +7,22 @@ public struct IndexedSearchScope: Equatable, Sendable {
     public let now: Int64
     public let timeZone: TimeZone
     public let hostHome: String?
+    public let libraryFilter: SessionLibraryFilter?
 
-    public init(now: Int64, timeZone: TimeZone, hostHome: String? = nil) {
+    public init(now: Int64, timeZone: TimeZone, hostHome: String? = nil, libraryFilter: SessionLibraryFilter? = nil) {
         self.now = now
         self.timeZone = timeZone
         self.hostHome = hostHome
+        self.libraryFilter = libraryFilter
     }
 }
 
 public enum IndexedSearchFailure: Error, Equatable, Sendable {
     case invalidFilter, invalidLimit, unavailable
+}
+
+public enum SessionSearchOrder: String, CaseIterable, Sendable {
+    case relevance, recent, tokens
 }
 
 /// Internal index result. Project the complete text before showing any excerpt.
@@ -47,9 +53,12 @@ public extension AgentStore {
     /// Signal once on subscription and again when a search input is committed.
     /// FTS is maintained by event triggers; search also reads session metadata,
     /// project names and file touches. The observer doesn't run the query.
-    func searchIndexChanges() -> some AsyncSequence<Void, any Error> & Sendable {
-        ValueObservation.tracking(region: Table("events"), Table("sessions"),
-                                  Table("projects"), Table("file_touches"), fetch: { _ in () })
+    func searchIndexChanges(order: SessionSearchOrder = .relevance) -> some AsyncSequence<Void, any Error> & Sendable {
+        var regions: [any DatabaseRegionConvertible] = [
+            Table("events"), Table("sessions"), Table("projects"), Table("file_touches"), Table("app_meta"),
+        ]
+        if order == .tokens { regions.append(Table("token_events")) }
+        return ValueObservation.tracking(regions: regions, fetch: { _ in () })
             .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -73,7 +82,7 @@ public extension AgentStore {
     /// Find and group normalized index records in one read snapshot. The database
     /// returns full display candidates for the selected groups only.
     func searchIndex(_ query: SearchQuery, scope: IndexedSearchScope,
-                     limit: Int = 50, offset: Int = 0) throws -> IndexedSearchSnapshot {
+                     order: SessionSearchOrder = .relevance, limit: Int = 50, offset: Int = 0) throws -> IndexedSearchSnapshot {
         guard (1...100).contains(limit), offset >= 0 else { throw IndexedSearchFailure.invalidLimit }
         guard !query.groups.isEmpty || !query.filters.isEmpty else {
             return .init(groups: [], sessionCount: 0, matchCount: 0)
@@ -84,7 +93,7 @@ public extension AgentStore {
                 // This pragma is reader-local. Let SQLite avoid copying hot
                 // pages for FTS lookups, with a fixed mapping size.
                 if compiled.usesFTS { _ = try? Int.fetchOne(db, sql: "PRAGMA mmap_size=67108864") }
-                return try Self.search(compiled, now: scope.now, limit: limit, offset: offset, db: db)
+                return try Self.search(compiled, now: scope.now, order: order, limit: limit, offset: offset, db: db)
             }
         } catch is CancellationError {
             throw CancellationError()
@@ -165,7 +174,7 @@ public extension AgentStore {
                          previousKey: key(foundAnchor ? previous : nil), nextKey: key(foundAnchor ? next : second))
     }
 
-    private static func search(_ statement: SearchStatement, now: Int64,
+    private static func search(_ statement: SearchStatement, now: Int64, order: SessionSearchOrder,
                                limit: Int, offset: Int, db: Database) throws -> IndexedSearchSnapshot {
         let cursor = try Row.fetchCursor(db, sql: statement.sql, arguments: .init(statement.arguments))
         var matches: [Int64: MatchTally] = [:]
@@ -181,6 +190,7 @@ public extension AgentStore {
         }
         guard !matches.isEmpty else { return .init(groups: [], sessionCount: 0, matchCount: 0) }
         try Task.checkCancellation()
+        let volumes = order == .tokens ? try searchVolumes(for: matches.keys, db: db) : [:]
         let ranked = try Row.fetchAll(db, sql: """
             SELECT id,agent,native_id,coalesce(last_event_at,started_at) AS activity FROM sessions
             """).compactMap { row -> RankedSession? in
@@ -191,8 +201,10 @@ public extension AgentStore {
                 let ageDays = max(0, Double(now) - Double(activity)) / 86_400_000
                 let score = tally.best.score + 0.1 * log1p(Double(tally.count)) + 0.3 * exp(-ageDays / 14)
                 return .init(id: id, session: .init(agent: agent, nativeID: row["native_id"]),
-                             tally: tally, activity: activity, score: score)
+                             tally: tally, activity: activity, score: score, volume: volumes[id] ?? 0)
             }.sorted {
+                if order == .tokens && $0.volume != $1.volume { return $0.volume > $1.volume }
+                if order != .relevance && $0.activity != $1.activity { return $0.activity > $1.activity }
                 if $0.score != $1.score { return $0.score > $1.score }
                 if $0.activity != $1.activity { return $0.activity > $1.activity }
                 return $0.id > $1.id
@@ -207,6 +219,24 @@ public extension AgentStore {
                          firstMatchKey: row["dedupe_key"], bestText: row["text"], bestTool: row["tool_name"])
         }
         return .init(groups: groups, sessionCount: ranked.count, matchCount: count)
+    }
+
+    private static func searchVolumes(for keys: Dictionary<Int64, MatchTally>.Keys, db: Database) throws -> [Int64: Int64] {
+        var volumes: [Int64: Int64] = [:]
+        let ids = Array(keys)
+        // Limit the calculation to matching sessions; the existing session
+        // token index supports this lookup. Work before paginating results.
+        for start in stride(from: 0, to: ids.count, by: 256) {
+            try Task.checkCancellation()
+            let batch = ids[start..<min(start + 256, ids.count)]
+            let marks = Array(repeating: "?", count: batch.count).joined(separator: ",")
+            let rows = try Row.fetchCursor(db, sql: """
+                SELECT session_id,sum(input_fresh+cache_read+cache_write+cache_write_1h+output) AS tokens
+                FROM token_events WHERE session_id IN (\(marks)) GROUP BY session_id
+                """, arguments: .init(batch))
+            while let row = try rows.next() { volumes[row["session_id"] as Int64] = row["tokens"] }
+        }
+        return volumes
     }
 }
 
@@ -247,6 +277,7 @@ private struct RankedSession {
     let tally: MatchTally
     let activity: Int64
     let score: Double
+    let volume: Int64
 }
 
 private struct SearchStatement {
@@ -302,6 +333,14 @@ private struct SearchStatement {
             predicates.append("e.kind <> 'prompt_history'")
         }
         for filter in query.filters { try add(filter, scope: scope) }
+        if let filter = scope.libraryFilter {
+            session = true
+            switch filter {
+            case .agent(let kind): add("s.agent=?", kind.rawValue.databaseValue)
+            case .environment(let name): add("s.environment=? COLLATE BINARY", name.databaseValue)
+            case .status(let status): add("s.status=?", status.rawValue.databaseValue)
+            }
+        }
     }
 
     private static func literal(_ term: SearchQuery.Term) -> String {

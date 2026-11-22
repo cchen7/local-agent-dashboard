@@ -86,6 +86,136 @@ XCTest hierarchy. The explicit manual-entry mode still requires the real Dialog,
 its 360-point width, and successful Open Dashboard assertions. A skip alone never
 satisfies that acceptance check; the assisted case was executed and passed.
 
+## DEV-049 — Save source settings without changing access
+
+The editor updates only the source name, environment label, path mappings and
+Codex profile rules. Compare the edited fields byte-for-byte before writing;
+a permission re-grant is independent and its latest bookmark is preserved.
+Re-granting updates only access fields for the same source identity so a
+picker opened before a settings edit cannot overwrite that edit. Reject a
+stale editor rather than overwriting newer configuration. Validate changed
+mappings and rules without opening any paths. Existing sessions and
+checkpoints are unchanged; saving does not rebuild the index.
+
+## DEV-062 — Read session usage and costs from committed quotes
+
+Observe the selected session's token and quote rows for the detail facts.
+Show the cache-inclusive total and the sum of available estimates;
+identify missing and approximate quotes. The overview's chart is separate
+and bounded to 72 timestamp buckets. These reads include archived
+sessions and do not touch original files or price tables.
+
+## DEV-061 — Keep sidebar filters separate from displayed query text
+
+Filter the session library by its indexed agent, environment or status.
+An environment's displayed label is masked; its byte-exact identity is
+used only for local filtering. Apply the same scope in search and match
+navigation and preserve it when saving a Smart Group. Session metadata
+without transcript events is still eligible for the filtered list.
+
+## DEV-060 — Sort complete search matches before paging
+
+Rank matching sessions by relevance, last activity or recorded total
+token volume before taking a page. Count cache-inclusive input and output,
+without adding reasoning again. Only volume-sorted searches refresh on
+usage-only changes. Persist the order with Smart Groups; old rows retain
+relevance.
+
+## DEV-059 — Keep Smart Groups as live local searches
+
+Save the named query in the existing app-owned saved-search table. Opening
+a group starts the ordinary search with its original syntax and current
+scope rather than persisting result rows. Sidebar labels use the display
+masker. Removing a group removes only its configuration row.
+
+## DEV-058 — Remove a source without deleting indexed sessions
+
+Stop and await the source worker before marking its registration removed
+and forgetting its bookmark. Retain the row, settings and checkpoints so
+its existing library remains readable. Default installation leaves the
+removed row alone; explicitly choosing the same agent and directory path
+with a fresh grant restores it. Exclude removed sources from source
+diagnostics and reject further ingest batches.
+
+## DEV-057 — Start first-run indexing only after source selection
+
+The first-run preview discovers filenames through the same authorization
+as the indexer. Only supported sources with session files are selectable.
+Setup completion is recorded before starting the selected workers. Users
+can continue without indexing, and an existing library skips setup.
+
+## DEV-056 — Reconcile Copilot usage inside the ingest transaction
+
+Use producer event IDs and preserve the first occurrence. Reconcile the
+per-model cumulative samples with call-level rows by file sequence; only
+uncovered usage becomes a coarse token row. Ignore child usage and stale
+decreases. Apply pricing to the final rows with the same quote mechanism
+as other agents. Discover from the already-authorized root only.
+
+## DEV-055 — Tie context usage to the measured request
+
+Keep the measured input, model ID and recorded capacity together.
+Settings → Thresholds stores optional model-prefix capacities in app
+UserDefaults. Source-reported capacity wins; use the longest literal
+prefix only as a fallback, and leave the ratio unknown without both
+values. Changing fallback rules updates the detail without reindexing.
+
+## DEV-054 — Share usage redlines between usage surfaces
+
+Save per-agent redlines atomically in the app index, using the existing
+usage-limit keys. A blank field clears that agent's value. Observe redline
+settings separately from the time-series revision so editing a redline
+updates the guide and headroom without rebuilding historical usage.
+
+## DEV-053 — Reevaluate indexed status when thresholds change
+
+Store status threshold preferences in app UserDefaults. The owned index
+records the policy it reflects; a changed policy invalidates the previous
+deadlines and prevents an older evaluator from overwriting new results.
+Changing or resetting thresholds does not reread raw sources.
+
+## DEV-052 — Read menu data only while the panel is open
+
+Use the owned index for a committed snapshot of local-day totals, the
+trailing 60 seconds of call-level usage, headroom and at most six active
+sessions. Match the current display time zone. Refresh on index commits
+and every five seconds while the native panel is visible. Reuse chart
+buckets; the menu does not read raw files or retain a closed panel snapshot.
+
+## DEV-051 — Refresh status from committed evidence
+
+Infer a session’s status from the latest 8,192 indexed evidence rows,
+without loading transcript text or inspecting processes. Committed event
+changes schedule a refresh; use one timer for the nearest remaining
+transition, with no idle polling. Reject a stale evaluation if its event
+revision changed. An archived file does not establish a successful end.
+Hover shows the reason, including the qualification on inferred approval.
+
+## DEV-050 — Replay sources without resetting their checkpoints
+
+An explicit rescan ignores the resume position for this pass while keeping
+the saved checkpoint for the writer's race check. Live watchers serialize
+replay with incremental work; a stopped source does not start watching.
+Record the time of a completed discovery pass. Replay uses existing access
+and dedupe keys, and does not clear archived sessions or stored quotes.
+
+## DEV-032 — Guard index rebuild from incomplete usage history
+
+Settings → Storage shows the app-owned database and sidecar size. Rebuild
+search, usage and masked topic projections atomically from local indexed
+records. Refuse to replace totals the source rows cannot reproduce.
+Do not open agent files or change stored events, checkpoints or prices.
+
+## DEV-029 — Archive only confirmed missing transcript files
+
+After a successful discovery or a known-file watch event, the reader confirms
+an absent leaf under the pinned authorized root without following symlinks.
+The store marks the file and its sessions only if the observed checkpoint
+still matches. Keep transcript, search and usage intact. Absence invalidates
+older ingest writers and forces replay even when a restored file has the
+same inode and contents. A different session at the same path does not
+unarchive the previous one.
+
 ## DEV-010 — Native outer-window sizing (2026-11-17)
 
 SPEC window sizes include native chrome. SwiftUI content minima alone produced a
@@ -155,6 +285,44 @@ an empty marker that v2 would have emitted for the same committed file prefix.
 Carry that boundary in decoder state until replay reaches it. The replacement
 and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 
+## DEV-044 — Start indexing from an explicit source action
+
+The Sources pane starts one in-process scan and watcher for the selected
+registered Claude Code source; launching the app does not read sessions.
+Keep bookmark access alive through both activities and release it after
+Stop. Subscribe before discovery and coalesce byte-exact hints; unknown
+paths and ambiguous events go through discovery before import. Reject a
+replacement of the selected root, keep existing indexed history, and
+resume from committed checkpoints on the next explicit start.
+
+## DEV-041 — Local Codex port and immutable compressed rollouts
+
+The Codex decoder persists per-file model, cumulative usage and tool call
+context. Only usable preferred transcript messages displace fallback text;
+the writer removes those fallback events and their search entries in the
+same transaction. Treat compressed rollouts as immutable. Validate every
+frame before replaying the pinned file with bounded memory. A complete
+physical cursor skips an unchanged archive; an interrupted replay starts
+over with the same dedupe keys. This draft and the associated format
+observations remain local pending the established publication review.
+
+Keep plain replay offsets and oversized-frame recovery independent of zstd.
+Archive checkpoints retain physical bytes at EOF; decompressed positions
+are not handed back as source offsets or legacy replay evidence.
+
+## DEV-042 — Read live usage from committed rollups
+
+The app's token ledger updates minute and hour projections with raw event
+writes. Exact range edges still use individual events. Chart revisions let
+the visible Usage page reuse unchanged buckets and refresh after commits.
+Keep rates with each priced event so a later correction uses the original
+quote. This local candidate bundles the checked static table, remembers the
+last verified bytes, and fills only unpriced records in bounded background
+batches. It does not install an external table or change already priced
+history merely because a bundled file is replaced.
+A correction to a Claude response moves both its owner and project; usage
+and cached savings leave the old rollup while the stored rate basis stays.
+
 ## DEV-046 — Read the Overview from the owned index
 
 A session Overview observes one bounded database snapshot. Prefer the
@@ -163,7 +331,8 @@ Claude assistant text by producer message ID across physical records when
 available, and otherwise from the same physical record, before masking and
 making an excerpt. Replaying a retained resume copy can fill a missing
 message ID on a matching record UUID and owner without changing any other
-stored event fields. The v5 replay also repairs files already read by v4.
+stored event fields. The v7 local integration replays both earlier public
+checkpoints and the previous private v6 checkpoint.
 Use the newest actions across structured and normalized records.
 Each structured row replaces at most one call by timestamp, exact payload
 and tool kind so repeat calls and tool results survive.

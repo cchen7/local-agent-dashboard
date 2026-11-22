@@ -14,6 +14,11 @@ public protocol AgentAdapter: Sendable {
     /// The caller has already authorized the root and owns its access lifetime.
     func discover(in source: Source, authorizedRoot: URL) throws -> [SourceFile]
     func makeDecoder(for file: SourceFile, in source: Source) throws -> Decoder
+    func storageEncoding(for file: SourceFile) -> JSONLStorageEncoding
     /// Return text for copying only; never execute the command.
     func resumeCommand(for session: SessionRecord) -> String?
+}
+
+public extension AgentAdapter {
+    func storageEncoding(for file: SourceFile) -> JSONLStorageEncoding { .plain }
 }
