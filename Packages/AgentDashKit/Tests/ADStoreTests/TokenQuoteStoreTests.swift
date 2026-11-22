@@ -226,3 +226,32 @@ private func quoteTable(newRates: Bool, cacheRead: Int? = nil) throws -> PriceTa
     }
     return try PriceTable.decode(Data(#"{"schemaVersion":1,"currency":"USD","unit":"per_million_tokens","updatedAt":"2026-11-19","models":[\#(models)]}"#.utf8))
 }
+
+@Test("FR-COST: unpriced-model diagnostics follow quote commits without changing token totals", .timeLimit(.minutes(1)))
+func unpricedDiagnosticsFollowCommittedQuotes() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("unpriced-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let index = folder.appendingPathComponent("index.sqlite")
+    let store = try AgentStore(databaseURL: index)
+    let session = try addQuoteSession(store, index: index, agent: .codex)
+    _ = try store.activatePricing(TokenQuoteEngine.make(table: quoteTable(newRates: false)))
+    try store.write([
+        .tokens(.init(session: session, timestamp: february, model: "synthetic-added",
+                      counts: .init(inputFresh: 2, cacheRead: 1, output: 3), dedupeKey: "future")),
+        .tokens(.init(session: session, timestamp: february, model: nil, counts: .init(output: 1), dedupeKey: "unknown")),
+    ])
+    var observation = store.unpricedUsageUpdates().makeAsyncIterator()
+    let initial = try #require(try await observation.next())
+    #expect(initial.map(\.model) == ["synthetic-added", nil])
+    #expect(initial.map(\.tokens) == [6, 1])
+
+    let sweep = try store.activatePricing(TokenQuoteEngine.make(table: quoteTable(newRates: true)))
+    let batch = try store.backfillUnpriced(sweep)
+    #expect(batch.priced == 1 && batch.next == nil)
+    let updated = try #require(try await observation.next())
+    #expect(updated.map(\.model) == [nil] && updated.map(\.tokens) == [1])
+    let window = try UsageWindow.make(.hour, now: february + 60_000, timeZone: .gmt)
+    let result = try store.usage(window: window)
+    #expect(result.totals.counts.total == 7 && result.totals.unpricedTokens == 1)
+}

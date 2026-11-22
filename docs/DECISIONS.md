@@ -316,10 +316,11 @@ The app's token ledger updates minute and hour projections with raw event
 writes. Exact range edges still use individual events. Chart revisions let
 the visible Usage page reuse unchanged buckets and refresh after commits.
 Keep rates with each priced event so a later correction uses the original
-quote. This local candidate bundles the checked static table, remembers the
-last verified bytes, and fills only unpriced records in bounded background
-batches. It does not install an external table or change already priced
-history merely because a bundled file is replaced.
+quote. The app reads the authorized external file or the bundle, keeps the
+last verified bytes in its own index, and fills only unpriced records in
+bounded background batches. A malformed edit cannot replace the active
+rates or change an existing historical estimate. Keep the currency choice
+with the app's presentation settings; the stored ledger stays in micro-USD.
 A correction to a Claude response moves both its owner and project; usage
 and cached savings leave the old rollup while the stored rate basis stays.
 

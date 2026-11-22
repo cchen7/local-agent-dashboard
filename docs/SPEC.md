@@ -581,7 +581,7 @@ Target: **≤ 2 s** from an agent writing a file to the UI updating (NFR-2).
 - Tiers: if a call's prompt tokens (`input_fresh + cache_read + cache_write + cache_write_1h`) exceed a tier's `whenPromptTokensAbove`, the whole call uses that tier. Data with non-`call` precision can only use base prices and is marked `approx`.
 - No matching model → `unpriced`: cost 0, tokens counted as "unpriced tokens"; the UI warns and Settings lists those models.
 - Copilot: sessions record the underlying model (claude-*, gpt-*, …); price them at that vendor's list price as an "API-equivalent cost". If records contain Copilot's own billing units (e.g. premium request counts), show them separately; never mix them into USD.
-- When the price table changes (file hash differs), recompute the cost of all `token_events` and rollups in the background; the UI shows "Recalculating with new prices".
+- When the verified price table changes, apply it to new records immediately and backfill previously unpriced `token_events` in the background. Commit each quote and its rollups together. Preserve the original rates of records with an existing quote (§8.5). Settings shows when estimates are updating.
 - Display currency: USD by default; may switch to a currency that the price table lists with a static rate (e.g. CNY), showing the rate date. **Exchange rates are never fetched.**
 
 ### 8.5 Price table interface (static file, updated periodically by an agent)
@@ -593,7 +593,7 @@ names before decoding prices or aliases.
 
 1. External file `~/.config/agent-dashboard/pricing.json` (preferred). Read through a read-only sandbox exception (§12.1) and watched with FSEvents; edits apply immediately.
 2. The bundled `pricing.json` (copied from the repository's `pricing/pricing.json` at build time), used when the external file is missing or invalid.
-3. If validation fails, keep using the last valid table and show the errors in Settings → Pricing.
+3. If validation fails, keep using the last valid table when available and show the errors in Settings → Pricing. With no last valid table, fall back to a valid bundled table. If the watched directory does not exist yet or watching fails, Settings offers a manual reload.
 
 **Files in the repository:**
 

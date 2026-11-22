@@ -5,7 +5,7 @@ import ADIngest
 import ADInsights
 import ADPrivacy
 
-enum SettingsPage: Hashable { case general, sources, thresholds, storage, about }
+enum SettingsPage: Hashable { case general, sources, thresholds, storage, pricing, about }
 
 struct SettingsView: View {
     @State private var indexStatus: [Int64: IndexedSourceStatus] = [:]
@@ -123,6 +123,10 @@ struct SettingsView: View {
             StorageSettingsPane(model: model)
                 .tabItem { Label("Storage", systemImage: "internaldrive") }
                 .tag(SettingsPage.storage)
+
+            PricingSettingsPane(model: model.pricing, store: model.store)
+                .tabItem { Label("Pricing", systemImage: "tag") }
+                .tag(SettingsPage.pricing)
 
             VStack(spacing: 12) {
                 Text("Agent Dashboard").font(.title)

@@ -29,6 +29,7 @@ enum DashboardPage: String, CaseIterable, Identifiable {
 @MainActor @Observable
 final class DashboardModel {
     let sourceIndexing = SourceIndexingController()
+    let pricing = PricingModel()
     private(set) var editingSourceIDs: Set<Int64> = []
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
@@ -96,7 +97,7 @@ final class DashboardModel {
         visibleSessions.first { $0.id == selectedSessionID }
     }
 
-    func load() async {
+    func load(syntheticPricingDirectory: URL? = nil) async {
         guard !loaded else { return }
         loaded = true
         do {
@@ -115,9 +116,16 @@ final class DashboardModel {
                 let previewUsage = CommandLine.arguments.contains("--synthetic") &&
                     (CommandLine.arguments.contains("--synthetic-usage") ||
                      ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_USAGE"] == "1")
-                if previewUsage || !CommandLine.arguments.contains("--synthetic") {
-                    BundledUsagePricing.activate(in: store)
+                let defaults = synthetic ? [] : try SourceAccessProbe.defaultSources()
+                let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
+                let externalDirectory = synthetic ? syntheticPricingDirectory : home.map {
+                    URL(fileURLWithPath: $0).appendingPathComponent(".config/agent-dashboard", isDirectory: true)
                 }
+                let bundled = !synthetic || previewUsage || syntheticPricingDirectory != nil
+                    ? Bundle.main.url(forResource: "pricing", withExtension: "json") : nil
+                let runtime = LocalPricingRuntime(external: externalDirectory?.appendingPathComponent("pricing.json"),
+                                                  bundled: bundled, store: store)
+                let initialPricing = await runtime.refresh()
                 if previewUsage { try Self.prepareUsageFixture(in: directory, store: store) }
                 if CommandLine.arguments.contains("--synthetic"),
                    CommandLine.arguments.contains("--synthetic-indexing-source") ||
@@ -133,7 +141,6 @@ final class DashboardModel {
                     try Self.prepareCopilotIndexingFixture(in: directory, store: store)
                 }
                 // This writes only app-owned configuration. No source directory is read at launch.
-                let defaults = synthetic ? [] : try SourceAccessProbe.defaultSources()
                 if !defaults.isEmpty { try store.installDefaultSources(defaults) }
                 if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
                     try Self.seedProjects(store)
@@ -144,16 +151,16 @@ final class DashboardModel {
                     ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_INDEX_STATUS"] == "1") {
                     try Self.seedIndexStatus(store, in: directory)
                 }
-                let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
                                            : needsOnboarding
-                return (store, try store.sources(), home, onboarding)
+                return (store, try store.sources(), home, onboarding, runtime, initialPricing)
             }.value
             store = result.0
             sources = result.1
             searchHome = result.2
             onboardingRequired = result.3
+            pricing.attach(store: result.0, runtime: result.4, initial: result.5)
             if !synthetic, let data = UserDefaults.standard.data(forKey: Self.contextWindowPreferenceKey),
                data.count <= 131_072, let rules = try? JSONDecoder().decode([ModelContextWindow].self, from: data),
                ModelContextWindow.areValid(rules) {

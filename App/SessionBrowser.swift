@@ -70,6 +70,7 @@ struct SessionTranscript: View {
     let store: AgentStore
     let search: SessionTranscriptSearch?
     let contextWindowRules: [ModelContextWindow]
+    let displayCurrency: PriceDisplayCurrency
     @State private var indexedContext: IndexedSessionContext?
     @State private var usage: IndexedSessionUsage?
     @State private var request: TranscriptPageRequest
@@ -96,11 +97,12 @@ struct SessionTranscript: View {
     }
 
     init(session: SessionListItem, store: AgentStore, search: SessionTranscriptSearch? = nil,
-         contextWindowRules: [ModelContextWindow] = []) {
+         contextWindowRules: [ModelContextWindow] = [], displayCurrency: PriceDisplayCurrency = .usd) {
         self.session = session
         self.store = store
         self.search = search
         self.contextWindowRules = contextWindowRules
+        self.displayCurrency = displayCurrency
         _request = State(initialValue: search.map { .around($0.firstMatchKey) } ?? .first)
     }
 
@@ -224,7 +226,7 @@ struct SessionTranscript: View {
                     .monospacedDigit().accessibilityIdentifier("session.usage.total")
                     .help(breakdown(usage.totals.counts))
                 if usage.totals.hasPricedUsage {
-                    let currency = PriceDisplayCurrency.usd.formattedMicroUSD(Decimal(usage.totals.costMicroUSD))
+                    let currency = displayCurrency.formattedMicroUSD(Decimal(usage.totals.costMicroUSD))
                     Text(usage.totals.unpricedTokens > 0 ? "Partial estimate: \(currency)" : "List-price estimate: \(currency)")
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("session.usage.cost")

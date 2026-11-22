@@ -25,10 +25,13 @@ struct MainWindow: View {
                 } detail: {
                     Group {
                         if let store = model.usageStore {
-                            TokenUsageEntry(store: store) {
+                            TokenUsageEntry(store: store, pricing: model.pricing, editRedlines: {
                                 model.settingsPage = .thresholds
                                 openSettings()
-                            }
+                            }, openPricing: {
+                                model.settingsPage = .pricing
+                                openSettings()
+                            })
                         } else {
                             EmptyPanel(title: "No token usage yet", symbol: "gauge.with.needle",
                                        message: "Usage and list-price estimates will appear after indexing.")
@@ -55,7 +58,8 @@ struct MainWindow: View {
                         if let session = model.selectedSession, let store = model.store,
                            !model.isSearchingSessions || search != nil {
                             SessionTranscript(session: session, store: store, search: search,
-                                              contextWindowRules: model.contextWindowRules)
+                                              contextWindowRules: model.contextWindowRules,
+                                              displayCurrency: model.pricing.currency)
                                 .id(TranscriptSelection(session: session.id, query: search?.query))
                         } else {
                             emptyDetail

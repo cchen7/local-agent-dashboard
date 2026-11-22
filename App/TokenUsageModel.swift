@@ -52,21 +52,22 @@ final class TokenUsageModel {
     var usageProjectID: Int64?
     var usageCustomStart = Date().addingTimeInterval(-3600)
     var usageCustomEnd = Date()
-    var usageCurrencyCode = "USD"
     private(set) var usagePage: UsagePageSnapshot?
     private(set) var liveUsageChart: UsageLiveChart?
     private(set) var usageLoading = false
     private(set) var usageError: LocalizedStringResource?
     private(set) var usageRedlines: [AgentKind: Int64] = [:]
     private(set) var projects: [UsageProjectOption] = []
-    private(set) var usageCurrencies: [PriceDisplayCurrency] = [.usd]
     private(set) var usageVersion: Int64 = 0
 
-    init(store: AgentStore) { self.store = store }
+    let pricing: PricingModel
 
-    var usageCurrency: PriceDisplayCurrency {
-        usageCurrencies.first(where: { $0.code == usageCurrencyCode }) ?? .usd
+    init(store: AgentStore, pricing: PricingModel) {
+        self.store = store
+        self.pricing = pricing
     }
+
+    var usageCurrency: PriceDisplayCurrency { pricing.currency }
 
     var usageRequest: UsageNavigationRequest {
         .init(period: usagePeriod, metric: usageMetric, grouping: usageGrouping,
@@ -77,12 +78,10 @@ final class TokenUsageModel {
     func observeUsage() async {
         let store = self.store
         let metadata = await Task.detached(priority: .utility) {
-            ((try? store.usageProjectOptions()) ?? [],
-             PriceDisplayCurrency.choices(BundledUsagePricing.table(in: store)?.displayCurrencies ?? []))
+            (try? store.usageProjectOptions()) ?? []
         }.value
         guard !Task.isCancelled else { return }
-        projects = metadata.0
-        usageCurrencies = metadata.1
+        projects = metadata
         do {
             for try await revision in store.usageUpdates() {
                 guard !Task.isCancelled else { return }
@@ -169,55 +168,21 @@ final class TokenUsageModel {
 struct TokenUsageEntry: View {
     @State private var model: TokenUsageModel
     let editRedlines: () -> Void
+    let openPricing: () -> Void
 
-    init(store: AgentStore, editRedlines: @escaping () -> Void) {
-        _model = State(initialValue: TokenUsageModel(store: store))
+    init(store: AgentStore, pricing: PricingModel, editRedlines: @escaping () -> Void,
+         openPricing: @escaping () -> Void) {
+        _model = State(initialValue: TokenUsageModel(store: store, pricing: pricing))
         self.editRedlines = editRedlines
+        self.openPricing = openPricing
     }
 
     var body: some View {
         let request = model.usageRequest
-        UsageView(model: model, editRedlines: editRedlines)
+        UsageView(model: model, editRedlines: editRedlines, openPricing: openPricing)
             .task { await model.observeUsage() }
             .task { await model.observeRedlines() }
             .task(id: request) { await model.loadUsage(request) }
-    }
-}
-
-enum BundledUsagePricing {
-    private static func candidate() -> (table: PriceTable, bytes: Data)? {
-        guard let resource = Bundle.main.url(forResource: "pricing", withExtension: "json"),
-              let bytes = try? Data(contentsOf: resource), let table = try? PriceTable.decode(bytes)
-        else { return nil }
-        return (table, bytes)
-    }
-
-    static func table(in store: AgentStore) -> PriceTable? {
-        if let bundled = candidate() { return bundled.table }
-        guard let cached = try? store.lastVerifiedPriceBytes() else { return nil }
-        return try? PriceTable.decode(cached)
-    }
-
-    /// Activate the verified bundled price table before imports are offered.
-    /// Older rows that already have a quote keep their stored rate basis.
-    static func activate(in store: AgentStore) {
-        let selected: PriceTable?
-        if let bundled = candidate() {
-            try? store.rememberVerifiedPriceBytes(bundled.bytes)
-            selected = bundled.table
-        } else {
-            selected = table(in: store)
-        }
-        guard let selected, let quoter = try? TokenQuoteEngine.make(table: selected),
-              let first = try? store.activatePricing(quoter) else { return }
-        Task.detached(priority: .utility) {
-            var next: UnpricedTokenSweep? = first
-            while let cursor = next, !Task.isCancelled {
-                guard let batch = try? store.backfillUnpriced(cursor) else { break }
-                next = batch.next
-                await Task.yield()
-            }
-        }
     }
 }
 

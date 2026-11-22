@@ -199,6 +199,24 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(element("usage.chart.plot").waitForExistence(timeout: 5))
     }
 
+    func testUnpricedUsageOpensPricingSettings() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let usage = window.staticTexts["Token Usage"].firstMatch
+        XCTAssertTrue(usage.waitForExistence(timeout: 5))
+        usage.click()
+        XCTAssertTrue(element("usage.presented").waitForExistence(timeout: 5), "Usage report did not load")
+        let link = element("usage.openPricing")
+        XCTAssertTrue(link.waitForExistence(timeout: 5), "The unpriced tokens link should have its own identifier")
+        link.click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        XCTAssertTrue(element("settings.pricing").waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.staticTexts["Bundled price table"].exists)
+        XCTAssertTrue(settings.staticTexts["synthetic-unpriced"].waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.buttons["Copy Unpriced Models"].exists)
+    }
+
     func testSessionOverviewShowsProgressAndMasksToolOutput() throws {
         app.launchEnvironment["AGENTDASH_SYNTHETIC_OVERVIEW"] = "1"
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)

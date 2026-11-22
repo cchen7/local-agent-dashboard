@@ -107,7 +107,7 @@ struct MenuBarPanel: View {
             tile("Today") {
                 Text(value.today.counts.total.formatted(.number.notation(.compactName)))
                 if value.today.hasPricedUsage {
-                    Text(PriceDisplayCurrency.usd.formattedMicroUSD(Decimal(value.today.costMicroUSD)))
+                    Text(model.pricing.currency.formattedMicroUSD(Decimal(value.today.costMicroUSD)))
                         .font(.caption2).foregroundStyle(.secondary)
                     if value.today.unpricedTokens > 0 { Text("Partial estimate").font(.caption2).foregroundStyle(.secondary) }
                 } else if value.today.unpricedTokens > 0 {

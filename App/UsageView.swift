@@ -8,6 +8,7 @@ import SwiftUI
 struct UsageView: View {
     @Bindable var model: TokenUsageModel
     let editRedlines: () -> Void
+    let openPricing: () -> Void
     private typealias Width = UsageBreakdownColumns
 
     var body: some View {
@@ -73,8 +74,8 @@ struct UsageView: View {
                     Text("All projects").tag(nil as Int64?)
                     ForEach(model.projects) { Text(verbatim: model.displayText($0.name)).tag(Optional($0.id)) }
                 }
-                if model.usageMetric == .cost, model.usageCurrencies.count > 1 {
-                    UsageCurrencyPicker(model: model)
+                if model.usageMetric == .cost, model.pricing.currencies.count > 1 {
+                    UsageCurrencyPicker(pricing: model.pricing)
                 }
             }
             if model.usagePeriod == .custom {
@@ -122,6 +123,7 @@ struct UsageView: View {
 
     private func readouts(_ value: UsagePageSnapshot, showCaptions: Bool) -> some View {
         HStack(alignment: .top, spacing: 8) { tiles(value, showCaptions: showCaptions) }
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier(showCaptions ? "usage.readouts.standard" : "usage.readouts.compact")
     }
 
@@ -160,8 +162,11 @@ struct UsageView: View {
                 }
             }
             if report.totals.unpricedTokens > 0 {
-                Text("\(report.totals.unpricedTokens.formatted()) unpriced tokens")
-                    .font(.caption).foregroundStyle(.secondary)
+                Button { openPricing() } label: {
+                    Text("\(report.totals.unpricedTokens.formatted()) unpriced tokens")
+                }
+                .buttonStyle(.link).font(.caption)
+                .accessibilityIdentifier("usage.openPricing")
             }
         }
         UsageTile(title: "Limit headroom") {
@@ -371,18 +376,18 @@ private struct UsageViewportLayout: Layout {
 }
 
 struct UsageCurrencyPicker: View {
-    @Bindable var model: TokenUsageModel
+    let pricing: PricingModel
 
     var body: some View {
         Picker("Display currency", selection: Binding(
-            get: { model.usageCurrency.code },
-            set: { model.usageCurrencyCode = $0 }
+            get: { pricing.currency.code },
+            set: { pricing.selectCurrency($0) }
         )) {
-            ForEach(model.usageCurrencies) { currency in
+            ForEach(pricing.currencies) { currency in
                 Text(verbatim: currency.code).tag(currency.code)
             }
         }
-        .help(model.usageCurrency.asOf.map { String(localized: "Static exchange rate dated \($0.rawValue)") } ?? "")
+        .help(pricing.currency.asOf.map { String(localized: "Static exchange rate dated \($0.rawValue)") } ?? "")
     }
 }
 
