@@ -147,6 +147,12 @@ or invalid XML, unsigned/invalid signatures and failed inspection never pass.
 It does not establish sandbox directory access, identity/notarization or runtime
 network behavior. Ad hoc signatures are accepted for development checks.
 
+For the final ZIP use `Tools/check-release-package` with the reviewed
+digest, source revision, Team ID and version/build. The command requires
+a Developer ID Application signature, a valid notarization staple and
+a successful macOS distribution assessment. It never signs or launches
+the App. See [Release verification](../docs/RELEASE-VERIFY.md).
+
 API/dependency commands accept `--root /explicit/repository` for synthetic tests
 or an explicitly authorized integration review.
 There is no entitlement-plist-only mode that can masquerade as an artifact check.

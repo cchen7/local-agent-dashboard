@@ -1225,6 +1225,7 @@ sources or request input permissions. See the [input QA matrix](reports/FIXED-IN
 - [ ] Minimum / default / large window screenshots match Figma
 - [ ] Light mode works
 - [ ] Cost: for each agent, 3 sessions hand-priced from the price table match the app
+- [ ] The exact final Developer ID ZIP matches the approved revision and digest, passes notarization and distribution checks, and first launch/reopen is verified on a clean account. See [Release verification](RELEASE-VERIFY.md).
 
 ---
 
