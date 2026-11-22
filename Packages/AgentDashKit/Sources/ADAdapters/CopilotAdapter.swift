@@ -85,6 +85,9 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
         var metadata = state.session ?? SessionRecord(key: .init(agent: .copilot, nativeID: id),
             sourceID: file.sourceID, fileID: context.fileID, environment: environment,
             startedAt: stamp, lastEventAt: stamp)
+        // Older checkpoints may contain an inferred first prompt. The
+        // indexed prompt fallback and the workspace title now own this.
+        metadata.title = nil
         if let stamp { metadata.lastEventAt = max(metadata.lastEventAt ?? stamp, stamp) }
         let key = metadata.key
         let lineID = Self.identifier(object?["id"]).map { "id:\($0.utf8.count):\($0)" } ?? "pos:\(frame.sequence)"
@@ -120,9 +123,6 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
         case "user.message", "assistant.message":
             if let text = AdapterJSON.string(data["content"]) {
                 let user = type == "user.message"
-                if user && metadata.title == nil && !child {
-                    metadata.title = AdapterJSON.prefix(text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text, bytes: 320)
-                }
                 records.append(event(user ? .user : .assistant, text))
             } else { unknown = true }
         case "tool.execution_start":

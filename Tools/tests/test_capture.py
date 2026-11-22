@@ -126,6 +126,21 @@ class CaptureTests(unittest.TestCase):
         self.assertNotEqual(a["cwd"], b["cwd"])
         self.assertTrue(a["cwd"].startswith("/Users/dev/"))
 
+    def test_copilot_workspace_capture_retains_only_anonymized_title_shapes(self):
+        source = self.source / "workspace.yaml"
+        original = b'id: synthetic-private-id\nname: |-\n  synthetic-private-name\nsummary: "synthetic-private-summary"\ncwd: /synthetic/private\n'
+        source.write_bytes(original)
+        output = self.destination / "workspace-shape.yaml"
+        capture.capture(source, output, self.source)
+        encoded = output.read_bytes()
+        self.assertTrue(encoded.startswith(b"name: |-\n  Synthetic"))
+        self.assertIn(b'summary: "Synthetic', encoded)
+        self.assertNotIn(b"synthetic-private", encoded)
+        self.assertNotIn(b"cwd", encoded)
+        self.assertEqual(source.read_bytes(), original)
+        marker = json.loads(output.with_suffix(".yaml.sanitized").read_text())
+        self.assertEqual(marker["sha256"], hashlib.sha256(encoded).hexdigest())
+
     def test_repeat_capture_is_deterministic(self):
         self.write([{"id": "synthetic-id", "text": "synthetic text", "cwd": "/tmp/synthetic"}])
         self.run_capture()

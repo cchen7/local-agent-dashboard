@@ -31,7 +31,7 @@ public enum JSONLFileImporter {
     throws -> JSONLImportResult {
         var versioned = file
         versioned.parserVersion = A.parserVersion
-        return try retrying(replay: replay) { reread in
+        let imported = try retrying(replay: replay) { reread in
             var decoder = try adapter.makeDecoder(for: versioned, in: source)
             return try importAttempt(versioned, authorizedRoot: authorizedRoot, expectedRoot: expectedRoot,
                                      encoding: adapter.storageEncoding(for: versioned), replay: reread, store: store,
@@ -39,6 +39,13 @@ public enum JSONLFileImporter {
                 try decoder.decode($0, context: $1)
             }
         }
+        if A.kind == .copilot, file.role == .session,
+           let title = CopilotWorkspaceTitle.read(forEventPath: file.relativePath, authorizedRoot: authorizedRoot,
+                                                 expectedRoot: expectedRoot) {
+            try Task.checkCancellation()
+            try store.refreshCopilotWorkspaceTitle(title, forFileID: imported.fileID)
+        }
+        return imported
     }
 
     /// Import one discovered file beneath a root the caller already authorized.

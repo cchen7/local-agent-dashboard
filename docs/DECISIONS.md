@@ -862,3 +862,16 @@ tables. It stages in the destination directory and atomically replaces only
 the external pricing file. Reject an unreadable or symlinked destination
 instead of silently overwriting evidence. No user price file is written by
 validation or inventory.
+
+## DEV-095 — Read Copilot's native workspace title (ADP-CP, FR-SR)
+
+Read only the title scalars of the optional sidecar next to a registered
+Copilot event file. Use the native `name`, then `summary`; malformed or
+absent sidecars preserve an already indexed title. A user title stays
+separate and wins. New Copilot records no longer copy the prompt into
+the agent title field; the ordinary first-prompt fallback remains in
+the index view.
+
+Map a sidecar notification only to an already known event file. On
+an unchanged event checkpoint, refresh the title without reading event
+bytes. A metadata-only workspace does not enter the transcript index.

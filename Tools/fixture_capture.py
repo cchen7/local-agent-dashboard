@@ -23,6 +23,7 @@ except ImportError:
     zstd = None  # Plain inputs do not require Python 3.14+.
 
 MAX_BYTES = 64 * 1024 * 1024
+MAX_WORKSPACE_BYTES = 256 * 1024
 MAX_ZSTD_WINDOW_LOG = 26  # 64 MiB decoder window; independent of output size.
 PROTECTED_NAMES = {".claude", ".codex", ".copilot", ".grok"}
 
@@ -293,6 +294,38 @@ def source_signature(path):
     return signature(path.stat())
 
 
+def workspace_title_fixture(raw):
+    """Capture the known Copilot scalar shapes, never any YAML values."""
+    result = []
+    found = set()
+    captured = 0
+    for line in raw.decode("utf-8", errors="strict").splitlines():
+        field = re.fullmatch(r"(name|summary):[ \t]*(.*)", line)
+        if not field:
+            continue
+        key, value = field.groups()
+        if key in found:
+            raise CaptureError("repeated workspace title field")
+        found.add(key)
+        value = value.strip()
+        if not value:
+            continue
+        if value.startswith('"'):
+            result.append(f"{key}: " + json.dumps('Synthetic "quoted" title \\ item'))
+        elif value.startswith("'"):
+            result.append(f"{key}: 'Synthetic ''quoted'' title'")
+        elif value in {"|", "|-", "|+", ">", ">-", ">+"}:
+            result.extend((f"{key}: {value}", "  Synthetic block title", "  with continuation"))
+        elif value[:1] not in ("|", ">", "!", "*", "&", "[", "{", "#"):
+            result.append(f"{key}: Synthetic ordinary title")
+        else:
+            continue
+        captured += 1
+    if not result:
+        raise CaptureError("no supported workspace title scalar")
+    return ("\n".join(result) + "\n").encode("utf-8"), captured
+
+
 def reject_protected_destination(path):
     """Check spelled, canonical and intermediate symlink-target ancestry.
 
@@ -325,8 +358,8 @@ def paths(input_path, output_path, source_root):
     if not root.is_dir() or not within(source, root):
         raise CaptureError("input must be inside the declared source root")
     suffix = ".jsonl" if source.name.endswith(".jsonl.zst") else source.suffix
-    if not source.is_file() or suffix not in {".json", ".jsonl"}:
-        raise CaptureError("input must be a regular .json, .jsonl or .jsonl.zst file")
+    if not source.is_file() or (suffix not in {".json", ".jsonl"} and source.name != "workspace.yaml"):
+        raise CaptureError("input must be a regular .json, .jsonl, .jsonl.zst or workspace.yaml file")
     if output.suffix != suffix:
         raise CaptureError(f"output extension must be {suffix}; fixtures are always uncompressed")
     boundaries = [root, source.parent]
@@ -390,24 +423,30 @@ def capture(input_path, output_path, source_root=None):
                 raise CaptureError("input must be a regular file")
             if signature(os.fstat(handle.fileno())) != before:
                 raise CaptureError("source changed before capture could begin")
-            raw = handle.read(MAX_BYTES + 1)
+            limit = MAX_WORKSPACE_BYTES if suffix == ".yaml" else MAX_BYTES
+            raw = handle.read(limit + 1)
             if signature(os.fstat(handle.fileno())) != before:
                 raise CaptureError("source changed while being read")
-        if len(raw) > MAX_BYTES:
-            raise CaptureError("input exceeds the 64 MiB capture limit; select a smaller reviewed source")
-        if source.suffix == ".zst":
-            raw = decompress_jsonl(raw)
-        records = parse_records(raw, suffix)
-        sanitizer = Sanitizer()
-        sanitized = [sanitizer.transform(record) for record in records]
-        encoded = encode_records(sanitized, suffix)
-        validate_sanitized(records, sanitized, encoded, suffix)
+        if len(raw) > limit:
+            raise CaptureError("input exceeds its format's capture limit; select a smaller reviewed source")
+        if suffix == ".yaml":
+            encoded, record_count = workspace_title_fixture(raw)
+        else:
+            if source.suffix == ".zst":
+                raw = decompress_jsonl(raw)
+            records = parse_records(raw, suffix)
+            sanitizer = Sanitizer()
+            sanitized = [sanitizer.transform(record) for record in records]
+            encoded = encode_records(sanitized, suffix)
+            validate_sanitized(records, sanitized, encoded, suffix)
+            record_count = len(records)
         if source_signature(source) != before:
             raise CaptureError("source changed during capture; retry on a stable file")
         if signature(os.stat(output.parent, follow_symlinks=False))[:2] != parent_identity:
             raise CaptureError("output parent changed during capture")
         marker_bytes = (json.dumps({"sanitizer_version": 1, "sha256": hashlib.sha256(encoded).hexdigest(),
-            "records": len(records), "unicode_length": "code-points", "review_required": True}, indent=2) + "\n").encode()
+            "records": record_count, "unicode_length": "not-retained" if suffix == ".yaml" else "code-points",
+            "review_required": True}, indent=2) + "\n").encode()
         stages.append(write_stage(parent_fd, encoded))
         stages.append(write_stage(parent_fd, marker_bytes))
         # Hard-link publication is atomic and refuses an existing destination.
@@ -438,7 +477,7 @@ def capture(input_path, output_path, source_root=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sanitize one JSON, JSONL or .jsonl.zst file into a new fixture.")
+    parser = argparse.ArgumentParser(description="Sanitize one JSON, JSONL, .jsonl.zst, or Copilot workspace.yaml into a new fixture.")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--source-root", type=Path,

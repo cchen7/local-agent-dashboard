@@ -50,6 +50,30 @@ public enum SessionTitleRules {
 }
 
 public extension AgentStore {
+    /// A workspace sidecar only supplies a title to the session already bound
+    /// to its event file. Never update a user's independent title override.
+    func refreshCopilotWorkspaceTitle(_ title: String, forFileID fileID: Int64) throws {
+        var bounded = ""
+        var bytes = 0
+        for character in title.prefix(SessionTitleRules.maximumCharacters) {
+            let added = String(character).utf8.count
+            if bytes + added > 512 { break }
+            bounded.append(character)
+            bytes += added
+        }
+        guard let validated = SessionTitleRules.validatedCustomTitle(bounded) else { return }
+        try databasePool.write { db in
+            let value = try IndexSecretRedaction.enabled(db) ? IndexSecretMasker.text(validated) : validated
+            try db.execute(sql: """
+                UPDATE sessions SET title=?, title_source='agent'
+                WHERE agent='copilot' AND file_id=?
+                  AND source_id=(SELECT f.source_id FROM source_files f JOIN sources s ON s.id=f.source_id
+                    WHERE f.id=? AND f.role='session' AND s.agent='copilot' AND s.removed=0)
+                  AND (title IS NOT ? OR title_source IS NOT 'agent')
+                """, arguments: [value, fileID, fileID, value])
+        }
+    }
+
     /// An optional override in the owned index. Nil resumes automatic titles.
     /// Imported/replayed session metadata never writes this column.
     func setCustomSessionTitle(_ rawTitle: String?, for key: SessionKey) async throws {

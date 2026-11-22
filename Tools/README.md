@@ -164,6 +164,10 @@ Tools/fixture-capture \
 ```
 
 Use the full agent/source root for `--source-root`, especially custom sources.
+For Copilot's `workspace.yaml`, choose a new `.yaml` output instead.
+This narrow mode records only the shapes of the `name` and `summary`
+scalars. It replaces their values with fixed synthetic text and drops
+all other fields; it is not a general YAML sanitizer.
 If omitted, the input parent is the boundary. The input parent and any protected
 input ancestor are always additional boundaries. Independently of the input's
 location, output and marker ancestry must never contain a directory named

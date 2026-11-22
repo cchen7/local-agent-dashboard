@@ -308,7 +308,12 @@ The normalized stream keeps typed turn/shutdown evidence and uses
 `modelMetrics.<model>.usage` snapshots retain their file position; the
 app-owned store subtracts earlier exact calls to avoid double counting.
 Per-call and child-event accounting are covered by synthetic fixtures.
-This import does not parse `workspace.yaml` or the optional metadata DB.
+Event-backed Copilot workspaces expose the native title as top-level
+`name`, with an optional top-level `summary`. The observed strings used
+plain scalars, single or double quotes, and literal `|-` blocks. The
+sanitized title fixtures keep only those shapes; every value is replaced
+with fixed synthetic text. This is a small scalar subset, not arbitrary YAML
+or optional metadata DB support. Prefer a usable `name` over the summary.
 
 A native `workspace.yaml` updated timestamp does not establish that a
 supported event stream is present. The default source can retain workspace

@@ -7,6 +7,64 @@ import Testing
 
 private enum SourceIndexTestFailure: Error { case noCompletedScan }
 
+@Test("FR-SR: a Copilot workspace title updates without transcript replay and never overrides a user title",
+      .timeLimit(.minutes(1)))
+func copilotWorkspaceRenameWithoutEventReplay() async throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("copilot-title-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let root = temp.appendingPathComponent("synthetic-source")
+    let recognized = root.appendingPathComponent("session-state/local-session")
+    let metadataOnly = root.appendingPathComponent("session-state/metadata-only")
+    try FileManager.default.createDirectory(at: recognized, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: metadataOnly, withIntermediateDirectories: true)
+    let streamFile = recognized.appendingPathComponent("events.jsonl")
+    let payload = Data(("""
+        {"type":"session.start","id":"start","data":{"sessionId":"local-session"}}
+        {"type":"user.message","id":"prompt","data":{"content":"Synthetic first prompt"}}
+        """ + "\n").utf8)
+    try payload.write(to: streamFile)
+    let sidecar = recognized.appendingPathComponent("workspace.yaml")
+    try Data("name: |-\n  Native title\n  continuation\n".utf8).write(to: sidecar)
+    try Data("name: No event file here\n".utf8).write(to: metadataOnly.appendingPathComponent("workspace.yaml"))
+
+    let store = try AgentStore(databaseURL: temp.appendingPathComponent("index.sqlite"))
+    var entry = Source(agent: .copilot, label: "Synthetic", rootURL: root)
+    entry.id = try store.upsertSource(entry)
+    let source = entry
+    let key = SessionKey(agent: .copilot, nativeID: "local-session")
+    let updates = AsyncStream<SourceIndexUpdate>.makeStream(bufferingPolicy: .bufferingNewest(12))
+    let worker = Task {
+        defer { updates.continuation.finish() }
+        try await JSONLSourceIndexing.run(source: source, authorizedRoot: root, adapter: CopilotAdapter(), store: store) {
+            updates.continuation.yield($0)
+        }
+    }
+    defer { worker.cancel() }
+    func sessions() async throws -> [IndexedSession] {
+        var iterator = store.indexedSessionUpdates().makeAsyncIterator()
+        return try #require(try await iterator.next())
+    }
+    let initial = try await watchCompletedScan(updates.stream) { $0.bytesRead > 0 }
+    #expect(initial.totalFiles == 1 && initial.failedFiles == 0)
+    let first = try await sessions()
+    #expect(first.count == 1 && first.first?.title == "Native title continuation" && first.first?.titleSource == .agent)
+    let events = try store.events(in: key)
+
+    try await store.setCustomSessionTitle("User override", for: key)
+    try Data("name: 'Changed ''native'' title'\n".utf8).write(to: sidecar, options: .atomic)
+    let updated = try await watchCompletedScan(updates.stream) { $0.bytesRead == 0 && $0.checkedFiles == 1 }
+    #expect(updated.failedFiles == 0)
+    let overridden = try await sessions()
+    #expect(overridden.first?.title == "User override" && overridden.first?.titleSource == .user)
+    try await store.setCustomSessionTitle(nil, for: key)
+    let restored = try await sessions()
+    #expect(restored.first?.title == "Changed 'native' title" && restored.first?.titleSource == .agent)
+    #expect(try store.events(in: key) == events)
+    #expect(try Data(contentsOf: streamFile) == payload)
+    worker.cancel()
+    do { try await worker.value } catch is CancellationError {}
+}
+
 @Test("FR-SRC-2: a native source session imports only after start and observes appends and newly discovered files",
       .timeLimit(.minutes(1)))
 func selectedSourceIndexesAndWatchesUntilCancelled() async throws {

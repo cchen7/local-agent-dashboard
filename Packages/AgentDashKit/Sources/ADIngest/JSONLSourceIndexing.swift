@@ -49,7 +49,7 @@ public enum JSONLSourceIndexing {
         switch mode {
         case .follow:
             watcher = try FSEventsWatcher(authorizedRoot: authorizedRoot) { signal in
-                let enqueued = pending.withLock { $0.record(signal) }
+                let enqueued = pending.withLock { $0.record(signal, copilotWorkspaces: A.kind == .copilot) }
                 if enqueued { wake.continuation.yield(()) }
             }
             requests = rescans.map { requests in
@@ -182,7 +182,10 @@ public enum JSONLSourceIndexing {
                 onUpdate(.watching(try scan(Array(known.values), fullDiscovery: true, replay: request.replay)))
             } else {
                 // A notification alone never authorizes a new file.
-                onUpdate(.watching(try scan(request.files.compactMap { known[$0] })))
+                let relevant = request.files.union(request.workspaceFiles.filter { known[$0] != nil })
+                if !relevant.isEmpty {
+                    onUpdate(.watching(try scan(relevant.compactMap { known[$0] })))
+                }
             }
         }
         try Task.checkCancellation()
@@ -193,26 +196,33 @@ private struct PendingSourceChanges: Sendable {
     private(set) var rescan = false
     private(set) var replay = false
     private(set) var files: Set<FSEventsWatcher.FileID> = []
-    var isEmpty: Bool { !rescan && files.isEmpty }
+    private(set) var workspaceFiles: Set<FSEventsWatcher.FileID> = []
+    var isEmpty: Bool { !rescan && files.isEmpty && workspaceFiles.isEmpty }
 
     mutating func requestReplay() {
         replay = true
         rescan = true
         files.removeAll(keepingCapacity: true)
+        workspaceFiles.removeAll(keepingCapacity: true)
     }
 
-    mutating func record(_ signal: FSEventsWatcher.Signal) -> Bool {
+    mutating func record(_ signal: FSEventsWatcher.Signal, copilotWorkspaces: Bool) -> Bool {
         switch signal {
         case .rescanRequired:
             rescan = true
             files.removeAll(keepingCapacity: true)
+            workspaceFiles.removeAll(keepingCapacity: true)
         case .fileChanged(let key):
-            guard key.relativePath.hasSuffix(".jsonl") || key.relativePath.hasSuffix(".jsonl.zst") else { return false }
+            let workspaceEvent = copilotWorkspaces ? CopilotWorkspaceTitle.eventPath(forWorkspacePath: key.relativePath) : nil
+            guard workspaceEvent != nil || key.relativePath.hasSuffix(".jsonl") || key.relativePath.hasSuffix(".jsonl.zst")
+            else { return false }
             if !rescan {
-                files.insert(key)
-                if files.count > 256 {
+                if let workspaceEvent { workspaceFiles.insert(.init(relativePath: workspaceEvent)) }
+                else { files.insert(key) }
+                if files.count + workspaceFiles.count > 256 {
                     rescan = true
                     files.removeAll(keepingCapacity: true)
+                    workspaceFiles.removeAll(keepingCapacity: true)
                 }
             }
         }
