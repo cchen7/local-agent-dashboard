@@ -932,13 +932,16 @@ final class SmokeTests: XCTestCase {
         _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
         openLibrary("tokens")
         XCTAssertTrue(element("usage.presented").waitForExistence(timeout: 5))
-        XCTAssertTrue(element("usage.chart.plot").waitForExistence(timeout: 5))
-        let metric = app.popUpButtons["Metric"].firstMatch
+        let chart = element("usage.chart")
+        let tokenAxis = chart.staticTexts["Tokens per minute"]
+        XCTAssertTrue(tokenAxis.waitForExistence(timeout: 5))
+        let metric = element("usage.metric")
         XCTAssertTrue(metric.waitForExistence(timeout: 3))
         metric.click()
         app.menuItems["Cost"].click()
         XCTAssertTrue(app.staticTexts["Peak spend rate"].waitForExistence(timeout: 5))
-        XCTAssertTrue(element("usage.chart.plot").waitForExistence(timeout: 5))
+        XCTAssertTrue(chart.staticTexts["USD per hour"].waitForExistence(timeout: 5))
+        XCTAssertFalse(tokenAxis.exists)
     }
 
     func testUnpricedUsageOpensPricingSettings() throws {

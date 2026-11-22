@@ -67,6 +67,7 @@ struct UsageView: View {
                     Text("Output only").tag(UsageMetric.output)
                     Text("Cost").tag(UsageMetric.cost)
                 }
+                .accessibilityIdentifier("usage.metric")
                 Picker("Agent", selection: $model.usageAgent) {
                     Text("All agents").tag(nil as AgentKind?)
                     ForEach(AgentKind.allCases, id: \.self) { Text($0.title).tag(Optional($0)) }
@@ -562,7 +563,6 @@ struct UsageChart: View {
             chart.frame(minHeight: DashboardLayoutRules.minimumPlotHeight, idealHeight: DashboardLayoutRules.minimumPlotHeight,
                         maxHeight: .infinity)
                 .layoutPriority(1)
-                .accessibilityIdentifier("usage.chart.plot")
             let overflow = peaks.filter { peakOverflow.contains($0.id) }
             if !overflow.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
@@ -584,6 +584,7 @@ struct UsageChart: View {
             if let hovered { hoverValues(hovered) }
         }
         .padding(12).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("usage.chart")
     }
 
