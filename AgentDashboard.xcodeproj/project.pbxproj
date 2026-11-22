@@ -76,6 +76,10 @@
 		2B591F16733271636F8467C5 = {
 			isa = PBXBuildFile; fileRef = 323361D59B06F84B9DA7AC45;
 		};
+		AD5100000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionActivityBar.swift"; sourceTree = "<group>"; };
+		AD5100000000000000000002 = { isa = PBXBuildFile; fileRef = AD5100000000000000000001; };
+		AD5000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionActionFooter.swift"; sourceTree = "<group>"; };
+		AD5000000000000000000002 = { isa = PBXBuildFile; fileRef = AD5000000000000000000001; };
 		AD4700000000000000000001 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SessionBrowser.swift"; sourceTree = "<group>";
 		};
@@ -126,6 +130,8 @@
 		3FA65313F3EE7C23D31896E7 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>";
 		};
+		AD5200000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixedKeyboardTests.swift; sourceTree = "<group>"; };
+		AD5200000000000000000002 = { isa = PBXBuildFile; fileRef = AD5200000000000000000001; };
 		C9F6181A603CEC80DBFCC70D = {
 			isa = PBXBuildFile; fileRef = 3FA65313F3EE7C23D31896E7;
 		};
@@ -146,7 +152,7 @@
 				F559CE7892B061A053E0DA39,
 				D6CA445C859407AE720EE507,
 				323361D59B06F84B9DA7AC45,
-				AD4700000000000000000001,
+				AD4700000000000000000001, AD5000000000000000000001, AD5100000000000000000001,
 				AD4800000000000000000003,
 				48B9829DDB297129458B3902,
 				03AF56BE2C9FDF9DEFBDE818,
@@ -171,7 +177,7 @@
 		};
 		C4DF94A42CA730B26E01C133 = {
 			isa = PBXGroup; children = (
-				3FA65313F3EE7C23D31896E7,
+				3FA65313F3EE7C23D31896E7, AD5200000000000000000001,
 			); path = Tests; sourceTree = "<group>";
 		};
 		B9E7F2871A3402983868AFC8 = {
@@ -194,7 +200,7 @@
 				3916FD5CC53B5054B39B6967,
 				F4C4CACC3F158EBB5F3C42EE,
 				2B591F16733271636F8467C5,
-				AD4700000000000000000002,
+				AD4700000000000000000002, AD5000000000000000000002, AD5100000000000000000002,
 				AD4800000000000000000004,
 				C497F0C95670E0D8F1966C44,
 				D2740EFD5804A93FE8C32426,
@@ -221,7 +227,7 @@
 		};
 		DEE94446A282611C16F7781C = {
 			isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (
-				C9F6181A603CEC80DBFCC70D,
+				C9F6181A603CEC80DBFCC70D, AD5200000000000000000002,
 			); runOnlyForDeploymentPostprocessing = 0;
 		};
 		1F030AB36D1A3A4389CF71AE = {

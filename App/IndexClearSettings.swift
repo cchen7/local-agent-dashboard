@@ -67,7 +67,9 @@ struct IndexClearSettingsSection: View {
             let scope = plan.label.map(model.displayText) ?? String(localized: "Everything")
             let counts = String(localized: "Sessions to clear: \(plan.sessionCount). Files to recheck on the next scan: \(plan.fileCount).")
             let detail = String(localized: "Clears local transcripts and attributed usage. Original files, source access and settings are kept. Archived sessions may not be recoverable.")
-            Text(verbatim: [scope, counts, detail].joined(separator: "\n\n"))
+            let retained = plan.retainedRecordCount > 0
+                ? String(localized: "Retained usage entries to clear: \(plan.retainedRecordCount).") : nil
+            Text(verbatim: [scope, counts, retained, detail].compactMap { $0 }.joined(separator: "\n\n"))
         }
     }
 
@@ -115,5 +117,91 @@ struct IndexClearSettingsSection: View {
         case .indexingActive: message = "Stop indexing before clearing data."
         case nil: message = "Could not clear the local index."
         }
+    }
+}
+
+struct ArchiveRetentionSettingsSection: View {
+    let model: DashboardModel
+    @State private var pending: ArchiveRetention?
+    @State private var expired: Int?
+    @State private var failed = false
+
+    var body: some View {
+        Section("Archive retention") {
+            Picker("Keep archived sessions", selection: Binding(get: { model.archiveRetention }, set: { value in
+                if value == .forever { apply(value) }
+                else { pending = value }
+            })) {
+                ForEach(ArchiveRetention.allCases, id: \.self) { policy in Text(label(policy)).tag(policy) }
+            }
+            .accessibilityIdentifier("storage.archiveRetention")
+            .disabled(!model.canClearIndex)
+            Text("Age is measured from confirmed archival. Expiry removes transcripts from the index and keeps historical token and cost totals.")
+                .foregroundStyle(.secondary)
+            if let expired, expired > 0 { Text("Expired archived sessions: \(expired)").foregroundStyle(.secondary) }
+            if failed || model.archiveMaintenanceFailed {
+                Text("Archive retention could not be applied.").foregroundStyle(.red)
+            }
+        }
+        .alert("Apply Archive Retention?", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+               presenting: pending) { policy in
+            Button("Apply Archive Retention", role: .destructive) { apply(policy) }
+            Button("Cancel", role: .cancel) {}
+        } message: { policy in
+            Text("Archived transcripts at least \(policy.rawValue) days old may be removed from this local index. Usage totals and original files are kept.")
+        }
+    }
+
+    private func label(_ policy: ArchiveRetention) -> LocalizedStringResource {
+        switch policy {
+        case .forever: "Forever"
+        case .oneYear, .halfYear, .quarterYear: "\(policy.rawValue) days"
+        }
+    }
+
+    private func apply(_ policy: ArchiveRetention) {
+        failed = false
+        Task {
+            do { expired = try await model.setArchiveRetention(policy) }
+            catch { failed = true }
+        }
+    }
+}
+
+struct ToolOutputSettingsSection: View {
+    let model: DashboardModel
+    @State private var pending: ToolOutputArchiveLimit?
+    @State private var failed = false
+
+    var body: some View {
+        Section("Tool output archive") {
+            Picker("Compressed limit per output", selection: Binding(get: { model.toolOutputLimit }, set: { limit in
+                if limit.rawValue < model.toolOutputLimit.rawValue { pending = limit }
+                else { apply(limit) }
+            })) {
+                ForEach(ToolOutputArchiveLimit.allCases, id: \.self) { limit in Text(label(limit)).tag(limit) }
+            }
+            .accessibilityIdentifier("storage.toolOutputLimit")
+            .disabled(!model.canClearIndex)
+            Text("Search uses a short preview. Larger output can be read from the original when available.")
+                .foregroundStyle(.secondary)
+            if failed { Text("Could not save the tool output limit.").foregroundStyle(.red) }
+        }
+        .alert("Reduce Tool Output Archive?", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+               presenting: pending) { limit in
+            Button("Apply Tool Output Limit", role: .destructive) { apply(limit) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Local archives larger than the new limit will be removed. Search previews and original files stay unchanged.")
+        }
+    }
+
+    private func label(_ limit: ToolOutputArchiveLimit) -> LocalizedStringResource {
+        if limit == .previewOnly { return "Searchable preview only" }
+        return "\(limit.rawValue / 1024) KiB"
+    }
+
+    private func apply(_ limit: ToolOutputArchiveLimit) {
+        Task { failed = !(await model.setToolOutputLimit(limit)) }
     }
 }

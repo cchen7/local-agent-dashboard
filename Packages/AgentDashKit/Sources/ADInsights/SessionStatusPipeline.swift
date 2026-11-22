@@ -79,11 +79,35 @@ public actor SessionStatusPipeline {
                 let signals = ActivityProjection.signals(item)
                 let result = engine.infer(signals, nowMilliseconds: now)
                 let nextAt = nextDeadline(result, now: now)
-                updates.append(.init(id: item.id, revision: item.revision, status: result.status, reason: result.reason.rawValue, nextAt: nextAt))
+                updates.append(.init(id: item.id, revision: item.revision, status: result.status,
+                                     reason: result.reason.rawValue, nextAt: nextAt,
+                                     activity: runningActivity(result)))
             }
             changed += try store.applyStatuses(updates, policy: policy)
             after = last.id
         }
+    }
+
+    private func runningActivity(_ result: StatusInferenceResult) -> PersistedRunningActivity? {
+        guard result.status == .running else { return nil }
+        let evidence = result.evidence
+        let lastEventAt = evidence.latestActivity.flatMap {
+            $0.ageMilliseconds == nil || $0.ageOverflowed ? nil : $0.timestampMilliseconds
+        }
+        if evidence.latestActivity?.signal.kind != .turnEnded,
+           let call = evidence.pendingTools.last(where: {
+               guard let age = $0.call.ageMilliseconds else { return false }
+               return !$0.call.ageOverflowed && age <= engine.thresholds.pendingToolLifetimeMilliseconds
+           })?.call, let callEventID = call.signal.eventID {
+            return .init(action: .pendingTool, callEventID: callEventID, startedAt: call.timestampMilliseconds,
+                         lastEventAt: lastEventAt)
+        }
+        let action: PersistedRunningActivity.Action = switch evidence.latestActivity?.signal.kind {
+        case .turnEnded: .turnFinished
+        case .toolResult: .toolFinished
+        default: .recentActivity
+        }
+        return .init(action: action, lastEventAt: lastEventAt)
     }
 
     private func nextDeadline(_ result: StatusInferenceResult, now: Int64) -> Int64? {
@@ -136,7 +160,7 @@ private enum ActivityProjection {
             } else { metadata = [:] }
             if boolean(metadata["child_activity"]) == true { continue }
             let signal = metadata["signal"] as? String
-            let callID = (metadata["call_id"] ?? metadata["tool_use_id"]) as? String
+            let callID = (metadata["call_id"] as? String) ?? (metadata["tool_use_id"] as? String)
             var kind: StatusActivitySignal.Kind?
             switch event.kind {
             case .user: kind = .activity
@@ -166,7 +190,10 @@ private enum ActivityProjection {
                 }
             case .promptHistory, .thinking, .unknown: break
             }
-            if let kind { result.append(.init(sequence: event.sequence, timestampMilliseconds: event.timestamp, kind: kind)) }
+            if let kind {
+                result.append(.init(sequence: event.sequence, timestampMilliseconds: event.timestamp,
+                                    kind: kind, eventID: event.id))
+            }
         }
         return result
     }

@@ -31,6 +31,12 @@ The app is **fully local and never touches the network.**
 
 Changing any of these needs explicit approval from the product owner. Do not implement it; raise it as a question in the PR.
 
+## Hard rules for keyboard input tests
+
+- **Fix one Apple input source per run.** For real keyboard tests, use macOS's built-in ABC for ASCII and shortcuts, or Apple's built-in Pinyin – Simplified for real Chinese typing. The required source must already be selected before the run and remain fixed throughout it.
+- **Never use third-party input methods.** Do not enumerate, cycle, switch, enable or disable input sources, or request input-source permissions. Third-party input method compatibility is out of scope. Avoid text injection helpers that can select or restore an input source on their own.
+- **Keep both kinds of Chinese coverage.** Routine unattended UI tests prefill Chinese in the real search field using synthetic data, then cover search, results and navigation with UI controls. Separately verify actual Pinyin composition and commit into that same field. For any actual-keyboard test, if the fixed source, target focus or existing event access cannot be verified, send no keys and record that case as unverified.
+
 ## Workflow
 
 1. Take the next task from the current milestone (SPEC §16). Keep changes small and focused.

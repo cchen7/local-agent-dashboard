@@ -37,6 +37,10 @@ final class DashboardModel {
     private(set) var privacyRevision: UInt64 = 0
     private(set) var changingPrivacy = false
     private(set) var clearingIndex = false
+    private(set) var archiveRetention: ArchiveRetention = .forever
+    private(set) var toolOutputLimit: ToolOutputArchiveLimit = .standard
+    private(set) var archiveMaintenanceFailed = false
+    @ObservationIgnored private var archiveTask: Task<Void, Never>?
     private(set) var editingSourceIDs: Set<Int64> = []
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
@@ -62,6 +66,10 @@ final class DashboardModel {
     private(set) var savingStatusThresholds = false
     private static let statusPreferenceKey = "statusInferenceThresholdsSeconds"
     private var synthetic: Bool { CommandLine.arguments.contains("--synthetic") }
+    nonisolated private static var syntheticActivity: Bool {
+        CommandLine.arguments.contains("--synthetic") &&
+            ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_ACTIVITY"] == "1"
+    }
     private(set) var store: AgentStore?
     var usageStore: AgentStore? { store }
     var sessionSearchText = "" {
@@ -149,7 +157,11 @@ final class DashboardModel {
                 }
                 // This writes only app-owned configuration. No source directory is read at launch.
                 if !defaults.isEmpty { try store.installDefaultSources(defaults) }
-                if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
+                if Self.syntheticActivity {
+                    try Self.seedSessionActivity(store, in: directory)
+                } else if synthetic && ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_TOOL_PAIR"] == "1" {
+                    try Self.seedTranscriptToolPair(store, in: directory)
+                } else if synthetic && CommandLine.arguments.contains("--synthetic-projects") {
                     try Self.seedProjects(store)
                 } else if synthetic && CommandLine.arguments.contains("--synthetic-sessions") {
                     try Self.seedSessions(store, in: directory)
@@ -161,10 +173,20 @@ final class DashboardModel {
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
                                            : needsOnboarding
+                let retention = try store.archiveRetention()
+                if retention != .forever {
+                    _ = try store.expireArchivedSessions(now: Self.archiveNow(), hostHome: home)
+                }
                 return (store, try store.sources(), home, onboarding, runtime, initialPricing,
                         try store.displaySecretMaskingEnabled(), try store.indexSecretRedactionEnabled(),
-                        try store.sessionExclusionPatterns(), try store.indexThinkingBlocksEnabled())
+                        try store.sessionExclusionPatterns(), try store.indexThinkingBlocksEnabled(), retention,
+                        try store.toolOutputArchiveLimit())
             }.value
+            if CommandLine.arguments.contains("--synthetic"),
+               let query = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_QUERY"],
+               query.utf8.count <= 512 {
+                sessionSearchText = query
+            }
             store = result.0
             sources = result.1
             searchHome = result.2
@@ -173,13 +195,16 @@ final class DashboardModel {
             redactIndexSecrets = result.7
             sessionExclusions = result.8
             indexThinkingBlocks = result.9
+            archiveRetention = result.10
+            toolOutputLimit = result.11
+            scheduleArchiveMaintenance()
             pricing.attach(store: result.0, runtime: result.4, initial: result.5)
             if !synthetic, let data = UserDefaults.standard.data(forKey: Self.contextWindowPreferenceKey),
                data.count <= 131_072, let rules = try? JSONDecoder().decode([ModelContextWindow].self, from: data),
                ModelContextWindow.areValid(rules) {
                 contextWindowRules = rules
             }
-            if !synthetic || CommandLine.arguments.contains("--synthetic-status") {
+            if !synthetic || Self.syntheticActivity || CommandLine.arguments.contains("--synthetic-status") {
                 statusThresholds = loadStatusThresholds()
                 let initial = statusThresholds
                 let pipeline = SessionStatusPipeline(store: result.0)
@@ -413,6 +438,61 @@ final class DashboardModel {
         return result
     }
 
+    nonisolated static func archiveNow() -> Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
+
+    func setArchiveRetention(_ policy: ArchiveRetention, now: Int64 = DashboardModel.archiveNow()) async throws -> Int {
+        guard canClearIndex, let store else { throw IndexClearError.indexingActive }
+        clearingIndex = true
+        defer { clearingIndex = false }
+        let home = searchHome
+        let removed = try await Task.detached(priority: .utility) {
+            try store.setArchiveRetention(policy, now: now, hostHome: home)
+        }.value
+        archiveRetention = policy
+        archiveMaintenanceFailed = false
+        scheduleArchiveMaintenance()
+        if removed > 0 { invalidateTextPresentation() }
+        return removed
+    }
+
+    func setToolOutputLimit(_ limit: ToolOutputArchiveLimit) async -> Bool {
+        guard canClearIndex, let store else { return false }
+        clearingIndex = true
+        defer { clearingIndex = false }
+        do {
+            let changed = try await Task.detached(priority: .utility) {
+                try store.setToolOutputArchiveLimit(limit)
+            }.value
+            toolOutputLimit = limit
+            if changed { invalidateTextPresentation() }
+            return true
+        } catch { return false }
+    }
+
+    private func scheduleArchiveMaintenance() {
+        archiveTask?.cancel()
+        guard archiveRetention != .forever else { archiveTask = nil; return }
+        archiveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(3_600)) } catch { return }
+                await self?.runArchiveMaintenance()
+            }
+        }
+    }
+
+    private func runArchiveMaintenance() async {
+        guard let store, archiveRetention != .forever else { return }
+        let now = Self.archiveNow()
+        let home = searchHome
+        do {
+            let removed = try await Task.detached(priority: .utility) {
+                try store.expireArchivedSessions(now: now, hostHome: home)
+            }.value
+            archiveMaintenanceFailed = false
+            if removed > 0 { invalidateTextPresentation() }
+        } catch { archiveMaintenanceFailed = true }
+    }
+
     private func invalidateTextPresentation() {
         sessions = []
         visibleSessions = []
@@ -476,6 +556,46 @@ final class DashboardModel {
         setLibraryFilter(group.libraryFilter)
     }
 
+    nonisolated private static func seedTranscriptToolPair(_ store: AgentStore, in directory: URL) throws {
+        let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic tool pair",
+            rootURL: directory.appendingPathComponent("unused-source")))
+        let key = SessionKey(agent: .codex, nativeID: "preview-tool-pair")
+        let time = Int64(Date().timeIntervalSince1970 * 1000)
+        let preview = "Synthetic tool returned a result\nfoldedresult"
+        let full = preview + "\nPAIR_TOKEN=synthetic-pair-secret\n" +
+            "Synthetic archived output. " + String(repeating: "Archived detail. ", count: 170)
+        var records: [NormalizedRecord] = [
+            .session(.init(key: key, sourceID: source, environment: "Synthetic", cwd: "/synthetic/tool-pair",
+                           title: "Synthetic folded tool", startedAt: time, lastEventAt: time)),
+            .event(.init(session: key, sequence: 0, timestamp: time, kind: .toolCall, toolName: "exec_command",
+                         text: #"{"cmd":"npm test -- auth","API_TOKEN":"synthetic-pair-input"}"#,
+                         metadataJSON: #"{"call_id":"synthetic-pair"}"#,
+                         dedupeKey: "preview:pair:call")),
+        ]
+        records += (1...130).map {
+            .event(.init(session: key, sequence: Int64($0), timestamp: time, kind: .assistant,
+                         text: "Synthetic interleaved message \($0)", dedupeKey: "preview:pair:filler:\($0)"))
+        }
+        records.append(.event(.init(session: key, sequence: 131, timestamp: time, kind: .toolResult,
+            toolName: "exec_command", text: preview, metadataJSON: #"{"call_id":"synthetic-pair"}"#,
+            dedupeKey: "preview:pair:result", toolOutput: .init(format: .codex, text: full))))
+        try store.write(records)
+    }
+
+    nonisolated private static func seedSessionActivity(_ store: AgentStore, in directory: URL) throws {
+        let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic activity",
+            rootURL: directory.appendingPathComponent("unused-source")))
+        let key = SessionKey(agent: .codex, nativeID: "preview-activity")
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        try store.write([
+            .session(.init(key: key, sourceID: source, environment: "Synthetic", cwd: "/synthetic/live",
+                           title: "Synthetic live activity", startedAt: now - 10_000, lastEventAt: now)),
+            .event(.init(session: key, sequence: 1, timestamp: now, kind: .toolCall, toolName: "exec_command",
+                         metadataJSON: #"{"call_id":"synthetic-call","command":"API_TOKEN='synthetic-activity-secret' npm test -- auth"}"#,
+                         dedupeKey: "preview:activity:call")),
+        ])
+    }
+
     nonisolated private static func seedSessions(_ store: AgentStore, in directory: URL) throws {
         let sourceID = try store.upsertSource(.init(agent: .codex, label: "Synthetic",
             rootURL: directory.appendingPathComponent("unused-source"), environment: "Synthetic"))
@@ -496,6 +616,8 @@ final class DashboardModel {
             let text: String
             switch i {
             case 0: text = "API_TOKEN=synthetic-preview-only"
+            case 12 where ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_NATIVE_CHINESE"] == "1":
+                text = "中文输入 · Synthetic typing target"
             case 130: text = "修复登录问题 · Synthetic search target"
             case 260: text = "验证登录配置 · Second synthetic search target"
             case 395: text = "完成登录修复 · Final synthetic search target"
@@ -694,8 +816,11 @@ final class DashboardModel {
         let project = root.appendingPathComponent("projects/synthetic")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         let file = project.appendingPathComponent("00000000-0000-0000-0000-000000000033.jsonl")
-        let text = #"{"type":"user","uuid":"synthetic-index-selection","cwd":"/synthetic/test","message":{"content":"Selected source 索引验证"}}"#
-        try Data((text + "\n").utf8).write(to: file)
+        var lines = [#"{"type":"user","uuid":"synthetic-index-selection","cwd":"/synthetic/test","message":{"content":"Selected source 索引验证"}}"#]
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_ORIGINAL_INPUT"] == "1" {
+            lines.append(#"{"type":"assistant","uuid":"synthetic-index-original-input","message":{"content":[{"type":"tool_use","name":"Bash","id":"synthetic-input","input":{"command":"synthetic diagnostic","detail":"syntheticinputonly","API_TOKEN":"synthetic-input-secret"}}]}}"#)
+        }
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
         try store.upsertSource(.init(agent: .claudeCode, label: "Synthetic Claude source", rootURL: root,
                                      environment: "Synthetic"))
     }

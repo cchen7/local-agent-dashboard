@@ -207,14 +207,16 @@ private enum IndexRebuild {
         // coverage checks pass. Use the same keys and floor division as v9-v12.
         try db.execute(sql: """
             CREATE TEMP TABLE rebuild_minute AS
-            SELECT ts/60000-(ts%60000<0) AS bucket,agent,coalesce(project_id,0) AS project_id,
-                coalesce(model,'') AS model,precision,
-                sum(input_fresh) AS input_fresh,sum(cache_read) AS cache_read,
-                sum(cache_write) AS cache_write,sum(cache_write_1h) AS cache_write_1h,
-                sum(output) AS output,sum(reasoning) AS reasoning,sum(cost_micro_usd) AS cost_micro_usd,
-                sum(CASE WHEN price_status='unpriced' THEN input_fresh+cache_read+cache_write+cache_write_1h+output ELSE 0 END)
-                    AS unpriced_tokens,count(*) AS records
-            FROM main.token_events GROUP BY 1,2,3,4,5;
+            SELECT ts/60000-(ts%60000<0) AS bucket,agent,project_id,model,precision,\(sums)
+            FROM (
+                SELECT ts,agent,coalesce(project_id,0) AS project_id,coalesce(model,'') AS model,precision,
+                    input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,cost_micro_usd,
+                    CASE WHEN price_status='unpriced' THEN input_fresh+cache_read+cache_write+cache_write_1h+output ELSE 0 END AS unpriced_tokens,
+                    1 AS records
+                FROM main.token_events
+                UNION ALL
+                SELECT ts,agent,project_id,model,precision,\(measureList) FROM main.retained_archive_usage
+            ) GROUP BY 1,2,3,4,5;
             CREATE UNIQUE INDEX temp.rebuild_minute_key ON rebuild_minute(bucket,agent,project_id,model,precision);
 
             CREATE TEMP TABLE rebuild_scope AS
@@ -229,10 +231,16 @@ private enum IndexRebuild {
             CREATE UNIQUE INDEX temp.rebuild_scope_key ON rebuild_scope(grain,bucket,agent,precision);
 
             CREATE TEMP TABLE rebuild_savings AS
-            SELECT ts/3600000-(ts%3600000<0) AS bucket,agent,coalesce(project_id,0) AS project_id,
-                sum(cache_savings_micro_usd) AS savings_micro_usd,sum(cache_read) AS measured_cache_read
-            FROM main.token_events
-            WHERE cache_savings_micro_usd IS NOT NULL AND cache_read>0 GROUP BY 1,2,3;
+            SELECT ts/3600000-(ts%3600000<0) AS bucket,agent,project_id,
+                sum(savings_micro_usd) AS savings_micro_usd,sum(measured_cache_read) AS measured_cache_read
+            FROM (
+                SELECT ts,agent,coalesce(project_id,0) AS project_id,cache_savings_micro_usd AS savings_micro_usd,
+                    cache_read AS measured_cache_read FROM main.token_events
+                WHERE cache_savings_micro_usd IS NOT NULL AND cache_read>0
+                UNION ALL
+                SELECT ts,agent,project_id,savings_micro_usd,measured_cache_read FROM main.retained_archive_usage
+                WHERE measured_cache_read>0
+            ) GROUP BY 1,2,3;
             CREATE UNIQUE INDEX temp.rebuild_savings_key ON rebuild_savings(bucket,agent,project_id);
             """)
     }

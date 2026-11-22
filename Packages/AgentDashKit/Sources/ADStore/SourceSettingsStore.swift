@@ -49,6 +49,7 @@ public extension AgentStore {
             if value.pathMappings != current.pathMappings {
                 var gate = try SessionExclusionGate(policy: SessionExclusionPolicy.read(db))
                 try gate.removeExistingMatches(sourceID: id, db: db)
+                try gate.removeRetainedMatches(sourceID: id, db: db)
                 try gate.finishRemovals(db: db)
                 try UsageChartChanges.publish(db)
             }

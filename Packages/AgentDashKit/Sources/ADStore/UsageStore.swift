@@ -184,7 +184,7 @@ public extension AgentStore {
     func firstUsageTimestamp(_ filter: UsageFilter = .init()) throws -> Int64? {
         try databasePool.read { db in
             let predicate = UsagePredicate(filter)
-            return try Int64.fetchOne(db, sql: "SELECT min(ts) FROM token_events WHERE 1=1 \(predicate.sql)", arguments: predicate.arguments)
+            return try UsageCoverage.firstTimestamp(db, predicate: predicate)
         }
     }
 
@@ -231,9 +231,7 @@ public extension AgentStore {
                     reusing base: UsageChartSnapshot? = nil) throws -> UsageChartSnapshot {
         try databasePool.read { db in
             let predicate = UsagePredicate(filter)
-            let first = period == .all ? try Int64.fetchOne(db, sql: """
-                SELECT min(ts) FROM token_events WHERE 1=1 \(predicate.sql)
-                """, arguments: predicate.arguments).map { min($0, now) } : nil
+            let first = period == .all ? try UsageCoverage.firstTimestamp(db, predicate: predicate).map { min($0, now) } : nil
             let window = try UsageWindow.make(period, now: now, firstTimestamp: first, custom: custom, timeZone: timeZone)
             return try buildUsageChart(db, window: window, filter: filter,
                                        hourly: Self.chartUsesHourRollup(window, filter: filter), reusing: base,
@@ -259,14 +257,9 @@ public extension AgentStore {
             guard start < end else { return nil }
             let predicate = UsagePredicate(filter)
             let row = try Row.fetchOne(db, sql: """
-                WITH recent AS (
-                    SELECT input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,cost_micro_usd,
-                           CASE WHEN price_status='unpriced' THEN input_fresh+cache_read+cache_write+cache_write_1h+output ELSE 0 END AS unpriced_tokens,
-                           1 AS records
-                    FROM token_events WHERE ts>=? AND ts<? AND precision='call' \(predicate.sql)
-                )
+                WITH recent AS (\(UsageCoverage.rawFacts(predicate, precise: true)))
                 SELECT \(UsageCoverage.sums) FROM recent
-                """, arguments: StatementArguments([start, end]) + predicate.arguments)
+                """, arguments: UsageCoverage.rawArguments(start, end, predicate: predicate))
             return row.map(UsageCoverage.readTotals)
         }
         func snapshot(_ points: [UsagePoint], reused: Set<Int64> = [], from baseID: UUID? = nil) -> UsageChartSnapshot {
@@ -344,6 +337,36 @@ private struct UsageCoverage {
         coalesce(sum(cost_micro_usd),0) AS cost,coalesce(sum(unpriced_tokens),0) AS unpriced,coalesce(sum(records),0) AS records
         """
 
+    static func firstTimestamp(_ db: Database, predicate: UsagePredicate) throws -> Int64? {
+        try Int64.fetchOne(db, sql: """
+            SELECT min(first) FROM (
+                SELECT min(ts) AS first FROM token_events WHERE 1=1 \(predicate.sql)
+                UNION ALL
+                SELECT min(ts) FROM retained_archive_usage WHERE 1=1 \(predicate.sql)
+            )
+            """, arguments: predicate.arguments + predicate.arguments)
+    }
+
+    static func rawFacts(_ predicate: UsagePredicate, precise: Bool = false) -> String {
+        let precision = precise ? "AND precision='call'" : ""
+        return """
+            SELECT ts,agent,coalesce(project_id,0) AS project_id,coalesce(model,'') AS model,precision,
+                input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,cost_micro_usd,
+                CASE WHEN price_status='unpriced' THEN input_fresh+cache_read+cache_write+cache_write_1h+output ELSE 0 END AS unpriced_tokens,
+                1 AS records
+            FROM token_events WHERE ts>=? AND ts<? \(precision) \(predicate.sql)
+            UNION ALL
+            SELECT ts,agent,project_id,model,precision,input_fresh,cache_read,cache_write,cache_write_1h,
+                output,reasoning,cost_micro_usd,unpriced_tokens,records
+            FROM retained_archive_usage WHERE ts>=? AND ts<? \(precision) \(predicate.sql)
+            """
+    }
+
+    static func rawArguments(_ lower: Int64, _ upper: Int64, predicate: UsagePredicate) -> StatementArguments {
+        let once = StatementArguments([lower, upper]) + predicate.arguments
+        return once + once
+    }
+
     init(_ range: UsageRange, filter: UsageFilter, hourly: Bool = false) {
         self.range = range
         let predicate = UsagePredicate(filter)
@@ -353,13 +376,11 @@ private struct UsageCoverage {
         var args = StatementArguments()
         func raw(_ lower: Int64, _ upper: Int64) {
             parts.append("""
-                SELECT ts/60000-(ts%60000<0) AS bucket,agent,coalesce(project_id,0) AS project_id,coalesce(model,'') AS model,
-                    precision,input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,cost_micro_usd,
-                    CASE WHEN price_status='unpriced' THEN input_fresh+cache_read+cache_write+cache_write_1h+output ELSE 0 END AS unpriced_tokens,
-                    1 AS records
-                FROM token_events WHERE ts>=? AND ts<? \(predicate.sql)
+                SELECT ts/60000-(ts%60000<0) AS bucket,agent,project_id,model,precision,
+                    input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,cost_micro_usd,unpriced_tokens,records
+                FROM (\(Self.rawFacts(predicate)))
                 """)
-            args += [lower, upper]; args += predicate.arguments
+            args += Self.rawArguments(lower, upper, predicate: predicate)
         }
         func minutes(_ lower: Int64, _ upper: Int64) {
             guard lower < upper else { return }
@@ -401,8 +422,11 @@ private struct UsageCoverage {
             sections.append("""
                 SELECT cache_savings_micro_usd AS amount,cache_read AS measured FROM token_events
                 WHERE ts>=? AND ts<? AND cache_savings_micro_usd IS NOT NULL AND cache_read>0 \(predicate.sql)
+                UNION ALL
+                SELECT savings_micro_usd AS amount,measured_cache_read AS measured FROM retained_archive_usage
+                WHERE ts>=? AND ts<? AND measured_cache_read>0 \(predicate.sql)
                 """)
-            args += [lower, upper]; args += predicate.arguments
+            args += Self.rawArguments(lower, upper, predicate: predicate)
         }
         if start < end {
             sections.append("""
@@ -600,10 +624,10 @@ private struct UsageCoverage {
         let predicate = UsagePredicate(.init(agent: agent))
         for (lower, upper) in edges {
             let row = try Row.fetchOne(db, sql: """
-                SELECT ts/60000-(ts%60000<0) AS bucket,sum(\(Self.amount(metric))) AS peak FROM token_events
-                WHERE ts>=? AND ts<? AND precision='call' \(predicate.sql) \(Self.pricingPeakFilter(metric, raw: true))
+                SELECT ts/60000-(ts%60000<0) AS bucket,sum(\(Self.amount(metric))) AS peak
+                FROM (\(Self.rawFacts(predicate, precise: true))) WHERE 1=1 \(Self.pricingPeakFilter(metric))
                 GROUP BY bucket ORDER BY peak DESC,bucket LIMIT 1
-                """, arguments: StatementArguments([lower, upper]) + predicate.arguments)
+                """, arguments: Self.rawArguments(lower, upper, predicate: predicate))
             if let row { candidates.append(try UsagePeak(timestamp: Self.timestamp(row["bucket"]), value: row["peak"])) }
         }
         return candidates.sorted { lhs, rhs in lhs.value == rhs.value ? lhs.timestamp < rhs.timestamp : lhs.value > rhs.value }.first

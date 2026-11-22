@@ -3,6 +3,7 @@ import GRDB
 
 /// File-order status inputs deliberately exclude the transcript and tool output text.
 public struct StatusEventMetadata: Sendable {
+    public let id: Int64
     public let sequence: Int64
     public let timestamp: Int64?
     public let kind: EventKind
@@ -23,9 +24,12 @@ public struct PersistedStatusUpdate: Sendable {
     public let status: SessionStatus
     public let reason: String
     public let nextAt: Int64?
+    public let activity: PersistedRunningActivity?
 
-    public init(id: Int64, revision: Int64, status: SessionStatus, reason: String, nextAt: Int64?) {
+    public init(id: Int64, revision: Int64, status: SessionStatus, reason: String, nextAt: Int64?,
+                activity: PersistedRunningActivity? = nil) {
         self.id = id; self.revision = revision; self.status = status; self.reason = reason; self.nextAt = nextAt
+        self.activity = status == .running ? activity : nil
     }
 }
 
@@ -79,13 +83,21 @@ public extension AgentStore {
                     let archived: Bool = session["archived"]
                     guard let agent = AgentKind(rawValue: session["agent"]) else { throw StoreError.invalidStoredValue }
                     let signals: [StatusEventMetadata] = archived ? [] : try Row.fetchAll(db, sql: """
-                        SELECT seq,ts,kind,CASE WHEN length(CAST(meta_json AS BLOB))<=2048 THEN meta_json END AS meta_json
+                        SELECT id,seq,ts,kind,
+                               CASE WHEN length(CAST(meta_json AS BLOB))<=2048 THEN meta_json
+                                    WHEN length(CAST(meta_json AS BLOB))<=8192 AND json_valid(meta_json)
+                                    THEN json_object(
+                                        'signal',meta_json -> '$.signal','call_id',meta_json -> '$.call_id',
+                                        'tool_use_id',meta_json -> '$.tool_use_id','is_error',meta_json -> '$.is_error',
+                                        'exit_code',meta_json -> '$.exit_code','success',meta_json -> '$.success',
+                                        'child_activity',meta_json -> '$.child_activity')
+                               END AS meta_json
                         FROM events WHERE session_id=? AND kind NOT IN ('unknown','prompt_history','thinking')
                         ORDER BY seq DESC,id DESC LIMIT 8192
                         """, arguments: [id]).map { event in
                             guard let kind = EventKind(rawValue: event["kind"]) else { throw StoreError.invalidStoredValue }
                             let time: Int64 = event["ts"]
-                            return StatusEventMetadata(sequence: event["seq"], timestamp: time == 0 ? nil : time,
+                            return StatusEventMetadata(id: event["id"], sequence: event["seq"], timestamp: time == 0 ? nil : time,
                                                        kind: kind, metadataJSON: event["meta_json"])
                         }
                     return StatusWorkItem(id: id, agent: agent, revision: session["status_revision"],
@@ -107,8 +119,11 @@ public extension AgentStore {
                 let oldStatus: String = row["status"]
                 let oldReason: String? = row["status_reason"]
                 try db.execute(sql: """
-                    UPDATE sessions SET status=?,status_reason=?,status_dirty=0,status_next_at=? WHERE id=?
-                    """, arguments: [update.status.rawValue, update.reason, update.nextAt, update.id])
+                    UPDATE sessions SET status=?,status_reason=?,status_dirty=0,status_next_at=?,
+                        activity_action=?,activity_call_event_id=?,activity_started_at=?,activity_last_event_at=? WHERE id=?
+                    """, arguments: [update.status.rawValue, update.reason, update.nextAt,
+                                      update.activity?.action.rawValue, update.activity?.callEventID,
+                                      update.activity?.startedAt, update.activity?.lastEventAt, update.id])
                 if oldStatus != update.status.rawValue || oldReason != update.reason { changed += 1 }
             }
             return changed

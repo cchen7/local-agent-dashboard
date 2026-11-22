@@ -1,4 +1,5 @@
 import ADCore
+import CryptoKit
 import Foundation
 import GRDB
 
@@ -10,8 +11,29 @@ public struct IndexedProject: Identifiable, Equatable, Sendable {
             case catalog(Int64)
             case host(Data)
             case environment(source: Int64, name: Data, path: Data)
+            case retained(Data)
         }
         fileprivate let key: Key
+
+        static func retained(_ fingerprint: Data) -> Self { .init(key: .retained(fingerprint)) }
+
+        var retentionKey: Data {
+            var bytes = Data()
+            func integer(_ value: Int64) {
+                var big = value.bigEndian
+                withUnsafeBytes(of: &big) { bytes.append(contentsOf: $0) }
+            }
+            func segment(_ data: Data) { integer(Int64(data.count)); bytes.append(data) }
+            switch key {
+            case .catalog(let id): bytes.append(0); integer(id)
+            case .host(let path): bytes.append(1); segment(path)
+            case let .environment(source, name, path):
+                bytes.append(2); integer(source); segment(name); segment(path)
+            case .retained(let fingerprint): return fingerprint
+            }
+            return Data(SHA256.hash(data: bytes))
+        }
+
     }
 
     public let id: ID

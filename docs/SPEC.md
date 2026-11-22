@@ -214,7 +214,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | ADP-4 | **Parser versions:** each adapter has `parserVersion`. When it changes, files that still exist are re-parsed automatically. |
 | ADP-5 | **Time:** store UTC epoch milliseconds as integers. Records without a timestamp inherit the previous record's. Transcript order follows file order (`seq`); statistics use timestamps. |
 | ADP-6 | **Performance:** skip large useless records with a substring check before JSON decoding (e.g. Claude `file-history-snapshot`). Decode only the fields you need; ignore the rest. |
-| ADP-7 | **Truncation:** searchable text keeps at most 2 KB per tool output across all text blocks. An oversized line with a successfully recovered result does not count as unknown. Replay replaces an obsolete empty marker for that same indexed record in the write transaction. The archive keeps up to 64 KB compressed (configurable); anything beyond is read from the original file on demand while it still exists. |
+| ADP-7 | **Truncation:** searchable text keeps at most 2 KB per tool output across all text blocks. An oversized line with a successfully recovered result does not count as unknown. Replay replaces an obsolete empty marker for that same indexed record in the write transaction. Complete results that fit the configurable LZFSE archive limit (64 KiB by default) are stored separately from search. Storage can retain 64/32/16 KiB compressed or preview only. Larger results can be read on demand from a verified original record when available; displayed source reads are bounded and labeled if truncated. |
 
 ### 5.4 Adapter: Claude Code (ADP-CC)
 
@@ -506,6 +506,12 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);   -- incl. pricing_has
 - When an agent deletes a raw file (file gone, parent folder still present), mark the session `source_deleted_at`, **keep its content in the database**, and show an "Archived" marker in the UI.
   Confirm absence below the pinned, accessible source parent. An unavailable parent or a symlink is insufficient. If the file returns, replay it and clear the archive marker only for sessions found in that file.
 - Retention setting: forever (default) / 365 / 180 / 90 days. Expired sessions are deleted with their events and token records; rollup tables are kept so long-range charts stay continuous.
+  Count days from confirmed archival and apply the policy at launch and periodically
+  while the app is open. Preserve numeric usage by source and workspace, including
+  precise time-range boundaries and stored costs, separate from expired transcripts.
+  Session counts describe the surviving indexed sessions. Fingerprints prevent
+  explicit rescans from duplicating expired content or usage. A confirmed manual
+  clear or matching privacy exclusion also removes the affected retained totals.
 - Settings shows the database size and offers: "Clear a project's data", "Clear a source's data", "Clear everything".
   Each clear previews a scope and requires confirmation with active indexing stopped.
   Project scope uses the current Projects membership. Clear removes selected
@@ -519,7 +525,7 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);   -- incl. pricing_has
 
 | Action | What it does | Data loss? |
 |---|---|---|
-| Rebuild index | Rebuild `events_fts`, `token_minute` and keywords from the `events` / `token_events` tables | No |
+| Rebuild index | Rebuild `events_fts`, `token_minute` and keywords from the `events` / `token_events` tables and detached archive rollups | No |
 | Full rescan | Re-parse raw files (idempotent upserts); archived sessions are kept | No |
 
 Rebuild runs in one app-index transaction, uses stored quotes and masked
@@ -820,15 +826,15 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
 - Header: avatar, title, `agent · full path · branch · environment`, status badge (hover shows inference evidence).
 - Meta grid: Started, Turns, Tokens · Cost (two lines in one cell: total tokens including cache / list-price cost estimate; hover shows the breakdown), Context window.
   Count each user record once by file sequence. Use stored event quotes and label a subset of priced tokens as a partial estimate.
-- Live activity bar (running only): current action + command + elapsed time + "last event 3s ago". **No process ID** (the sandbox cannot see it).
+- Live activity bar (running only): show the latest eligible unanswered tool, its masked command when available, time since that call and time since the latest indexed activity. If no call is known, show the most recent kind of activity and its age. Omit times that cannot be determined. **No process ID** (the sandbox cannot see it).
 - Two tabs: **Overview** | **Transcript**.
   - Overview: main-topic chips, latest progress (§10.3), touched files (top 10, with +/-), commands run (top 10), mini token chart for this session.
     Plot up to 72 buckets for the selected session; distinguish session-level estimates. Records without a timestamp still count in the total.
-  - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to full input/output; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
-    Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Seek straight to a selected match without reading intervening pages. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor or empties the current older/newer page.
+  - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to indexed input/output, with explicit access to a verified original when the index only has a preview; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
+    Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Place a folded tool at its call, with at most one matching result preview. A search hit on the result seeks directly to the call and expands it. Original tool inputs require an unchanged recorded line and a current source grant. They are read only on request, are never added to search or archives, and are shown only if the complete input fits within 256 KiB. Only pair a unique call and following result with the same explicit ID in the same session; keep ambiguous or unscoped child records separate. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor or empties the current older/newer page.
 - Bottom buttons:
-  - **Copy Resume Command** (primary; replaces the prototype's old "Open in Terminal"): copies the command from §5 / Appendix C.
-  - **Show in Finder** (reveals the session's record file).
+  - **Copy Resume Command** (primary; ⇧⌘C): copies the shell-quoted command from §5 / Appendix C for a live, resumable session. Use its indexed workspace and current source mapping. Disable the action when the command cannot be formed.
+  - **Show in Finder**: asks Finder to select the original record. Use the current registered source grant and verify the indexed regular file's identity, without following symlinks. Disable it for archived sessions and records without a known file; report if the original cannot be verified on click.
   - MAY: "Open folder in Terminal" using only `NSWorkspace.shared.open(_:withApplicationAt:configuration:)`, no Apple Events. If the sandbox does not allow it, skip it and record the decision in `docs/DECISIONS.md`.
 
 ### 11.3 Projects page (answers "which directory, and what is going on there")
@@ -1149,6 +1155,14 @@ actually imports. Synthetic Grok samples do not replace real format capture.
 
 Launch → onboarding → sessions appear → search a Chinese word → open a session → jump to a match → Projects page → Token Usage → switch periods and metric → open the menu bar panel.
 
+Unattended search and navigation smoke tests use the actual search field and
+index with prefilled synthetic text and UI controls. Native keyboard/IME
+acceptance is a separate fixed Apple input source run: ABC for ASCII and
+shortcuts, Apple Pinyin – Simplified for composing and committing Chinese.
+It never enumerates or changes the input source and must not request access.
+See the [keyboard QA matrix](reports/FIXED-INPUT-QA.md). A skipped native
+input case does not establish typing or shortcut acceptance.
+
 ### 15.5 Release checklist
 
 - [ ] All §14.4 checks pass
@@ -1267,7 +1281,7 @@ Figma sync status (2026-11-17): items 1, 2, 4, 5, 6, 7 and 9 are in the prototyp
 |---|---|
 | Claude Code | `cd "<cwd>" && claude --resume <sessionId>` |
 | Codex | `cd "<cwd>" && codex resume <id>` |
-| Grok Build | `cd "<cwd>" && grok --resume <session-id>` |
+| Grok Build | Deferred pending local adapter and CLI verification (DEV-008). |
 | Copilot CLI | `cd "<cwd>" && copilot --resume <sessionId>` |
 
-`<cwd>` is the host path after path mapping. For sessions from a container or VM, prepend a comment reminding the user to run it inside that environment. Verify each CLI's resume flags against its local `--help` output during M1/M2.
+`<cwd>` is the host path after path mapping. Shell-quote each substituted argument as needed. For any non-default source or non-Local environment, prepend a fixed comment reminding the user to use the same environment and agent configuration. Do not start a shell or agent. Verify each CLI's resume flags against its local `--help` output during M1/M2.

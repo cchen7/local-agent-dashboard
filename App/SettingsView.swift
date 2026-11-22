@@ -511,6 +511,10 @@ private struct StorageSettingsPane: View {
                     .disabled(!model.canRescanSources)
                     .accessibilityIdentifier("rescanAllSources")
             }
+            ArchiveRetentionSettingsSection(model: model)
+                .disabled(rebuilding)
+            ToolOutputSettingsSection(model: model)
+                .disabled(rebuilding)
             IndexClearSettingsSection(model: model)
                 .disabled(rebuilding)
         }

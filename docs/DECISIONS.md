@@ -432,3 +432,67 @@ checkpoints without starting a scanner. Scope clears subtract attributed
 usage. Clear everything also removes aggregate-only legacy history and
 rate limits. The source registry, preferences and saved searches survive.
 Manual clear is separate from expiry, which must keep aggregate history.
+
+## DEV-066 — Expire archived content while retaining attributed usage
+
+Only a confirmed archive date ages into retention. Expiry deletes transcripts
+and raw usage rows in one transaction and adds detached numeric totals at
+identical timestamps. Keep source/workspace attribution for exclusions and
+scoped clears; store only fingerprints to block replay of expired content or
+already retained global token keys. Full rebuild and partial-minute reads
+consult the retained amounts. Retention starts off (forever); explicit clears
+remove retained usage for their scope as well as the reimport fingerprints.
+
+## DEV-067 — Keep indexed previews, archives, and source reads separate
+
+Tool results keep a two-KiB search preview. Store a complete body only if both
+its decoded size and compressed size fit policy. Read a verified original
+only on explicit request, using recorded line identity and the current
+read-only source grant. Bound source display to 256 KiB; omit record locators
+for over-limit lines. The viewer identifies truncation and never stores a
+fetched source body. Index-time redaction applies to archives and source
+previews. Lower limits remove only over-limit archives, not originals.
+
+## DEV-068 — Copy resume text and reveal only the verified session record
+
+Use the stored workspace and the source's current path mappings for Copy Resume
+Command. Keep the environment reminder fixed so source metadata cannot change
+shell syntax. Prompt histories and subagents do not supply resume IDs. Show in
+Finder uses the existing read-only grant and the indexed file's device and
+inode, plus the registered directory identity when available. Associate the
+identity with the session when ingest confirms it, so reusing the same path
+for a different file cannot retarget an older session. Existing indexes
+confirm associations on the next authorized scan; migration does not read
+source files. Neither button acts on an archived session or a removed source.
+
+## DEV-069 — Use status evidence for live session activity
+
+Derive the activity bar and status from the same committed evidence. Show the
+most recent eligible unmatched call and its elapsed time; a recorded turn end
+shows that the turn finished. A newer event, late result, archive or status
+deadline invalidates the prior action. Show input for known shell tools only.
+Apply the display masking policy before shortening it, and omit potentially
+truncated command input. The timer is display-only; it never queries the
+filesystem, process table, or index.
+
+## DEV-070 — Fold tool results at their call without moving search evidence
+
+Index the bounded normalized tool ID, using existing event metadata. Fold only a
+unique call and following result in the same session. Child records lacking a
+stable stream ID stay separate. Keep up to one result preview alongside each
+visible call, skip folded results in both paging directions, and anchor result
+search hits at the call. Keep the original event keys and indexed search data.
+On explicit expansion, use the existing output archive and verified original
+read. Mask whole available fields before excerpting, and flag input when only
+its indexed preview is available.
+
+## DEV-071 — Read original tool input by verified record, on request
+
+Track the file and digest of a tool record when Claude's summary omits its
+argument object or when a Codex or Copilot preview is clipped. A source replay
+can add the locator without storing the original argument body. An explicit
+read uses the current source grant and checks the pinned file, exact line and
+boundaries. Show at most 256 KiB of complete input after applying the privacy
+policy; do not show malformed JSON fragments or follow paths printed by tools.
+Discard read bodies when the view closes. Retain an honest preview if the
+original is gone or exceeds the limit.

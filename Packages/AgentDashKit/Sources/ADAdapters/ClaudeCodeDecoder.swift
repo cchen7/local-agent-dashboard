@@ -96,10 +96,12 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                                           referenceOnly: true)))
         }
         func event(_ kind: EventKind, _ body: String, index: Int = 0, tool: String? = nil,
-                   metadata: String? = nil) -> NormalizedRecord {
+                   metadata: String? = nil, toolOutput: ToolOutputCapture? = nil,
+                   toolInput: ToolInputCapture? = nil) -> NormalizedRecord {
             .event(.init(session: owner, sequence: frame.sequence, timestamp: time ?? 0, kind: kind,
                          toolName: tool, text: body, metadataJSON: metadata,
-                         dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership))
+                         dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership,
+                         toolOutput: toolOutput, toolInput: toolInput))
         }
 
         var unknown = false
@@ -125,12 +127,15 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                         let text = (input["command"] as? String) ?? (input["file_path"] as? String) ?? ""
                         records.append(event(.toolCall, Self.bounded(text, bytes: 2048), index: index,
                                              tool: Self.metadata(block["name"], maximum: 128),
-                                             metadata: Self.toolMetadata(block["id"])))
+                                             metadata: Self.toolMetadata(block["id"]),
+                                             toolInput: !isUser && block["input"] is [String: Any] ? .init(.claude(block: index)) : nil))
                     case "tool_result":
                         recoveredToolResult = true
-                        records.append(event(.toolResult, Self.bounded(Self.contentText(block["content"]), bytes: 2048),
+                        let body = ToolOutputText.text(block["content"]) ?? ""
+                        records.append(event(.toolResult, Self.bounded(body, bytes: ToolOutputCapture.searchableBytes),
                                              index: index, metadata: Self.toolMetadata(block["tool_use_id"],
-                                                 isError: (block["is_error"] as? Bool) == true)))
+                                                 isError: (block["is_error"] as? Bool) == true),
+                                             toolOutput: .init(format: .claude(block: index), text: body, complete: !frame.isTruncated)))
                     case "thinking":
                         // Do not split a credential at a byte limit. Only keep
                         // complete readable blocks, separately from replies.

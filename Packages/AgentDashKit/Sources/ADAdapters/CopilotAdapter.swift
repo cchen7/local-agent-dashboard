@@ -5,7 +5,7 @@ import Foundation
 /// GitHub Copilot CLI's append-only event stream (ADP-CP).
 public struct CopilotAdapter: AgentAdapter {
     public static let kind: AgentKind = .copilot
-    public static let parserVersion = 1
+    public static let parserVersion = 3
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}
@@ -92,12 +92,14 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
         let child = Self.identifier(object?["agentId"]) != nil
         var unknown = false
         func event(_ kind: EventKind, _ text: String? = nil, tool: String? = nil,
-                   fields: AdapterJSON.Object = [:]) -> NormalizedRecord {
+                   fields: AdapterJSON.Object = [:], toolOutput: ToolOutputCapture? = nil,
+                   toolInput: ToolInputCapture? = nil) -> NormalizedRecord {
             var hints = fields
             if child { hints["child_activity"] = true }
             return .event(.init(session: key, sequence: frame.sequence, timestamp: time, kind: kind,
                 toolName: tool, text: text, metadataJSON: hints.isEmpty ? nil : AdapterJSON.json(hints),
-                dedupeKey: "\(eventKey):\(kind == .unknown ? "unknown" : "event")"))
+                dedupeKey: "\(eventKey):\(kind == .unknown ? "unknown" : "event")",
+                toolOutput: toolOutput, toolInput: toolInput))
         }
         var records: [NormalizedRecord] = []
         switch type {
@@ -127,19 +129,23 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
             if let name = AdapterJSON.string(data["toolName"], bounded: 160) {
                 let id = Self.identifier(data["toolCallId"])
                 if let id { remember(id, name: name) }
-                let arguments = AdapterJSON.string(data["arguments"], bounded: 2048)
-                    ?? (data["arguments"] as? AdapterJSON.Object).flatMap(AdapterJSON.json).map { AdapterJSON.prefix($0, bytes: 2048) }
-                records.append(event(.toolCall, arguments, tool: name, fields: id.map { ["call_id": $0] } ?? [:]))
+                let arguments = AdapterJSON.string(data["arguments"])
+                    ?? (data["arguments"] as? AdapterJSON.Object).flatMap(AdapterJSON.json)
+                let preview = arguments.map { AdapterJSON.prefix($0, bytes: ToolOutputCapture.searchableBytes) }
+                let long = (arguments?.utf8.count ?? 0) > ToolOutputCapture.searchableBytes
+                records.append(event(.toolCall, preview, tool: name, fields: id.map { ["call_id": $0] } ?? [:],
+                                     toolInput: long ? .init(.copilot) : nil))
             } else { unknown = true }
         case "tool.execution_complete":
             let id = Self.identifier(data["toolCallId"])
-            let result = data["result"] as? AdapterJSON.Object ?? [:]
-            let text = AdapterJSON.string(result["content"] ?? data["result"], bounded: 2048)
+            let body = ToolOutputText.copilot(data["result"])
+            let text = body.map { AdapterJSON.prefix($0, bytes: ToolOutputCapture.searchableBytes) }
             let tool = recentCalls.last { $0.id == id }?.name
             var fields: AdapterJSON.Object = [:]
             if let success = Self.boolean(data["success"]) { fields["success"] = success }
             if let id { fields["call_id"] = id }
-            records.append(event(.toolResult, text, tool: tool, fields: fields))
+            records.append(event(.toolResult, text, tool: tool, fields: fields,
+                                 toolOutput: body.flatMap { .init(format: .copilot, text: $0) }))
         case "session.task_complete", "session.compaction_complete":
             var fields: AdapterJSON.Object = ["signal": type ?? ""]
             if let success = Self.boolean(data["success"]) { fields["success"] = success }

@@ -70,6 +70,11 @@ wave from the accepted `main` after its contracts and prerequisites are availabl
 - Prefer squash merge for a scoped task PR after approval. Keep worktrees and
   branches while there is uncommitted work; do not force-push or delete them as cleanup.
 
+Follow the [fixed input QA matrix](reports/FIXED-INPUT-QA.md) for every
+new or modified search field, text form, keyboard shortcut or UI test. Use one
+already selected Apple source for an actual keyboard run and report unverified
+input coverage separately from automated functional QA.
+
 ## Known gates and questions
 
 | Item | Current disposition |

@@ -59,7 +59,7 @@ struct MainWindow: View {
                         if let session = model.selectedSession, let store = model.store,
                            !model.isSearchingSessions || search != nil {
                             SessionTranscript(session: session, store: store, search: search,
-                                              contextWindowRules: model.contextWindowRules,
+                                              hostHome: model.projectPathHome, contextWindowRules: model.contextWindowRules,
                                               displayCurrency: model.pricing.currency)
                                 .id(TranscriptSelection(session: session.id, query: search?.query,
                                                          privacyRevision: model.privacyRevision))
@@ -233,7 +233,9 @@ struct MainWindow: View {
         List(selection: $model.page) {
             Section("Library") {
                 ForEach(DashboardPage.allCases) { page in
-                    Label { Text(page.title) } icon: { Image(systemName: page.symbol) }.tag(page)
+                    Label { Text(page.title) } icon: { Image(systemName: page.symbol) }
+                        .tag(page)
+                        .accessibilityIdentifier("sidebar.library.\(page.rawValue)")
                 }
             }
             if model.libraryFilter != nil {

@@ -52,7 +52,7 @@ enum SourceAccessProbe {
     }
 
     /// Keep a read-only bookmark active until scanning and watching have both stopped.
-    static func withIndexingAccess<Value: Sendable>(to source: Source, _ run: (URL) async throws -> Value)
+    static func withIndexingAccess<Value: Sendable>(to source: Source, _ run: @Sendable (URL) async throws -> Value)
         async throws -> Value {
         switch source.access {
         case .defaultLocation:

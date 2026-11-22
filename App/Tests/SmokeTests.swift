@@ -11,8 +11,8 @@ final class SmokeTests: XCTestCase {
     override func tearDown() async throws { app.terminate() }
 
     func testStorageRebuildKeepsSyntheticSearchResult() throws {
-        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
-        openSyntheticChineseSearch()
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true, query: "登录")
+        waitForSyntheticChineseSearch()
         app.buttons["openSettings"].click()
         let settings = app.windows["settingsWindow"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
@@ -26,7 +26,55 @@ final class SmokeTests: XCTestCase {
         settings.buttons[XCUIIdentifierCloseWindow].click()
         XCTAssertTrue(window.exists)
         XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
-        XCTAssertTrue(element("transcript.match.position").wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+        XCTAssertTrue(showsMatchPosition("1 of 3 matches"))
+    }
+
+    func testToolOutputArchiveReductionRequiresConfirmation() throws {
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Storage"].click()
+        let size = settings.popUpButtons["storage.toolOutputLimit"]
+        XCTAssertTrue(size.waitForExistence(timeout: 5))
+        XCTAssertEqual(size.value as? String, "64 KiB")
+        size.click()
+        app.menuItems["Searchable preview only"].firstMatch.click()
+        let apply = app.buttons["Apply Tool Output Limit"].firstMatch
+        XCTAssertTrue(apply.waitForExistence(timeout: 5))
+        app.buttons["Cancel"].firstMatch.click()
+        XCTAssertTrue(apply.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(size.value as? String, "64 KiB")
+        size.click()
+        app.menuItems["Searchable preview only"].firstMatch.click()
+        XCTAssertTrue(apply.waitForExistence(timeout: 5))
+        apply.click()
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Searchable preview only"), object: size)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 5), .completed)
+    }
+
+    func testArchiveRetentionConfirmsChangingForeverPolicy() throws {
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        app.buttons["openSettings"].click()
+        let settings = app.windows["settingsWindow"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.buttons["Storage"].click()
+        let retention = settings.popUpButtons["storage.archiveRetention"]
+        XCTAssertTrue(retention.waitForExistence(timeout: 5))
+        XCTAssertEqual(retention.value as? String, "Forever")
+        retention.click()
+        app.menuItems["90 days"].firstMatch.click()
+        let apply = app.buttons["Apply Archive Retention"].firstMatch
+        XCTAssertTrue(apply.waitForExistence(timeout: 5))
+        app.buttons["Cancel"].firstMatch.click()
+        XCTAssertTrue(apply.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(retention.value as? String, "Forever")
+        retention.click()
+        app.menuItems["90 days"].firstMatch.click()
+        XCTAssertTrue(apply.waitForExistence(timeout: 5))
+        apply.click()
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "90 days"), object: retention)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 5), .completed)
     }
 
     func testStorageClearEverythingRequiresConfirmation() throws {
@@ -65,7 +113,7 @@ final class SmokeTests: XCTestCase {
 
     func testIndexedProjectsTimelineOpensLatestSession() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
-        app.typeKey("2", modifierFlags: .command)
+        openLibrary("projects")
         XCTAssertTrue(element("projects.list").waitForExistence(timeout: 5))
         XCTAssertTrue(element("projects.timeline").waitForExistence(timeout: 5))
         XCTAssertTrue(window.staticTexts["Synthetic checkout verified"].waitForExistence(timeout: 5))
@@ -81,7 +129,7 @@ final class SmokeTests: XCTestCase {
         for appearance in ["dark", "light"] {
             for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
                 let window = try launch(size: size, appearance: appearance, projects: true)
-                app.typeKey("2", modifierFlags: .command)
+                openLibrary("projects")
                 XCTAssertTrue(element("projects.detail").waitForExistence(timeout: 5))
                 let latest = window.buttons["Open Latest Session"]
                 XCTAssertTrue(latest.waitForExistence(timeout: 5))
@@ -93,37 +141,10 @@ final class SmokeTests: XCTestCase {
         }
     }
 
-    func testSourceEditorSavesMetadataAndReopensWithSavedValues() throws {
-        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
-        app.buttons["openSettings"].click()
-        let settings = app.windows["settingsWindow"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 5))
-        settings.buttons["Sources"].click()
-        let edit = settings.buttons["source.edit"].firstMatch
-        XCTAssertTrue(edit.wait(for: \.isEnabled, toEqual: true, timeout: 5))
-        edit.click()
-        let name = app.textFields["source.edit.name"]
-        let save = app.buttons["source.edit.save"]
-        XCTAssertTrue(name.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["source.edit.addRule"].exists)
-        name.click()
-        name.typeKey("a", modifierFlags: .command)
-        name.typeKey(XCUIKeyboardKey.delete, modifierFlags: [])
-        XCTAssertTrue(save.wait(for: \.isEnabled, toEqual: false, timeout: 5))
-        name.typeText("Synthetic edited source")
-        XCTAssertTrue(save.wait(for: \.isEnabled, toEqual: true, timeout: 5))
-        save.click()
-        XCTAssertTrue(name.waitForNonExistence(timeout: 5))
-        XCTAssertTrue(settings.staticTexts["Synthetic edited source"].waitForExistence(timeout: 5))
-        edit.click()
-        XCTAssertTrue(name.waitForExistence(timeout: 5))
-        XCTAssertEqual(name.value as? String, "Synthetic edited source")
-    }
-
     func testEmptyNavigationAndSettingsReopening() throws {
         let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
-        for (key, identifier) in [("3", "empty.tokens"), ("2", "empty.projects"), ("1", "empty.sessions")] {
-            app.typeKey(key, modifierFlags: .command)
+        for (page, identifier) in [("tokens", "empty.tokens"), ("projects", "empty.projects"), ("sessions", "empty.sessions")] {
+            openLibrary(page)
             XCTAssertTrue(element(identifier).waitForExistence(timeout: 3))
         }
         for _ in 1...2 {
@@ -154,6 +175,213 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(toggle.wait(for: \.isEnabled, toEqual: true, timeout: 5))
         toggle.click()
         XCTAssertTrue(pending.waitForNonExistence(timeout: 5))
+    }
+
+    func testSessionActionsCopyButtonAndRequestFinder() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", onboarding: true)
+        let choose = app.buttons["onboarding.chooseSources"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 5))
+        choose.click()
+        let start = app.buttons["onboarding.startIndexing"]
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        start.click()
+        let open = app.buttons["onboarding.openDashboard"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+        XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
+        let prompt = window.staticTexts["Selected source 索引验证"].firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        prompt.click()
+
+        let copy = element("session.actions.copy")
+        let reveal = element("session.actions.reveal")
+        func feedback(_ message: String) -> XCUIElement {
+            app.staticTexts.matching(identifier: "session.actions.feedback")
+                .matching(NSPredicate(format: "label == %@ OR value == %@", message, message)).firstMatch
+        }
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        XCTAssertTrue(copy.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        XCTAssertTrue(reveal.isEnabled)
+        XCTAssertLessThan(reveal.frame.maxX, copy.frame.minX)
+        copy.click()
+        XCTAssertTrue(feedback("Resume command copied").waitForExistence(timeout: 5))
+        reveal.click()
+        XCTAssertTrue(feedback("Finder request sent").waitForExistence(timeout: 5))
+    }
+
+    func testLiveSessionActivityTicksAndStopsAtDeadline() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_ACTIVITY"] = "1"
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let bar = element("session.activity")
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        XCTAssertTrue(element("session.activity.elapsed").exists)
+        let command = element("session.activity.command")
+        let displayed = command.value as? String ?? command.label
+        XCTAssertEqual(displayed, "API_TOKEN='••••••' npm test -- auth")
+        let lastEvent = element("session.activity.lastEvent")
+        let initial = lastEvent.value as? String ?? lastEvent.label
+        XCTAssertTrue(initial.hasPrefix("Last event "))
+        let ticked = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            lastEvent.exists && (lastEvent.value as? String ?? lastEvent.label) != initial
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ticked], timeout: 5), .completed)
+        XCTAssertTrue(bar.waitForNonExistence(timeout: 25))
+        XCTAssertTrue(app.staticTexts["Possibly needs approval"].firstMatch.waitForExistence(timeout: 5))
+    }
+
+    func testLiveSessionActivityAtNativeWindowSizes() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_ACTIVITY"] = "1"
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance)
+                let bar = element("session.activity")
+                let command = element("session.activity.command")
+                let lastEvent = element("session.activity.lastEvent")
+                XCTAssertTrue(bar.waitForExistence(timeout: 5))
+                XCTAssertTrue(window.frame.contains(command.frame) && window.frame.contains(lastEvent.frame))
+                let attachment = XCTAttachment(screenshot: window.screenshot())
+                attachment.name = "session-activity-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                app.terminate()
+            }
+        }
+    }
+
+    func testExpandedToolReadsVerifiedOriginalInputOnClick() throws {
+        _ = try openSyntheticOriginalInput(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let toggle = app.buttons["transcript.tool.toggle"]
+        let original = app.buttons["transcript.toolInput.readOriginal"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5))
+        let input = element("transcript.tool.input")
+        func content(_ text: String) -> XCUIElement {
+            input.staticTexts.matching(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@", text, text)).firstMatch
+        }
+        XCTAssertFalse(content("syntheticinputonly").exists)
+        original.click()
+        XCTAssertTrue(content("syntheticinputonly").waitForExistence(timeout: 5))
+        XCTAssertTrue(content("••••••").exists)
+        XCTAssertFalse(content("synthetic-input-secret").exists)
+        toggle.click()
+        XCTAssertTrue(input.waitForNonExistence(timeout: 5))
+        toggle.click()
+        XCTAssertTrue(original.waitForExistence(timeout: 5))
+        XCTAssertFalse(content("syntheticinputonly").exists)
+    }
+
+    func testOriginalInputControlAtNativeWindowSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try openSyntheticOriginalInput(size: size, appearance: appearance)
+                let read = app.buttons["transcript.toolInput.readOriginal"]
+                XCTAssertTrue(read.waitForExistence(timeout: 5))
+                XCTAssertTrue(read.isHittable)
+                XCTAssertTrue(window.frame.contains(read.frame))
+                let image = XCTAttachment(screenshot: window.screenshot())
+                image.name = "original-input-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                image.lifetime = .keepAlways
+                add(image)
+                app.terminate()
+            }
+        }
+    }
+
+    private func openSyntheticOriginalInput(size: CGSize, appearance: String) throws -> XCUIElement {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_INDEXING_SOURCE"] = "1"
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_ORIGINAL_INPUT"] = "1"
+        let window = try launch(size: size, appearance: appearance, onboarding: true)
+        let choose = app.buttons["onboarding.chooseSources"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 5))
+        choose.click()
+        let start = app.buttons["onboarding.startIndexing"]
+        XCTAssertTrue(start.wait(for: \.isEnabled, toEqual: true, timeout: 5))
+        start.click()
+        let open = app.buttons["onboarding.openDashboard"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+
+        let toggle = app.buttons["transcript.tool.toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.click()
+        return window
+    }
+
+    func testFoldedToolResultOpensFromSearchBeyondFirstPage() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_TOOL_PAIR"] = "1"
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
+        let group = element("transcript.tool.row")
+        let output = element("transcript.tool.output")
+        XCTAssertTrue(group.waitForExistence(timeout: 5))
+        XCTAssertFalse(output.exists)
+        let disclosure = app.buttons["transcript.tool.toggle"]
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5))
+        disclosure.click()
+        let input = element("transcript.tool.input")
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        let maskedInput = input.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR label CONTAINS %@", "••••••", "••••••")).firstMatch
+        XCTAssertTrue(maskedInput.waitForExistence(timeout: 5))
+        XCTAssertFalse(input.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR label CONTAINS %@", "synthetic-pair-input", "synthetic-pair-input")).firstMatch.exists)
+        XCTAssertTrue(output.waitForExistence(timeout: 5))
+        let archived = window.staticTexts["Archived tool output"]
+        XCTAssertTrue(archived.waitForExistence(timeout: 5))
+        disclosure.click()
+        XCTAssertTrue(output.waitForNonExistence(timeout: 5))
+
+        app.terminate()
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", query: "foldedresult")
+        XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
+        XCTAssertTrue(output.waitForExistence(timeout: 5))
+        XCTAssertTrue(archived.waitForExistence(timeout: 5))
+        let matched = output.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR label CONTAINS %@", "PAIR_TOKEN=••••••", "PAIR_TOKEN=••••••")).firstMatch
+        XCTAssertTrue(matched.waitForExistence(timeout: 5))
+        let exposed = output.staticTexts.matching(NSPredicate(
+            format: "value CONTAINS %@ OR label CONTAINS %@", "synthetic-pair-secret", "synthetic-pair-secret")).firstMatch
+        XCTAssertFalse(exposed.exists)
+        XCTAssertEqual(window.descendants(matching: .any).matching(identifier: "transcript.tool.row").count, 1)
+    }
+
+    func testFoldedToolRowAtNativeWindowSizes() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_TOOL_PAIR"] = "1"
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance)
+                let row = element("transcript.tool.row")
+                XCTAssertTrue(row.waitForExistence(timeout: 5))
+                XCTAssertTrue(window.frame.contains(row.frame))
+                XCTAssertTrue(app.buttons["transcript.tool.toggle"].isHittable)
+                XCTAssertFalse(element("transcript.tool.output").exists)
+                let attachment = XCTAttachment(screenshot: window.screenshot())
+                attachment.name = "folded-tool-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                app.terminate()
+            }
+        }
+    }
+
+    func testSessionActionFooterAtNativeWindowSizes() throws {
+        for appearance in ["dark", "light"] {
+            for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
+                let window = try launch(size: size, appearance: appearance, populated: true)
+                let copy = element("session.actions.copy")
+                let reveal = element("session.actions.reveal")
+                XCTAssertTrue(copy.waitForExistence(timeout: 5))
+                XCTAssertTrue(reveal.exists)
+                XCTAssertFalse(copy.isEnabled)
+                XCTAssertFalse(reveal.isEnabled)
+                XCTAssertTrue(window.frame.contains(copy.frame) && window.frame.contains(reveal.frame))
+                XCTAssertLessThan(reveal.frame.maxX, copy.frame.minX)
+                let attachment = XCTAttachment(screenshot: window.screenshot())
+                attachment.name = "session-footer-\(appearance)-\(Int(size.width))x\(Int(size.height))"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                app.terminate()
+            }
+        }
     }
 
     func testRegisteredSyntheticSourceStartsAndStopsOnlyOnRequest() throws {
@@ -222,7 +450,7 @@ final class SmokeTests: XCTestCase {
     func testSyntheticUsageShowsTheChartAndSwitchesToCost() throws {
         app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
         _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark")
-        app.typeKey("3", modifierFlags: .command)
+        openLibrary("tokens")
         XCTAssertTrue(element("usage.presented").waitForExistence(timeout: 5))
         XCTAssertTrue(element("usage.chart.plot").waitForExistence(timeout: 5))
         let metric = app.popUpButtons["Metric"].firstMatch
@@ -279,9 +507,6 @@ final class SmokeTests: XCTestCase {
         let choose = app.buttons["source.add.choose"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         XCTAssertFalse(choose.isEnabled)
-        name.click()
-        name.typeText("Synthetic custom source")
-        XCTAssertTrue(choose.wait(for: \.isEnabled, toEqual: true, timeout: 5))
         app.buttons["Cancel"].firstMatch.click()
         XCTAssertTrue(name.waitForNonExistence(timeout: 5))
         XCTAssertFalse(settings.staticTexts["Synthetic custom source"].exists)
@@ -378,45 +603,40 @@ final class SmokeTests: XCTestCase {
     }
 
     func testChineseSearchStepsAcrossBoundedTranscriptPages() throws {
-        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true)
-        openSyntheticChineseSearch()
+        let window = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", populated: true, query: "登录")
+        waitForSyntheticChineseSearch()
         let transcript = element("session.transcript.messages")
         XCTAssertTrue(transcript.waitForExistence(timeout: 5))
-        let position = element("transcript.match.position")
         let previous = window.buttons["Previous Match"]
         let next = window.buttons["Next Match"]
         let first = transcript.staticTexts["修复登录问题 · Synthetic search target"]
         let second = transcript.staticTexts["验证登录配置 · Second synthetic search target"]
         let third = transcript.staticTexts["完成登录修复 · Final synthetic search target"]
         XCTAssertTrue(first.waitForExistence(timeout: 5))
-        XCTAssertTrue(position.wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+        XCTAssertTrue(showsMatchPosition("1 of 3 matches"))
         XCTAssertFalse(previous.isEnabled)
         XCTAssertTrue(next.wait(for: \.isEnabled, toEqual: true, timeout: 5))
 
-        window.typeKey("g", modifierFlags: [.command, .shift])
-        XCTAssertEqual(position.label, "1 of 3 matches")
-        window.typeKey("g", modifierFlags: .command)
+        next.click()
         XCTAssertTrue(second.waitForExistence(timeout: 5))
-        XCTAssertTrue(position.wait(for: \.label, toEqual: "2 of 3 matches", timeout: 5))
+        XCTAssertTrue(showsMatchPosition("2 of 3 matches"))
         XCTAssertTrue(first.waitForNonExistence(timeout: 5))
         XCTAssertTrue(next.wait(for: \.isEnabled, toEqual: true, timeout: 5))
         next.click()
         XCTAssertTrue(third.waitForExistence(timeout: 5))
-        XCTAssertTrue(position.wait(for: \.label, toEqual: "3 of 3 matches", timeout: 5))
+        XCTAssertTrue(showsMatchPosition("3 of 3 matches"))
         XCTAssertTrue(second.waitForNonExistence(timeout: 5))
         XCTAssertFalse(next.isEnabled)
 
-        window.typeKey("g", modifierFlags: .command)
-        XCTAssertEqual(position.label, "3 of 3 matches")
         XCTAssertTrue(previous.wait(for: \.isEnabled, toEqual: true, timeout: 5))
-        window.typeKey("g", modifierFlags: [.command, .shift])
+        previous.click()
         XCTAssertTrue(second.waitForExistence(timeout: 5))
-        XCTAssertTrue(position.wait(for: \.label, toEqual: "2 of 3 matches", timeout: 5))
+        XCTAssertTrue(showsMatchPosition("2 of 3 matches"))
         XCTAssertTrue(third.waitForNonExistence(timeout: 5))
         XCTAssertTrue(previous.wait(for: \.isEnabled, toEqual: true, timeout: 5))
         previous.click()
         XCTAssertTrue(first.waitForExistence(timeout: 5))
-        XCTAssertTrue(position.wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+        XCTAssertTrue(showsMatchPosition("1 of 3 matches"))
         XCTAssertTrue(second.waitForNonExistence(timeout: 5))
         XCTAssertFalse(previous.isEnabled)
         XCTAssertFalse(transcript.staticTexts["API_TOKEN=synthetic-preview-only"].exists)
@@ -425,9 +645,9 @@ final class SmokeTests: XCTestCase {
     func testSearchMatchControlsAtAllSizes() throws {
         for appearance in ["dark", "light"] {
             for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {
-                let window = try launch(size: size, appearance: appearance, populated: true)
-                openSyntheticChineseSearch()
-                XCTAssertTrue(element("transcript.match.position").wait(for: \.label, toEqual: "1 of 3 matches", timeout: 5))
+                let window = try launch(size: size, appearance: appearance, populated: true, query: "登录")
+                waitForSyntheticChineseSearch()
+                XCTAssertTrue(showsMatchPosition("1 of 3 matches"))
                 let next = window.buttons["Next Match"]
                 XCTAssertTrue(next.wait(for: \.isEnabled, toEqual: true, timeout: 5))
                 XCTAssertTrue(next.isHittable)
@@ -438,13 +658,24 @@ final class SmokeTests: XCTestCase {
         }
     }
 
-    private func openSyntheticChineseSearch() {
-        XCTAssertTrue(element("sessions.list").waitForExistence(timeout: 5))
+    private func showsMatchPosition(_ expected: String) -> Bool {
+        app.staticTexts.matching(identifier: "transcript.match.position")
+            .matching(NSPredicate(format: "label == %@ OR value == %@", expected, expected))
+            .firstMatch.waitForExistence(timeout: 5)
+    }
+
+    private func waitForSyntheticChineseSearch() {
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 5))
-        search.click()
-        search.typeText("登录")
+        let prefilled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "登录"), object: search)
+        XCTAssertEqual(XCTWaiter.wait(for: [prefilled], timeout: 5), .completed)
         XCTAssertTrue(element("sessions.searchResults").waitForExistence(timeout: 5))
+    }
+
+    private func openLibrary(_ page: String) {
+        let row = element("sidebar.library.\(page)")
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.click()
     }
 
     func testMenuPanelReopensClosedDashboard() throws {
@@ -479,12 +710,13 @@ final class SmokeTests: XCTestCase {
     }
 
     private func launch(size: CGSize, appearance: String, populated: Bool = false,
-                        projects: Bool = false, onboarding: Bool = false) throws -> XCUIElement {
+                        projects: Bool = false, onboarding: Bool = false, query: String? = nil) throws -> XCUIElement {
         app.launchArguments = ["--synthetic", "--window-size", "\(Int(size.width))x\(Int(size.height))", "--appearance", appearance,
                                "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         if populated { app.launchArguments.append("--synthetic-sessions") }
         if projects { app.launchArguments.append("--synthetic-projects") }
         if onboarding { app.launchArguments.append("--synthetic-onboarding") }
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_SEARCH_QUERY"] = query
         app.launch()
         app.activate()
         let window = app.windows["dashboardWindow"]

@@ -1,5 +1,6 @@
 import ADCore
 import ADInsights
+import ADIngest
 import ADPrivacy
 import ADPricing
 import ADSearch
@@ -62,6 +63,7 @@ private func highlightedSnippet(_ parts: [SearchSnippetPart]) -> AttributedStrin
 struct SessionTranscript: View {
     @State private var section = DetailSection.transcript
     @Environment(\.sessionOverviewOptions) private var overviewOptions
+    @Environment(\.secretMaskingEnabled) private var maskSessionActivity
 
     private enum DetailSection: Hashable { case overview, transcript }
     private var showingOverview: Bool { overviewOptions.enabled && section == .overview }
@@ -69,8 +71,11 @@ struct SessionTranscript: View {
     let session: SessionListItem
     let store: AgentStore
     let search: SessionTranscriptSearch?
+    let hostHome: String?
     let contextWindowRules: [ModelContextWindow]
     let displayCurrency: PriceDisplayCurrency
+    @State private var activity: SessionActivityDisplay?
+    private var running: Bool { session.status == .running && !session.archived }
     @State private var indexedContext: IndexedSessionContext?
     @State private var usage: IndexedSessionUsage?
     @State private var request: TranscriptPageRequest
@@ -97,10 +102,11 @@ struct SessionTranscript: View {
     }
 
     init(session: SessionListItem, store: AgentStore, search: SessionTranscriptSearch? = nil,
-         contextWindowRules: [ModelContextWindow] = [], displayCurrency: PriceDisplayCurrency = .usd) {
+         hostHome: String? = nil, contextWindowRules: [ModelContextWindow] = [], displayCurrency: PriceDisplayCurrency = .usd) {
         self.session = session
         self.store = store
         self.search = search
+        self.hostHome = hostHome
         self.contextWindowRules = contextWindowRules
         self.displayCurrency = displayCurrency
         _request = State(initialValue: search.map { .around($0.firstMatchKey) } ?? .first)
@@ -134,6 +140,9 @@ struct SessionTranscript: View {
                     }
                 }
                 .font(.caption)
+                if running, let activity {
+                    SessionActivityBar(activity: activity)
+                }
             }
             .padding(.horizontal, 18).padding(.vertical, 14)
 
@@ -173,8 +182,10 @@ struct SessionTranscript: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(page.events, id: \.dedupeKey) { event in
-                                let matched = event.dedupeKey == highlightedMatchKey
-                                TranscriptEventRow(event: event)
+                                let selectedKey = highlightedMatchKey
+                                let matched = selectedKey.map(page.rowKey(forEvent:)) == event.dedupeKey
+                                TranscriptEventRow(event: event, result: page.toolResults[event.dedupeKey],
+                                                   matchKey: matched ? selectedKey : nil, store: store)
                                     .padding(matched ? 5 : 0)
                                     .background(matched ? Color.accentColor.opacity(0.15) : Color.clear,
                                                 in: RoundedRectangle(cornerRadius: 6))
@@ -185,9 +196,9 @@ struct SessionTranscript: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .task(id: viewRevision) {
-                        guard case .around(let key) = request else { return }
+                        guard let target = scrollTarget(in: page) else { return }
                         await Task.yield()
-                        if !Task.isCancelled { scroll.scrollTo(key, anchor: .top) }
+                        if !Task.isCancelled { scroll.scrollTo(target, anchor: .top) }
                     }
                 }
                 .id(viewRevision)
@@ -196,14 +207,37 @@ struct SessionTranscript: View {
                 EmptyPanel(title: "No transcript yet", symbol: "text.bubble",
                            message: "This indexed session does not have any transcript entries.")
             }
+            Divider()
+            SessionActionFooter(session: session.id, store: store, hostHome: hostHome)
         }
+        .task(id: running) { await observeActivity() }
         .task(id: session.id) { await observeContext() }
         .task(id: session.id) { await observeUsage() }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("session.transcript")
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: request) { [request] in await observePage(request) }
         .task(id: matchLookup) { [lookup = matchLookup] in
             if let lookup { await resolveMatch(lookup) }
+        }
+    }
+
+    private func scrollTarget(in page: TranscriptPage) -> String? {
+        guard case .around(let key) = request else { return nil }
+        return page.rowKey(forEvent: key)
+    }
+
+    private func observeActivity() async {
+        activity = nil
+        guard running else { return }
+        let masking = maskSessionActivity
+        do {
+            for try await indexed in store.sessionActivityUpdates(in: session.id) {
+                guard !Task.isCancelled else { return }
+                activity = indexed.map { SessionActivityDisplay($0, agent: session.id.agent, maskSecrets: masking) }
+            }
+        } catch {
+            if !Task.isCancelled { activity = nil }
         }
     }
 
@@ -395,6 +429,9 @@ struct SessionTranscript: View {
                     seek(.first)
                     return
                 }
+                if let previous = page, let snapshot, scrollTarget(in: previous) != scrollTarget(in: snapshot) {
+                    viewRevision += 1
+                }
                 page = snapshot
                 loading = false
                 failed = false
@@ -413,24 +450,20 @@ struct SessionTranscript: View {
 
 private struct TranscriptEventRow: View {
     let event: EventRecord
-    @Environment(\.secretMaskingEnabled) private var maskSecrets
+    let result: EventRecord?
+    let matchKey: String?
+    let store: AgentStore
+    @State private var expanded = false
 
     var body: some View {
-        if event.kind == .toolCall || event.kind == .toolResult || event.kind == .thinking {
-            DisclosureGroup {
-                ProtectedTranscriptText(raw: event.text ?? "")
-                    .padding(.top, 5)
+        if event.kind == .toolCall || event.kind == .toolResult {
+            TranscriptToolRow(event: event, result: result, matchKey: matchKey, store: store)
+        } else if event.kind == .thinking {
+            DisclosureGroup(isExpanded: $expanded) {
+                if expanded { ProtectedTranscriptText(raw: event.text ?? "").padding(.top, 5) }
             } label: {
-                Label {
-                    if let name = event.toolName {
-                        Text(verbatim: maskSecrets ? SecretMasker.mask(name) : name).lineLimit(1)
-                    } else {
-                        Text(event.kind.transcriptLabel)
-                    }
-                } icon: {
-                    Image(systemName: event.kind == .thinking ? "text.bubble" : (event.kind == .toolCall ? "terminal" : "doc.text"))
-                }
-                .font(.callout)
+                Label { Text(event.kind.transcriptLabel) } icon: { Image(systemName: "text.bubble") }
+                    .font(.callout)
             }
             .padding(.horizontal, 9).padding(.vertical, 5)
             .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
@@ -454,14 +487,291 @@ private struct TranscriptEventRow: View {
     }
 }
 
+private struct TranscriptToolRow: View {
+    let event: EventRecord
+    let result: EventRecord?
+    let matchKey: String?
+    let store: AgentStore
+    @State private var expanded: Bool
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
+
+    init(event: EventRecord, result: EventRecord?, matchKey: String?, store: AgentStore) {
+        self.event = event
+        self.result = result
+        self.matchKey = matchKey
+        self.store = store
+        _expanded = State(initialValue: matchKey != nil)
+    }
+
+    private var input: EventRecord? { event.kind == .toolCall ? event : nil }
+    private var output: EventRecord? { event.kind == .toolResult ? event : result }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: 8)
+                        .accessibilityHidden(true)
+                    Label {
+                        if let name = TranscriptToolPreview.summary(event.toolName ?? output?.toolName, masking: maskSecrets) {
+                            Text(verbatim: name).fontWeight(.semibold).lineLimit(1)
+                        } else { Text(event.kind.transcriptLabel).fontWeight(.semibold) }
+                    } icon: {
+                        Image(systemName: input == nil ? "doc.text" : "terminal")
+                    }
+                    .frame(maxWidth: 132, alignment: .leading)
+                    .layoutPriority(1)
+                    if let text = TranscriptToolPreview.argument(input, masking: maskSecrets) {
+                        Text(verbatim: text)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    if let output {
+                        if let text = TranscriptToolPreview.summary(output.text, masking: maskSecrets) {
+                            Text(verbatim: text).lineLimit(1).frame(maxWidth: 132, alignment: .trailing)
+                        } else { Text("Result recorded").lineLimit(1) }
+                    } else { Text("No result recorded").lineLimit(1) }
+                }
+                .font(.caption)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("transcript.tool.toggle")
+            if expanded {
+                VStack(alignment: .leading, spacing: 9) {
+                    if let input {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Tool Input").font(.caption.weight(.semibold))
+                            ToolInputBody(event: input, store: store)
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("transcript.tool.input")
+                    }
+                    if let output {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Tool Output").font(.caption.weight(.semibold))
+                            ToolResultOutput(event: output, store: store).id(output.dedupeKey)
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("transcript.tool.output")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("transcript.tool.row")
+        .onChange(of: matchKey) { _, key in if key != nil { expanded = true } }
+    }
+}
+
+private enum TranscriptToolPreview {
+    // Producers may cut at 2 KiB and drop up to three bytes of a trailing scalar.
+    static func mayBePartial(_ value: String?) -> Bool { (value?.utf8.count ?? 0) >= 2045 }
+
+    static func indexedText(_ value: String?, masking: Bool) -> String? {
+        guard let value else { return nil }
+        if masking && mayBePartial(value) {
+            // An incomplete last line could end before a token is recognizable.
+            guard let end = value.lastIndex(where: \.isNewline), end != value.startIndex else { return nil }
+            return String(value[..<end])
+        }
+        return value
+    }
+
+    static func argument(_ event: EventRecord?, masking: Bool) -> String? {
+        guard let event, let input = indexedText(event.text, masking: masking) else { return nil }
+        if event.toolName == "exec_command",
+           let arguments = try? JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any],
+           let command = arguments["cmd"] as? String {
+            return summary(command, masking: masking)
+        }
+        return summary(input, masking: masking)
+    }
+
+    static func summary(_ value: String?, masking: Bool) -> String? {
+        guard let text = indexedText(value, masking: masking) else { return nil }
+        let safe = masking ? IndexSecretMasker.text(text) : text
+        guard let first = safe.split(whereSeparator: \.isNewline).first, !first.isEmpty else { return nil }
+        return first.count <= 112 ? String(first) : String(first.prefix(112)) + "…"
+    }
+}
+
+private struct ToolInputBody: View {
+    let event: EventRecord
+    let store: AgentStore
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
+    @State private var hasOriginal = false
+    @State private var original: String?
+    @State private var loading = false
+    @State private var failure: ToolInputReadFailure?
+    @State private var readTask: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let text = original ?? TranscriptToolPreview.indexedText(event.text, masking: maskSecrets), !text.isEmpty {
+                ProtectedTranscriptText(raw: text, maskStructured: true)
+            } else {
+                Text("No indexed input preview.").font(.caption).foregroundStyle(.secondary)
+            }
+            if original == nil {
+                if hasOriginal {
+                    Button("Read Original Input") {
+                        readTask = Task { await readOriginal() }
+                    }
+                    .disabled(loading)
+                    .accessibilityIdentifier("transcript.toolInput.readOriginal")
+                } else if event.session.agent == .claudeCode || TranscriptToolPreview.mayBePartial(event.text) {
+                    Text("Only the indexed input preview is available.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if loading { ProgressView().controlSize(.small) }
+            if let failure {
+                switch failure {
+                case .tooLarge: Text("The original input exceeds the display limit.")
+                case .changedOrUnavailable: Text("The original input is no longer available.")
+                }
+            }
+        }
+        .task(id: event.dedupeKey) {
+            let store = store
+            let key = event.session
+            let dedupe = event.dedupeKey
+            let available = await Task.detached {
+                (try? store.registeredToolInput(in: key, eventKey: dedupe)) != nil
+            }.value
+            if !Task.isCancelled { hasOriginal = available }
+        }
+        .onDisappear {
+            readTask?.cancel()
+            readTask = nil
+            original = nil
+            hasOriginal = false
+        }
+    }
+
+    private func readOriginal() async {
+        guard !loading else { return }
+        loading = true
+        defer { loading = false }
+        failure = nil
+        let store = store
+        let key = event.session
+        let dedupe = event.dedupeKey
+        let task = Task.detached(priority: .utility) {
+            guard let registered = try store.registeredToolInput(in: key, eventKey: dedupe)
+            else { throw ToolInputReadFailure.changedOrUnavailable }
+            let text = try await SourceAccessProbe.withIndexingAccess(to: registered.source) { root in
+                try Task.checkCancellation()
+                return try ToolInputReader.read(registered, authorizedRoot: root)
+            }
+            guard try store.registeredToolInput(in: key, eventKey: dedupe) == registered else {
+                throw ToolInputReadFailure.changedOrUnavailable
+            }
+            return registered.redact ? IndexSecretMasker.text(text) : text
+        }
+        do {
+            let text = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            if !Task.isCancelled { original = text }
+        } catch {
+            if !Task.isCancelled { failure = error as? ToolInputReadFailure ?? .changedOrUnavailable }
+        }
+    }
+}
+
+private struct ToolResultOutput: View {
+    let event: EventRecord
+    let store: AgentStore
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
+    @State private var details: ToolOutputDetails?
+    @State private var original: OriginalToolOutput?
+    @State private var failed = false
+    @State private var loading = false
+    @State private var readTask: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let text = original?.text ?? details?.archivedText ?? TranscriptToolPreview.indexedText(event.text, masking: maskSecrets) {
+                ProtectedTranscriptText(raw: text, maskStructured: true)
+            } else {
+                Text("No indexed output preview.").font(.caption).foregroundStyle(.secondary)
+            }
+            if original?.truncated == true {
+                Text("Only a bounded prefix of the original is shown.").font(.caption).foregroundStyle(.secondary)
+            }
+            if details?.archivedText != nil && original == nil {
+                Text("Archived tool output").font(.caption).foregroundStyle(.secondary)
+            }
+            if details?.hasOriginal == true && original == nil && details?.archivedText == nil {
+                Button("Read Original Output") {
+                    readTask = Task { await readOriginal() }
+                }
+                .disabled(loading)
+                .accessibilityIdentifier("transcript.toolOutput.readOriginal")
+            }
+            if loading { ProgressView().controlSize(.small) }
+            if failed { Text("The original output is no longer available.").font(.caption).foregroundStyle(.secondary) }
+        }
+        .task(id: event.dedupeKey) {
+            let key = event.session
+            let dedupe = event.dedupeKey
+            let store = self.store
+            let read = await Task.detached { try? store.toolOutputDetails(in: key, eventKey: dedupe) }.value
+            guard !Task.isCancelled else { return }
+            details = read
+        }
+        .onDisappear { readTask?.cancel(); readTask = nil; original = nil; details = nil }
+    }
+
+    private func readOriginal() async {
+        guard !loading else { return }
+        loading = true
+        defer { loading = false }
+        failed = false
+        let store = self.store
+        let key = event.session
+        let dedupe = event.dedupeKey
+        let masking = maskSecrets
+        let task = Task.detached(priority: .utility) { () throws -> OriginalToolOutput in
+            guard let registered = try store.registeredToolOutput(in: key, eventKey: dedupe)
+            else { throw ToolOutputReadFailure.changedOrUnavailable }
+            let result = try await SourceAccessProbe.withIndexingAccess(to: registered.source) { root in
+                try ToolOutputReader.read(registered, authorizedRoot: root)
+            }
+            guard try store.registeredToolOutput(in: key, eventKey: dedupe) == registered
+            else { throw ToolOutputReadFailure.changedOrUnavailable }
+            var text = result.text
+            // Do not expose an incomplete last line containing a partially
+            // captured credential when either masking policy is active.
+            if result.truncated && (masking || registered.redact), text.last?.isNewline == false {
+                text = text.lastIndex(where: \.isNewline).map { String(text[..<$0]) } ?? ""
+            }
+            if registered.redact { text = IndexSecretMasker.text(text) }
+            return .init(text: text, truncated: result.truncated)
+        }
+        do {
+            let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            guard !Task.isCancelled else { return }
+            original = value
+        } catch { if !Task.isCancelled { failed = true } }
+    }
+}
+
 private struct ProtectedTranscriptText: View {
     let raw: String
+    var maskStructured = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.secretMaskingEnabled) private var maskSecrets
     @State private var revealedText: String?
 
     var body: some View {
-        let masked = maskSecrets ? SecretMasker.mask(raw) : raw
+        let masked = maskSecrets ? (maskStructured ? IndexSecretMasker.text(raw) : SecretMasker.mask(raw)) : raw
         let revealed = revealedText == raw
         let displayed = revealed ? raw : masked
         let sections = TranscriptFormatting.sections(displayed)

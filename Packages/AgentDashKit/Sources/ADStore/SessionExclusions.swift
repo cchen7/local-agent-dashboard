@@ -12,6 +12,7 @@ public struct SessionExclusionUpdate: Sendable {
 public struct FileImportPosition: Sendable {
     public let checkpoint: Checkpoint?
     public let exclusionRevision: Int64
+    public let needsSessionIdentityReplay: Bool
 }
 
 public struct FileBatchCommit: Sendable {
@@ -27,8 +28,10 @@ public extension AgentStore {
     /// Acquire the cursor and policy version in the same read snapshot.
     func fileImportPosition(for fileID: Int64) throws -> FileImportPosition {
         try databasePool.read { db in
-            .init(checkpoint: try Self.readCheckpoint(fileID, db: db),
-                  exclusionRevision: try SessionExclusionPolicy.read(db).revision)
+            let row = try Row.fetchOne(db, sql: "SELECT * FROM source_files WHERE id=?", arguments: [fileID])
+            let checkpoint = row.flatMap { row in (row["size"] as Int64?) == nil ? nil : Self.decodeCheckpoint(row) }
+            return .init(checkpoint: checkpoint, exclusionRevision: try SessionExclusionPolicy.read(db).revision,
+                         needsSessionIdentityReplay: (row?["confirm_session_identity"] as Bool?) == true)
         }
     }
 
@@ -59,6 +62,7 @@ public extension AgentStore {
             if patterns.isEmpty {
                 try db.execute(sql: "DELETE FROM session_exclusion_keys; DELETE FROM session_exclusion_inputs;")
             }
+            try gate.removeRetainedMatches(db: db)
             try gate.finishRemovals(db: db)
             try UsageChartChanges.publish(db)
             return .init(removedSessions: gate.removedCount, invalidatedFiles: invalidated)
@@ -139,6 +143,36 @@ struct SessionExclusionGate {
                 try remove(row, db: db)
             }
             after = last["id"]
+        }
+    }
+
+    // Retained history still respects workspace privacy. Transfer only its
+    // session fingerprints to the exclusion gate before removing aggregates.
+    mutating func removeRetainedMatches(sourceID: Int64? = nil, db: Database) throws {
+        guard !policy.patterns.isEmpty else { return }
+        var projects = Set<Int64>()
+        let scopes = try Row.fetchAll(db, sql: """
+            SELECT id,source_id,workspace FROM retained_archive_scopes
+            WHERE workspace<>'' AND (?1 IS NULL OR source_id=?1)
+            """, arguments: [sourceID])
+        for scope in scopes {
+            guard try decision(scope["workspace"], sourceID: scope["source_id"], db: db) == .excluded else { continue }
+            let id: Int64 = scope["id"]
+            for project in try Int64.fetchAll(db, sql: "SELECT DISTINCT project_id FROM retained_archive_usage WHERE scope_id=? AND project_id<>0", arguments: [id]) {
+                projects.insert(project)
+            }
+            try db.execute(sql: """
+                INSERT INTO session_exclusion_keys(digest,revision,disposition)
+                SELECT digest,?,? FROM expired_archive_sessions WHERE scope_id=?
+                ON CONFLICT(digest) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition
+                """, arguments: [policy.revision, Disposition.excluded.rawValue, id])
+            try db.execute(sql: "DELETE FROM retained_archive_scopes WHERE id=?", arguments: [id])
+        }
+        for id in projects {
+            try db.execute(sql: """
+                DELETE FROM projects WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1)
+                    AND NOT EXISTS(SELECT 1 FROM retained_archive_usage WHERE project_id=?1)
+                """, arguments: [id])
         }
     }
 
@@ -239,8 +273,10 @@ struct SessionExclusionGate {
     func finishRemovals(db: Database) throws {
         guard removedCount > 0 else { return }
         for projectID in touchedProjects {
-            try db.execute(sql: "DELETE FROM projects WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1)",
-                           arguments: [projectID])
+            try db.execute(sql: """
+                DELETE FROM projects WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM sessions WHERE project_id=?1)
+                    AND NOT EXISTS(SELECT 1 FROM retained_archive_usage WHERE project_id=?1)
+                """, arguments: [projectID])
         }
         try db.execute(sql: "DELETE FROM term_df WHERE term NOT IN (SELECT term FROM session_keywords)")
     }

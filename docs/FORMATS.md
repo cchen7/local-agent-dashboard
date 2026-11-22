@@ -344,3 +344,24 @@ and opaque cases are exercised with synthetic fixtures. The adapter accepts
 only a complete nonempty text field in a Claude assistant thinking block.
 Signatures and opaque/redacted data are ignored. The sampled Codex and Copilot
 files did not provide a verified nonempty counterpart for this feature.
+
+## Tool output archive evidence
+
+Sanitized samples confirmed Claude string/text-block-array tool results, Codex
+output arrays containing `input_text` strings, and longer Copilot result
+content strings. A separate schema-only check found Claude persisted-output
+markers naming a same-session `tool-results` text file. No raw paths or text
+were retained here. The archive and source-view paths use these shapes. The
+source reader derives only a validated filename inside the verified session's
+sidecar directory; it never opens the path printed in the record.
+
+## Tool input lookup
+
+Private read-only fixture capture on 2026-11-22 confirmed Claude
+`message.content[].tool_use.input` objects, Codex function-call argument strings,
+and Copilot tool-start argument objects. Committed checks use synthetic fixtures
+only. Claude parser v9 records an address for the argument object rather than
+using command/path text as the full input. Codex v5 and Copilot v3 record an
+address when clipping arguments. Their existing preview and event keys are
+unchanged. An authorized replay adds addresses to older live records; it cannot
+restore argument bodies from deleted originals.

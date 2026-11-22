@@ -18,12 +18,18 @@ public struct StatusActivitySignal: Equatable, Sendable {
     public let sequence: Int64
     public let timestampMilliseconds: Int64?
     public let kind: Kind
+    let eventID: Int64?
 
     /// Times are UTC epoch milliseconds; missing times inherit the previous file record (ADP-5).
     public init(sequence: Int64, timestampMilliseconds: Int64?, kind: Kind) {
+        self.init(sequence: sequence, timestampMilliseconds: timestampMilliseconds, kind: kind, eventID: nil)
+    }
+
+    init(sequence: Int64, timestampMilliseconds: Int64?, kind: Kind, eventID: Int64?) {
         self.sequence = sequence
         self.timestampMilliseconds = timestampMilliseconds
         self.kind = kind
+        self.eventID = eventID
     }
 }
 

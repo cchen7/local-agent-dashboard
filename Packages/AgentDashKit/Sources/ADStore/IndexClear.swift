@@ -26,6 +26,7 @@ public struct IndexClearPlan: Sendable {
     public let label: String?
     public var sessionCount: Int { selection.sessions.count }
     public var fileCount: Int { selection.files.count }
+    public var retainedRecordCount: Int { selection.retainedRecords }
     fileprivate let owner: ObjectIdentifier
     fileprivate let selection: ClearSelection
 }
@@ -38,14 +39,27 @@ public struct IndexClearResult: Sendable {
 public extension AgentStore {
     func indexClearChoices(hostHome: String?) -> some AsyncSequence<[IndexClearChoice], any Error> & Sendable {
         ValueObservation.tracking { db in
-            let projects = try Self.projectCatalog(db, hostHome: hostHome).map {
+            let live = try Self.projectCatalog(db, hostHome: hostHome)
+            let liveKeys = Set(live.map { $0.id.retentionKey })
+            var projects = live.map {
                 IndexClearChoice(id: .project($0.id), label: $0.name,
                                  location: [$0.path, $0.location].compactMap(\.self).joined(separator: " · "), removedSource: false)
+            }
+            var shown = liveKeys
+            for row in try Row.fetchAll(db, sql: """
+                SELECT project_key,label,location FROM retained_archive_scopes WHERE label IS NOT NULL ORDER BY id
+                """) {
+                let key: Data = row["project_key"]
+                if shown.insert(key).inserted {
+                    projects.append(.init(id: .project(.retained(key)), label: row["label"],
+                                          location: row["location"], removedSource: false))
+                }
             }
             let sources = try Row.fetchAll(db, sql: """
                 SELECT s.id,s.label,s.root_path,s.removed FROM sources s
                 WHERE s.removed=0 OR EXISTS(SELECT 1 FROM sessions WHERE source_id=s.id)
                       OR EXISTS(SELECT 1 FROM source_files WHERE source_id=s.id AND size IS NOT NULL)
+                      OR EXISTS(SELECT 1 FROM retained_archive_scopes WHERE source_id=s.id)
                 ORDER BY s.id
                 """).map {
                     IndexClearChoice(id: .source($0["id"]), label: $0["label"], location: $0["root_path"], removedSource: $0["removed"])
@@ -70,6 +84,7 @@ public extension AgentStore {
             do { selected = try ClearSelection.resolve(plan.scope, hostHome: hostHome, db: db) }
             catch IndexClearError.selectionMissing { throw IndexClearError.selectionChanged }
             guard selected.sessions == plan.selection.sessions, selected.files == plan.selection.files,
+                  selected.archiveScopes == plan.selection.archiveScopes, selected.retainedRecords == plan.retainedRecordCount,
                   (selected.label ?? "").utf8.elementsEqual((plan.label ?? "").utf8) else {
                 throw IndexClearError.selectionChanged
             }
@@ -84,6 +99,9 @@ public extension AgentStore {
                 INSERT OR IGNORE INTO temp.clear_index_refs(kind,id)
                     SELECT 'project',project_id FROM sessions
                     WHERE project_id IS NOT NULL AND id IN (SELECT id FROM temp.clear_index_sessions);
+                INSERT OR IGNORE INTO temp.clear_index_refs(kind,id)
+                    SELECT 'project',project_id FROM retained_archive_usage
+                    WHERE scope_id IN (SELECT id FROM temp.clear_archive_scopes) AND project_id<>0;
                 UPDATE sessions SET parent_session_id=NULL WHERE parent_session_id IN (SELECT id FROM temp.clear_index_sessions);
                 UPDATE sessions SET resumed_from_session_id=NULL WHERE resumed_from_session_id IN (SELECT id FROM temp.clear_index_sessions);
                 DELETE FROM sessions WHERE id IN (SELECT id FROM temp.clear_index_sessions);
@@ -91,12 +109,14 @@ public extension AgentStore {
             let removed = db.changesCount
             guard removed == selected.sessions.count else { throw IndexClearError.selectionChanged }
             try db.execute(sql: """
+                DELETE FROM retained_archive_scopes WHERE id IN (SELECT id FROM temp.clear_archive_scopes);
                 DELETE FROM blobs WHERE id IN (SELECT id FROM temp.clear_index_refs WHERE kind='blob')
                     AND NOT EXISTS(SELECT 1 FROM events WHERE blob_id=blobs.id);
                 DELETE FROM token_rate_bases WHERE id IN (SELECT id FROM temp.clear_index_refs WHERE kind='basis')
                     AND NOT EXISTS(SELECT 1 FROM token_events WHERE rate_basis_id=token_rate_bases.id);
                 DELETE FROM projects WHERE id IN (SELECT id FROM temp.clear_index_refs WHERE kind='project') AND pinned=0
-                    AND NOT EXISTS(SELECT 1 FROM sessions WHERE project_id=projects.id);
+                    AND NOT EXISTS(SELECT 1 FROM sessions WHERE project_id=projects.id)
+                    AND NOT EXISTS(SELECT 1 FROM retained_archive_usage WHERE project_id=projects.id);
                 DELETE FROM term_df WHERE term NOT IN (SELECT term FROM session_keywords);
                 UPDATE source_files SET device=NULL,inode=NULL,size=NULL,mtime_ns=NULL,read_offset=0,parser_version=0,
                     last_seq=-1,previous_ts=NULL,decoder_state=NULL,unknown_records=0,last_error=NULL,
@@ -127,7 +147,7 @@ public extension AgentStore {
             case .project:
                 try UsageChartChanges.publish(db)
             }
-            try db.execute(sql: "DELETE FROM temp.clear_index_sessions; DELETE FROM temp.clear_index_files; DELETE FROM temp.clear_index_refs;")
+            try db.execute(sql: "DELETE FROM temp.clear_index_sessions; DELETE FROM temp.clear_index_files; DELETE FROM temp.clear_index_refs; DELETE FROM temp.clear_archive_scopes;")
             return .init(removedSessions: removed, resetFiles: reset)
         }
     }
@@ -165,14 +185,23 @@ fileprivate struct ClearSelection: Sendable {
     let label: String?
     let sessions: [Session]
     let files: [File]
+    let archiveScopes: [Int64]
+    let retainedRecords: Int
 
     static func resolve(_ scope: IndexClearScope, hostHome: String?, db: Database) throws -> Self {
         let sessionSQL = "SELECT id,agent,native_id,file_id FROM sessions"
         let fileSQL = "SELECT id,source_id,rel_path FROM source_files"
+        let archives: [Int64]
+        switch scope {
+        case .everything: archives = try Int64.fetchAll(db, sql: "SELECT id FROM retained_archive_scopes ORDER BY id")
+        case .source(let id): archives = try Int64.fetchAll(db, sql: "SELECT id FROM retained_archive_scopes WHERE source_id=? ORDER BY id", arguments: [id])
+        case .project(let id): archives = try Int64.fetchAll(db, sql: "SELECT id FROM retained_archive_scopes WHERE project_key=? ORDER BY id", arguments: [id.retentionKey])
+        }
+        let count = try retainedCount(archives, db: db)
         switch scope {
         case .everything:
             return .init(label: nil, sessions: try Row.fetchAll(db, sql: sessionSQL + " ORDER BY id").map(Session.init),
-                         files: try Row.fetchAll(db, sql: fileSQL + " ORDER BY id").map(File.init))
+                         files: try Row.fetchAll(db, sql: fileSQL + " ORDER BY id").map(File.init), archiveScopes: archives, retainedRecords: count)
         case .source(let id):
             guard let row = try Row.fetchOne(db, sql: "SELECT label,root_path FROM sources WHERE id=?", arguments: [id])
             else { throw IndexClearError.selectionMissing }
@@ -180,14 +209,23 @@ fileprivate struct ClearSelection: Sendable {
             let path: String = row["root_path"]
             return .init(label: [name, path].joined(separator: " · "),
                          sessions: try Row.fetchAll(db, sql: sessionSQL + " WHERE source_id=? ORDER BY id", arguments: [id]).map(Session.init),
-                         files: try Row.fetchAll(db, sql: fileSQL + " WHERE source_id=? ORDER BY id", arguments: [id]).map(File.init))
+                         files: try Row.fetchAll(db, sql: fileSQL + " WHERE source_id=? ORDER BY id", arguments: [id]).map(File.init),
+                         archiveScopes: archives, retainedRecords: count)
         case .project(let id):
-            guard let project = try AgentStore.projectCatalog(db, hostHome: hostHome).first(where: { $0.id == id })
-            else { throw IndexClearError.selectionMissing }
-            let selected = try readRows(db, ids: project.activityScope.sessionIDs, base: sessionSQL).map(Session.init)
+            let project = try AgentStore.projectCatalog(db, hostHome: hostHome).first { $0.id.retentionKey == id.retentionKey }
+            let label: String
+            if let project {
+                label = [project.name, project.path, project.location].compactMap { $0 }.joined(separator: " · ")
+            } else {
+                guard let archive = try Row.fetchOne(db, sql: """
+                    SELECT label,location FROM retained_archive_scopes WHERE project_key=? AND label IS NOT NULL ORDER BY id LIMIT 1
+                    """, arguments: [id.retentionKey]) else { throw IndexClearError.selectionMissing }
+                label = [(archive["label"] as String?), (archive["location"] as String?)].compactMap { $0 }
+                    .filter { !$0.isEmpty }.joined(separator: " · ")
+            }
+            let selected = try readRows(db, ids: project?.activityScope.sessionIDs ?? [], base: sessionSQL).map(Session.init)
             let files = try readRows(db, ids: Array(Set(selected.compactMap(\.fileID))), base: fileSQL).map(File.init)
-            let label = [project.name, project.path, project.location].compactMap { $0 }.joined(separator: " · ")
-            return .init(label: label, sessions: selected, files: files)
+            return .init(label: label, sessions: selected, files: files, archiveScopes: archives, retainedRecords: count)
         }
     }
 
@@ -203,10 +241,26 @@ fileprivate struct ClearSelection: Sendable {
         return rows
     }
 
+    private static func retainedCount(_ ids: [Int64], db: Database) throws -> Int {
+        var count = 0
+        for start in stride(from: 0, to: ids.count, by: 400) {
+            let slice = ids[start..<min(start + 400, ids.count)]
+            let placeholders = Array(repeating: "?", count: slice.count).joined(separator: ",")
+            let batch = try Int.fetchOne(db, sql: "SELECT coalesce(sum(records),0) FROM retained_archive_usage WHERE scope_id IN (\(placeholders))",
+                                        arguments: StatementArguments(slice)) ?? 0
+            let added = count.addingReportingOverflow(batch)
+            guard !added.overflow else { throw StoreError.invalidTokenCounts }
+            count = added.partialValue
+        }
+        return count
+    }
+
     func stageTargets(_ db: Database) throws {
         try db.execute(sql: """
             CREATE TEMP TABLE IF NOT EXISTS clear_index_sessions(id INTEGER PRIMARY KEY);
             CREATE TEMP TABLE IF NOT EXISTS clear_index_files(id INTEGER PRIMARY KEY);
+            CREATE TEMP TABLE IF NOT EXISTS clear_archive_scopes(id INTEGER PRIMARY KEY);
+            DELETE FROM temp.clear_archive_scopes;
             CREATE TEMP TABLE IF NOT EXISTS clear_index_refs(kind TEXT NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(kind,id)) WITHOUT ROWID;
             DELETE FROM temp.clear_index_sessions;
             DELETE FROM temp.clear_index_files;
@@ -216,5 +270,7 @@ fileprivate struct ClearSelection: Sendable {
         for session in sessions { try insertSession.execute(arguments: [session.id]) }
         let insertFile = try db.cachedStatement(sql: "INSERT INTO temp.clear_index_files VALUES(?)")
         for file in files { try insertFile.execute(arguments: [file.id]) }
+        let insertArchive = try db.cachedStatement(sql: "INSERT INTO temp.clear_archive_scopes VALUES(?)")
+        for scope in archiveScopes { try insertArchive.execute(arguments: [scope]) }
     }
 }

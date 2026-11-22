@@ -4,7 +4,7 @@ import Foundation
 /// Local Codex CLI and desktop rollouts (ADP-CX).
 public struct CodexAdapter: AgentAdapter {
     public static let kind: AgentKind = .codex
-    public static let parserVersion = 3
+    public static let parserVersion = 5
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}
@@ -128,10 +128,12 @@ public struct CodexRecordDecoder: AgentFileDecoder {
         if let timestamp { metadata.lastEventAt = max(metadata.lastEventAt ?? timestamp, timestamp) }
         var records: [NormalizedRecord] = []
         func event(_ kind: EventKind, _ text: String?, tool: String? = nil, meta: String? = nil,
-                   channel: TranscriptChannel? = nil) -> NormalizedRecord {
+                   channel: TranscriptChannel? = nil, toolOutput: ToolOutputCapture? = nil,
+                   toolInput: ToolInputCapture? = nil) -> NormalizedRecord {
             .event(.init(session: previous.key, sequence: frame.sequence, timestamp: time, kind: kind,
                          toolName: tool, text: text, metadataJSON: meta,
-                         dedupeKey: Self.key(previous.key, line: frame.sequence, suffix: "event"), transcriptChannel: channel))
+                         dedupeKey: Self.key(previous.key, line: frame.sequence, suffix: "event"), transcriptChannel: channel,
+                         toolOutput: toolOutput, toolInput: toolInput))
         }
         func unknown() -> NormalizedRecord {
             // Do not persist partial/unclassified model-facing payloads.
@@ -200,14 +202,15 @@ public struct CodexRecordDecoder: AgentFileDecoder {
                 if let callID { remember(callID, name: tool) }
                 let args = AdapterJSON.string(payload["arguments"] ?? payload["input"]) ?? ""
                 records.append(event(.toolCall, AdapterJSON.prefix(args, bytes: 2048), tool: tool,
-                                     meta: Self.toolMetadata(callID, tool: name, arguments: args)))
+                                     meta: Self.toolMetadata(callID, tool: name, arguments: args),
+                                     toolInput: args.utf8.count > ToolOutputCapture.searchableBytes ? .init(.codex) : nil))
             case "function_call_output", "custom_tool_call_output":
                 let callID = AdapterJSON.string(payload["call_id"], bounded: 160)
                 let tool = recentCalls.last { $0.id == callID }?.name
-                let text = AdapterJSON.string(payload["output"], bounded: 2048)
-                    ?? (payload["output"] as? AdapterJSON.Object)
-                       .flatMap(AdapterJSON.json).map { AdapterJSON.prefix($0, bytes: 2048) }
-                records.append(event(.toolResult, text, tool: tool, meta: callID.flatMap { AdapterJSON.json(["call_id": $0]) }))
+                let body = ToolOutputText.codex(payload["output"])
+                records.append(event(.toolResult, body.map { AdapterJSON.prefix($0, bytes: ToolOutputCapture.searchableBytes) },
+                                     tool: tool, meta: callID.flatMap { AdapterJSON.json(["call_id": $0]) },
+                                     toolOutput: body.flatMap { .init(format: .codex, text: $0) }))
             case "reasoning": break
             default: records.append(unknown())
             }

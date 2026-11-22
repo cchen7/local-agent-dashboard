@@ -237,6 +237,34 @@ def check_forbidden(root):
     return len(files)
 
 
+def check_ui_keyboard(root):
+    """Keep automatic input-source selection and all raw posting out of smoke cases."""
+    root = Path(root).resolve()
+    blocked = re.compile(
+        r"\b(?:typeText|typeKey|TIS(?:CreateInputSourceList|CopyInputSourceForLanguage|"
+        r"SelectInputSource|DeselectInputSource|EnableInputSource|DisableInputSource|RegisterInputSource)|"
+        r"CGRequestPostEventAccess|CGEventKeyboardSetUnicodeString|keyboardSetUnicodeString|CGEventPost|"
+        r"cghidEventTap|cgSessionEventTap)\b"
+    )
+    raw = re.compile(r"\b(?:TISCopyCurrentKeyboardInputSource|CGEventPostToPid|postToPid|keyboardEventSource)\b")
+    driver = Path("App/Tests/FixedKeyboardTests.swift")
+    paths = sorted((root / "App/Tests").rglob("*.swift"))
+    for path in paths:
+        if path.is_symlink():
+            raise PrerequisiteError("UI test inputs must not be symlinks")
+        try:
+            code = strip_comments(path.read_text(encoding="utf-8"), mask_strings=True)
+        except (UnicodeError, OSError):
+            raise PrerequisiteError("a UI test file could not be read as UTF-8") from None
+        relative = path.relative_to(root)
+        bad = blocked.search(code)
+        if not bad and relative != driver:
+            bad = raw.search(code)
+        if bad:
+            line = code.count("\n", 0, bad.start()) + 1
+            raise Violation(f"{relative}:{line}: input-source automation or unguarded keyboard events")
+    return len(paths)
+
 def load_json(path):
     def unique_keys(pairs):
         value = {}
@@ -359,7 +387,8 @@ def main():
     try:
         if args.command == "forbid":
             count = check_forbidden(args.root)
-            print(f"forbid-apis: passed ({count} production source files inspected)")
+            ui_count = check_ui_keyboard(args.root)
+            print(f"forbid-apis: passed ({count} production and {ui_count} UI test source files inspected)")
         elif args.command == "dependencies":
             version = check_dependencies(args.root)
             print(f"check-dependencies: passed (GRDB.swift exact {version}, lockfiles consistent)")

@@ -292,3 +292,42 @@ private func rawZstd(_ data: Data) -> Data {
     }
     return frame
 }
+
+@Test("ADP-7: verified compressed Codex output arrays can be read on demand without changing the archive")
+func compressedToolOutputArrayIsReadOnly() throws {
+    let box = try CodexFixture()
+    defer { box.remove() }
+    let text = String(repeating: "synthetic array output ", count: 180)
+    let raw = lines([box.header,
+        #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"synthetic","output":[{"type":"input_text","text":"\#(text)"}]}}"#])
+    let compressed = rawZstd(raw)
+    try box.write(compressed, to: box.archive)
+    _ = try box.store.setToolOutputArchiveLimit(.previewOnly)
+    _ = try box.importPath(box.archive)
+    let output = try #require(try box.store.events(in: box.key).first { $0.kind == .toolResult })
+    #expect(output.text?.utf8.count == 2048)
+    let details = try box.store.toolOutputDetails(in: box.key, eventKey: output.dedupeKey)
+    #expect(details.archivedText == nil && details.hasOriginal)
+    let registration = try #require(try box.store.registeredToolOutput(in: box.key, eventKey: output.dedupeKey))
+    #expect(registration.origin.byteStart == nil)
+    #expect(try ToolOutputReader.read(registration, authorizedRoot: box.root).text == text)
+    #expect(try Data(contentsOf: box.root.appendingPathComponent(box.archive)) == compressed)
+}
+
+@Test("§11.2: a compressed Codex tool input is recovered from its verified logical frame")
+func compressedToolInputIsReadOnly() throws {
+    let box = try CodexFixture()
+    defer { box.remove() }
+    let input = String(repeating: "synthetic argument ", count: 200)
+    let raw = lines([box.header,
+        #"{"type":"response_item","payload":{"type":"custom_tool_call","name":"synthetic","call_id":"synthetic","input":"\#(input)"}}"#])
+    let compressed = rawZstd(raw)
+    try box.write(compressed, to: box.archive)
+    _ = try box.importPath(box.archive)
+    let event = try #require(try box.store.events(in: box.key).first { $0.kind == .toolCall })
+    #expect(event.text?.utf8.count == 2048)
+    let registered = try #require(try box.store.registeredToolInput(in: box.key, eventKey: event.dedupeKey))
+    #expect(registered.origin.byteStart == nil)
+    #expect(try ToolInputReader.read(registered, authorizedRoot: box.root) == input)
+    #expect(try Data(contentsOf: box.root.appendingPathComponent(box.archive)) == compressed)
+}

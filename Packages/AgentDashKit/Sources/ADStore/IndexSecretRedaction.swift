@@ -89,6 +89,19 @@ enum IndexSecretRedaction {
                 try db.execute(sql: "UPDATE source_files SET decoder_state=NULL,parser_version=0 WHERE id=?", arguments: [row["id"] as Int64])
             }
         }
+        let archiveLimit = try ToolOutputArchive.limit(db)
+        try pages("SELECT id,codec,raw_len,data FROM blobs", db: db) { row in
+            let id: Int64 = row["id"]
+            let text = ToolOutputArchive.decode(row)
+            let clean = text.map(IndexSecretMasker.text)
+            guard text == nil || clean != text else { return }
+            if let clean, let replacement = ToolOutputArchive.encode(clean, limit: archiveLimit) {
+                try db.execute(sql: "UPDATE blobs SET raw_len=?,data=? WHERE id=?", arguments: [replacement.rawCount,replacement.bytes,id])
+            } else {
+                try db.execute(sql: "UPDATE events SET blob_id=NULL WHERE blob_id=?", arguments: [id])
+                try ToolOutputArchive.removeUnreferenced(id, db: db)
+            }
+        }
         try db.execute(sql: "DELETE FROM session_keywords; DELETE FROM term_df;")
     }
 
@@ -97,6 +110,16 @@ enum IndexSecretRedaction {
         safe.text = value.text.map(IndexSecretMasker.text)
         safe.toolName = value.toolName.map(IndexSecretMasker.text)
         safe.metadataJSON = value.metadataJSON.flatMap(IndexSecretMasker.eventMetadata)
+        if var capture = value.toolOutput {
+            capture.archiveText = capture.archiveText.map(IndexSecretMasker.text)
+            if let text = capture.archiveText {
+                let prefix = Data(text.utf8.prefix(ToolOutputCapture.searchableBytes))
+                safe.text = (0...min(3, prefix.count)).lazy.compactMap {
+                    String(bytes: prefix.dropLast($0), encoding: .utf8)
+                }.first ?? ""
+            }
+            safe.toolOutput = capture
+        }
         return safe
     }
 
