@@ -144,7 +144,7 @@ func watchingSourceDoesNotIndexAReplacementRoot() async throws {
     #expect(try store.events(in: .init(agent: .claudeCode, nativeID: initialID)).count == 1)
 }
 
-@Test("FR-STO-1: confirmed source deletion retains readable and searchable data and replay restores the same session",
+@Test("FR-STO-1: source deletion and index rebuild retain data, and replay restores the same session",
       .timeLimit(.minutes(1)))
 func nativeSourceArchiveRetainsTranscriptSearchAndUsage() async throws {
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent("source-archive-\(UUID().uuidString)")
@@ -242,6 +242,14 @@ func nativeSourceArchiveRetainsTranscriptSearchAndUsage() async throws {
                                      mode: .fullRescan) { _ in }
     #expect(try store.checkpoint(for: original.id) == gone)
     #expect(try store.transcriptPage(in: key) == opening)
+
+    // Rebuild from the app's retained records while the original file is absent.
+    let rebuilt = try store.rebuildIndex(scoring: .init(counts: { _ in [:] }, top: { _, _, _ in [] }))
+    #expect(rebuilt.indexedEvents == opening.events.count)
+    #expect(try store.checkpoint(for: original.id) == gone)
+    #expect(try store.searchIndex(query, scope: scope).groups.map(\.session) == [key])
+    #expect(try store.transcriptPage(in: key) == opening)
+    #expect(try store.usage(window: window).totals.counts.total == 10)
 
     // Same inode and bytes force a replay; the archive marker must clear
     // without introducing a second transcript, search hit or token event.

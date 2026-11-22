@@ -36,16 +36,25 @@ public enum SessionSearch {
         let query = try SearchQuery.parse(raw)
         let snapshot = try store.searchIndex(query, scope: scope, order: order, limit: limit, offset: offset)
         let terms = query.groups.flatMap(\.positive).map(\.text)
+        var previous: (body: String, tool: String, parts: [SearchSnippetPart])?
         let hits = try snapshot.groups.map { group in
             try Task.checkCancellation()
             let rawBody = group.bestText ?? ""
             let rawTool = group.bestTool ?? ""
-            let body = maskSecrets ? SecretMasker.mask(rawBody) : rawBody
-            let tool = maskSecrets ? SecretMasker.mask(rawTool) : rawTool
-            let text = containsAny(body, terms: terms) || tool.isEmpty ? body :
-                ([tool, body].filter { !$0.isEmpty }.joined(separator: " · "))
+            let parts: [SearchSnippetPart]
+            if let previous, previous.body.utf8.elementsEqual(rawBody.utf8),
+               previous.tool.utf8.elementsEqual(rawTool.utf8) {
+                parts = previous.parts
+            } else {
+                let body = maskSecrets ? SecretMasker.mask(rawBody) : rawBody
+                let tool = maskSecrets ? SecretMasker.mask(rawTool) : rawTool
+                let text = containsAny(body, terms: terms) || tool.isEmpty ? body :
+                    ([tool, body].filter { !$0.isEmpty }.joined(separator: " · "))
+                parts = snippet(text, terms: terms)
+                previous = (rawBody, rawTool, parts)
+            }
             return SessionSearchHit(id: group.session, firstMatchKey: group.firstMatchKey,
-                                    matchCount: group.matchCount, snippet: snippet(text, terms: terms))
+                                    matchCount: group.matchCount, snippet: parts)
         }
         return .init(hits: hits, matchCount: snapshot.matchCount, sessionCount: snapshot.sessionCount)
     }

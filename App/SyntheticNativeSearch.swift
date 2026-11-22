@@ -116,7 +116,7 @@ struct SyntheticNativeSearch: Sendable {
 final class SyntheticNativeSearchRun {
     static let shared = SyntheticNativeSearchRun()
 
-    private enum Action { case query, nextPage, commit }
+    private enum Action { case query, nextPage, previousPage, commit, seedTail, removeTail }
 
     private struct Scenario {
         let label: String
@@ -124,25 +124,63 @@ final class SyntheticNativeSearchRun {
         let matches: Int
         let sessions: Int
         var action: Action = .query
-        @MainActor var offset: Int { action == .query ? 0 : DashboardModel.sessionSearchPageSize }
+        var offset = 0
+        var verifiesOnly = false
+        var verifiesRanking = false
+        var requiresUncachedRead = false
+        var expectsNewCount: Bool { action == .commit || action == .removeTail }
     }
 
-    private let scenarios: [Scenario] = {
-        let broad = "auth OR middleware"
+    private static let broad = "auth OR middleware"
+    private static let tail = "qaonlypagetail"
+    private let scenarios = SyntheticNativeSearchRun.makeScenarios()
+
+    private static func makeScenarios() -> [Scenario] {
+        let broad = Self.broad
+        let directory = Scenario(label: "directory", text: "dir:~/work/bench-42", matches: 500, sessions: 1)
+        let requested = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_CYCLES"].flatMap(Int.init)
+        let cycles = requested.flatMap { (1...20).contains($0) ? $0 : nil } ?? 20
+        let pageSize = DashboardModel.sessionSearchPageSize
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_FOCUS"] == "boundaries" {
+            var steps: [Scenario] = [.init(label: "boundary-first", text: broad, matches: 100_000, sessions: 2_000,
+                                          verifiesOnly: true, verifiesRanking: true)]
+            for page in 2...8 {
+                steps.append(.init(label: "forward-\(page)", text: broad, matches: 100_000, sessions: 2_000,
+                                   action: .nextPage, offset: (page - 1) * pageSize, verifiesRanking: true,
+                                   requiresUncachedRead: !page.isMultiple(of: 2)))
+            }
+            for page in [7, 6] {
+                steps.append(.init(label: "back-\(page)", text: broad, matches: 100_000, sessions: 2_000,
+                                   action: .previousPage, offset: (page - 1) * pageSize, verifiesRanking: true,
+                                   requiresUncachedRead: page == 6))
+            }
+            var reset = directory
+            reset.verifiesOnly = true
+            let timedBroad = Scenario(label: "broad", text: broad, matches: 100_000, sessions: 2_000)
+            for _ in 0..<cycles { steps += [reset, timedBroad] }
+            steps += [
+                .init(label: "tail-query", text: Self.tail, matches: 51, sessions: 51, action: .seedTail,
+                      verifiesOnly: true, verifiesRanking: true),
+                .init(label: "tail-page", text: Self.tail, matches: 51, sessions: 51, action: .nextPage,
+                      offset: pageSize, verifiesOnly: true, verifiesRanking: true),
+                .init(label: "tail-reset", text: Self.tail, matches: 50, sessions: 50, action: .removeTail,
+                      verifiesOnly: true, verifiesRanking: true),
+            ]
+            return steps
+        }
         let cycle: [Scenario] = [
             .init(label: "mixed", text: "登录 verify", matches: 20_000, sessions: 2_000),
             .init(label: "chinese", text: "登录", matches: 20_000, sessions: 2_000),
             .init(label: "broad", text: broad, matches: 100_000, sessions: 2_000),
-            .init(label: "next-page", text: broad, matches: 100_000, sessions: 2_000, action: .nextPage),
-            .init(label: "directory", text: "dir:~/work/bench-42", matches: 500, sessions: 1),
+            .init(label: "next-page", text: broad, matches: 100_000, sessions: 2_000, action: .nextPage, offset: pageSize),
+            directory,
         ]
-        let requested = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_CYCLES"].flatMap(Int.init)
-        let cycles = requested.flatMap { (1...20).contains($0) ? $0 : nil } ?? 20
         var steps = (0..<cycles).flatMap { _ in cycle }
-        steps.insert(.init(label: "page-refresh", text: broad, matches: 100_001, sessions: 2_000, action: .commit),
+        steps.insert(.init(label: "page-refresh", text: broad, matches: 100_001, sessions: 2_000,
+                           action: .commit, offset: pageSize),
                      at: steps.count - 1)
         return steps
-    }()
+    }
     private var warmed = false
     private var completed = 0
     private var waiting = false
@@ -176,6 +214,8 @@ final class SyntheticNativeSearchRun {
                 model.editSearchText(scenario.text)
             case .nextPage:
                 model.pageSessionSearch(forward: true)
+            case .previousPage:
+                model.pageSessionSearch(forward: false)
             case .commit:
                 guard let store = model.store, model.sessionSearchOffset == scenario.offset else {
                     return SyntheticNativeSearch.report("second page not visible before commit")
@@ -190,6 +230,29 @@ final class SyntheticNativeSearchRun {
                 } catch {
                     SyntheticNativeSearch.report("synthetic search commit failed")
                 }
+            case .seedTail, .removeTail:
+                guard let store = model.store else { return SyntheticNativeSearch.report("missing synthetic store") }
+                let removeTail = scenario.action == .removeTail
+                let term = scenario.text
+                guard !removeTail || (model.sessionSearchOffset == DashboardModel.sessionSearchPageSize &&
+                                     model.selectedSessionID?.nativeID == "bench-1") else {
+                    return SyntheticNativeSearch.report("synthetic tail not selected before commit")
+                }
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        // Change only the text of the last session's one matching row.
+                        let records = (1...(removeTail ? 1 : 51)).map { id in
+                            NormalizedRecord.event(.init(session: .init(agent: .codex, nativeID: "bench-\(id)"),
+                                sequence: 500, timestamp: 1_795_000_000_500, kind: .assistant,
+                                text: removeTail ? "synthetic nonmatching replacement" : term,
+                                dedupeKey: "native-search-tail-\(id)"))
+                        }
+                        try store.write(records)
+                    }.value
+                    if !removeTail { model.editSearchText(scenario.text) }
+                } catch {
+                    SyntheticNativeSearch.report("synthetic tail commit failed")
+                }
             }
         }
     }
@@ -198,7 +261,7 @@ final class SyntheticNativeSearchRun {
         guard waiting, completed < scenarios.count, published == 0 else { return }
         let scenario = scenarios[completed]
         guard scenario.text == text, offset == scenario.offset,
-              scenario.action != .commit || matches == scenario.matches else { return }
+              !scenario.expectsNewCount || matches == scenario.matches else { return }
         debounceMS = debounce
         queryMS = query
         published = DispatchTime.now().uptimeNanoseconds
@@ -210,7 +273,7 @@ final class SyntheticNativeSearchRun {
         guard waiting, published > 0, completed < scenarios.count else { return nil }
         let scenario = scenarios[completed]
         guard model.sessionSearchText == scenario.text, model.sessionSearchOffset == scenario.offset,
-              scenario.action != .commit || results.matchCount == scenario.matches else { return nil }
+              !scenario.expectsNewCount || results.matchCount == scenario.matches else { return nil }
         return "synthetic-search result \(completed):\(results.matchCount)"
     }
 
@@ -220,9 +283,24 @@ final class SyntheticNativeSearchRun {
         let scenario = scenarios[completed]
         waiting = false
         guard results.matchCount == scenario.matches, results.sessionCount == scenario.sessions,
-              results.hits.count == min(scenario.sessions, DashboardModel.sessionSearchPageSize),
+              results.hits.count == min(scenario.sessions - scenario.offset, DashboardModel.sessionSearchPageSize),
               scenario.label != "directory" || results.hits.first?.id.nativeID == "bench-42"
         else { return SyntheticNativeSearch.report("drawn results disagree with fixture") }
+        if scenario.verifiesRanking {
+            let end = scenario.sessions - scenario.offset
+            // All matching sessions have equal scores and timestamps. The fixture
+            // creates them in ascending ID order, so tied results descend by ID.
+            let top = end + (scenario.action == .removeTail ? 1 : 0)
+            let expected = (0..<results.hits.count).map {
+                SessionKey(agent: .codex, nativeID: "bench-\(top - $0)")
+            }
+            guard results.hits.map(\.id) == expected, model.selectedSessionID == expected.first else {
+                return SyntheticNativeSearch.report("ranking or selected session disagrees at \(scenario.label)")
+            }
+        }
+        if scenario.requiresUncachedRead, queryMS == 0 {
+            return SyntheticNativeSearch.report("expected an uncached read at \(scenario.label)")
+        }
         if scenario.label == "broad" { previousPage = Set(results.hits.map(\.id)) }
         if scenario.action == .nextPage, !previousPage.isDisjoint(with: results.hits.map(\.id)) {
             return SyntheticNativeSearch.report("result pages overlap")
@@ -234,6 +312,8 @@ final class SyntheticNativeSearchRun {
         // Exclude only the prescribed delay, not any scheduler oversleep.
         if scenario.action == .commit {
             SyntheticNativeSearch.report("refreshed offset \(scenario.offset) matches \(results.matchCount)")
+        } else if scenario.verifiesOnly {
+            SyntheticNativeSearch.report("verified \(scenario.label) offset \(scenario.offset) matches \(results.matchCount)")
         } else {
             let adjusted = max(0, total - (scenario.action == .query ? 150 : 0))
             SyntheticNativeSearch.report(String(format: "drawn %@ total %.1f ms, adjusted %.1f ms, debounce %.1f ms, query %.1f ms, draw %.1f ms",

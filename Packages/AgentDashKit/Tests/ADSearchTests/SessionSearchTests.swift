@@ -40,6 +40,28 @@ func mixedSearchGroupsAndAnchors() throws {
     #expect(restricted.hits.first?.id != second.hits.first?.id)
 }
 
+@Test("FR-SR: interleaved writes keep exact session counts, relevance and earliest anchors")
+func interleavedSearchUsesAllHitsForEachSession() throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let a = fixture.session("interleaved-a", cwd: "/synthetic/work/a")
+    let b = fixture.session("interleaved-b", cwd: "/synthetic/work/b")
+    try fixture.store.write([
+        .session(a), .session(b),
+        fixture.event(a.key, "a-later", 4, "auth"),
+        fixture.event(b.key, "b-later", 3, "auth"),
+        fixture.event(a.key, "a-earliest", 1, "auth"),
+        fixture.event(b.key, "b-earliest", 1, "auth"),
+        fixture.event(a.key, "a-best", 2, "auth auth auth"),
+    ])
+    let exact = try fixture.run("auth OR middleware")
+    #expect(exact.sessionCount == 2 && exact.matchCount == 5)
+    #expect(exact.hits.map(\.id) == [a.key, b.key])
+    #expect(exact.hits.map(\.matchCount) == [3, 2])
+    #expect(exact.hits.map(\.firstMatchKey) == ["a-earliest", "b-earliest"])
+    #expect(exact.hits.first?.snippet.filter(\.highlighted).count == 3)
+}
+
 @Test("FR-SR: navigation keeps query scope, file order, stable ties and bounded pages")
 func navigatesMatchesWithinTheSelectedSession() throws {
     let fixture = try SearchFixture()

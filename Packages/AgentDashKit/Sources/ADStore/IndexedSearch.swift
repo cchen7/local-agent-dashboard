@@ -105,9 +105,10 @@ public extension AgentStore {
         let compiled = try SearchStatement(query, scope: scope)
         do {
             return try databasePool.read { db in
-                // This pragma is reader-local. Let SQLite avoid copying hot
-                // pages for FTS lookups, with a fixed mapping size.
-                if compiled.usesFTS { _ = try? Int.fetchOne(db, sql: "PRAGMA mmap_size=67108864") }
+                // Reader-local virtual mapping: cover the event and FTS
+                // pages of a typical large index without copying each page
+                // through SQLite's heap. Pages are faulted only on use.
+                if compiled.usesFTS { _ = try? Int.fetchOne(db, sql: "PRAGMA mmap_size=268435456") }
                 return try Self.search(compiled, now: scope.now, order: order, limit: limit, offset: offset, db: db)
             }
         } catch is CancellationError {
@@ -191,18 +192,29 @@ public extension AgentStore {
 
     private static func search(_ statement: SearchStatement, now: Int64, order: SessionSearchOrder,
                                limit: Int, offset: Int, db: Database) throws -> IndexedSearchSnapshot {
-        let cursor = try Row.fetchCursor(db, sql: statement.sql, arguments: .init(statement.arguments))
+        let query = try db.cachedStatement(sql: statement.sql)
+        let cursor = try Row.fetchCursor(query, arguments: .init(statement.arguments))
         var matches: [Int64: MatchTally] = [:]
         var count = 0
+        // FTS normally visits nearby event IDs together. Keep the current
+        // tally in registers and merge each run back by session; sessions
+        // whose events are interleaved do not have to be contiguous.
+        var activeID: Int64?
+        var active: MatchTally?
         try cursor.forEach { row in
             if count.isMultiple(of: 1024) { try Task.checkCancellation() }
             count += 1
             let sessionID: Int64 = row[1]
             let hit = EventRank(id: row[0], sequence: row[2], score: row[4])
             let time: Int64 = row[3]
-            matches[sessionID, default: .init(count: 0, first: hit, best: hit, lastEvent: time)]
-                .append(hit, timestamp: time)
+            if activeID != sessionID {
+                if let activeID, let active { matches[activeID] = active }
+                activeID = sessionID
+                active = matches[sessionID] ?? .init(count: 0, first: hit, best: hit, lastEvent: time)
+            }
+            active?.append(hit, timestamp: time)
         }
+        if let activeID, let active { matches[activeID] = active }
         guard !matches.isEmpty else { return .init(groups: [], sessionCount: 0, matchCount: 0) }
         try Task.checkCancellation()
         let volumes = order == .tokens ? try searchVolumes(for: matches.keys, db: db) : [:]
@@ -306,7 +318,9 @@ private struct SearchStatement {
     var usesFTS: Bool { fts }
 
     var sql: String {
-        let rank = fts ? "-events_fts.rank" : "0.0"
+        // No query overrides the default FTS rank. Call the same BM25
+        // function directly; this query groups hits without sorting by rank.
+        let rank = fts ? "-bm25(events_fts)" : "0.0"
         return selecting("e.id,e.session_id,e.seq,e.ts,\(rank) AS score")
     }
 

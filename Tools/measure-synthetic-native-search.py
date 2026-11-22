@@ -17,8 +17,9 @@ from uuid import UUID, uuid4
 
 PREFIX = b"synthetic-search: "
 SCENARIOS = ("mixed", "chinese", "broad", "next-page", "directory")
+BOUNDARY_PAGES = (*(f"forward-{page}" for page in range(2, 9)), "back-7", "back-6")
 RESULT = re.compile(
-    rb"drawn (mixed|chinese|broad|next-page|directory) total ([0-9.]+) ms, adjusted ([0-9.]+) ms,"
+    rb"drawn ([a-z0-9-]+) total ([0-9.]+) ms, adjusted ([0-9.]+) ms,"
     rb" debounce ([0-9.]+) ms, query ([0-9.]+) ms, draw ([0-9.]+) ms"
 )
 
@@ -41,10 +42,12 @@ def checked_source(identifier):
     return index, raw
 
 
-def environment(identifier, mode, cycles=1, proof=None):
+def environment(identifier, mode, cycles=1, proof=None, boundaries=False):
     result = {key: value for key, value in os.environ.items() if not key.startswith("AGENTDASH_")}
     result["AGENTDASH_SYNTHETIC_NATIVE_SEARCH"] = f"{mode}:{identifier}"
     result["AGENTDASH_SYNTHETIC_SEARCH_CYCLES"] = str(cycles)
+    if boundaries:
+        result["AGENTDASH_SYNTHETIC_SEARCH_FOCUS"] = "boundaries"
     if proof is not None:
         result["AGENTDASH_SYNTHETIC_SEARCH_PROOF"] = proof
     return result
@@ -89,13 +92,14 @@ def install(executable, identifier, source, proof):
             raise RuntimeError(f"Signed install did not verify the fixture (status {child.returncode})")
 
 
-def measure(executable, identifier, cycles):
+def measure(executable, identifier, cycles, boundaries):
     with subprocess.Popen(
         [str(executable), "--synthetic", "--window-size", "1120x720", "--appearance", "dark"],
-        env=environment(identifier, "measure", cycles), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        env=environment(identifier, "measure", cycles, boundaries=boundaries),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
     ) as child:
         try:
-            return read_measurements(child, cycles)
+            return read_measurements(child, cycles, boundaries)
         finally:
             child.terminate()
             try:
@@ -105,11 +109,25 @@ def measure(executable, identifier, cycles):
                 child.wait()
 
 
-def read_measurements(child, cycles):
-    data = {scenario: [] for scenario in SCENARIOS}
-    expected = iter(SCENARIOS * cycles)
+def read_measurements(child, cycles, boundaries):
+    if boundaries:
+        data = {scenario: [] for scenario in (*BOUNDARY_PAGES, "broad")}
+        expected = [
+            "verified boundary-first offset 0 matches 100000",
+            *BOUNDARY_PAGES,
+            *(("verified directory offset 0 matches 500", "broad") * cycles),
+            "verified tail-query offset 0 matches 51",
+            "verified tail-page offset 50 matches 51",
+            "verified tail-reset offset 0 matches 50",
+        ]
+        unmeasured = {"verified directory offset 0 matches 500"}
+    else:
+        data = {scenario: [] for scenario in SCENARIOS}
+        expected = list(SCENARIOS * cycles)
+        expected.insert(-1, "refreshed offset 50 matches 100001")
+        unmeasured = set()
     ready = False
-    refreshed = False
+    completed = 0
     pending = b""
     deadline = time.monotonic() + 20
     while child.poll() is None and time.monotonic() < deadline:
@@ -129,25 +147,23 @@ def read_measurements(child, cycles):
                 ready = True
                 deadline = time.monotonic() + 8
                 continue
-            if (marker == b"refreshed offset 50 matches 100001" and ready and not refreshed
-                    and len(data["next-page"]) == cycles and len(data["directory"]) == cycles - 1):
-                refreshed = True
-                print(marker.decode(), flush=True)
-                deadline = time.monotonic() + 8
-                continue
-            if marker == b"done" and ready and refreshed and all(len(v) == cycles for v in data.values()):
+            if marker == b"done" and ready and completed == len(expected):
                 return data
             match = RESULT.fullmatch(marker)
-            if not ready or not match:
+            scenario = match[1].decode() if match else marker.decode()
+            if not ready or completed >= len(expected) or scenario != expected[completed]:
                 raise RuntimeError(f"Unexpected native search result: {marker.decode()}")
-            scenario = match[1].decode()
-            if scenario != next(expected, None):
-                raise RuntimeError("Native search sequence disagrees with the driver")
-            sample = tuple(float(match[i]) for i in range(2, 7))
-            if (scenario == "next-page" and sample[2] != 0) or (scenario != "next-page" and sample[2] < 149):
-                raise RuntimeError("Search debounce did not match the production path")
-            data[scenario].append(sample)
-            print(marker.decode(), flush=True)
+            if match:
+                sample = tuple(float(match[i]) for i in range(2, 7))
+                page = scenario == "next-page" or scenario in BOUNDARY_PAGES
+                if (page and sample[2] != 0) or (not page and sample[2] < 149):
+                    raise RuntimeError("Search debounce did not match the production path")
+                data[scenario].append(sample)
+            elif scenario in data:
+                raise RuntimeError("Expected a timing for a measured step")
+            if scenario not in unmeasured:
+                print(marker.decode(), flush=True)
+            completed += 1
             deadline = time.monotonic() + 8
         if len(pending) > 16_384:
             raise RuntimeError("Unexpected output from the synthetic app")
@@ -159,6 +175,7 @@ def main():
     parser.add_argument("app", type=Path, help="signed optimized SyntheticQA bundle")
     parser.add_argument("--export", required=True, type=UUID)
     parser.add_argument("--cycles", type=int, choices=range(1, 21), metavar="1–20", default=20)
+    parser.add_argument("--boundaries", action="store_true", help="verify deep paging and retest only broad OR")
     args = parser.parse_args()
     running = subprocess.run(["/usr/bin/pgrep", "-x", "AgentDashboard"], stdout=subprocess.DEVNULL)
     if running.returncode != 1:
@@ -170,9 +187,11 @@ def main():
     identifier = uuid4()
     install(executable, identifier, source, proof)
     try:
-        results = measure(executable, identifier, args.cycles)
+        results = measure(executable, identifier, args.cycles, args.boundaries)
         passed = True
         for scenario, samples in results.items():
+            if args.boundaries and scenario in BOUNDARY_PAGES:
+                continue  # The ordered boundary walk has one timing per transition.
             rank = math.ceil(len(samples) * 0.95) - 1
             total, adjusted, debounce, query, draw = (sorted(column)[rank] for column in zip(*samples))
             print(f"{scenario}: P95 total {total:.1f}, adjusted {adjusted:.1f}, debounce {debounce:.1f}, "

@@ -832,3 +832,18 @@ the Next button, and measures through the first visible result row draw.
 It checks exact counts, disjoint pages and the refreshed count at the same
 offset after a synthetic commit. The timing reports both the full duration
 and the duration excluding only the prescribed debounce. No keyboard is used.
+
+## DEV-093 — Check cold page transitions and broad OR (FR-SR, NFR-4)
+
+The signed SyntheticQA runner's `--boundaries` mode walks the million-event
+fixture from page one through eight, then back twice. Check every ranked
+identity and the selected session, including crossings that must read an
+uncached result page. Then repeat broad OR alone for latency, using a
+narrow prefill between samples, and verify that a real event rewrite
+empties the tail page and returns to page one with the exact new count.
+
+The FTS reader uses a bounded, reader-local 256 MiB virtual mapping so
+large index reads can reuse mapped file pages. Tally consecutive hits
+locally, merging by session when the rows are interleaved. Keep the same
+BM25 ordering, exact totals, and masking before highlighting; reuse the
+last snippet only for byte-identical input within that read.
