@@ -194,6 +194,8 @@ final class DashboardModel {
                 let synthetic = CommandLine.arguments.contains("--synthetic")
                 #if AGENTDASH_SYNTHETIC_ONLY
                 let startup = try SyntheticStartupFixture.request()
+                let live = try SyntheticLiveUpdateFixture.request()
+                guard startup == nil || live == nil else { throw StoreError.invalidLocation }
                 if let startup {
                     directory = try startup.openDirectory()
                 } else if synthetic {
@@ -201,7 +203,7 @@ final class DashboardModel {
                 } else {
                     throw StoreError.invalidLocation
                 }
-                let standardFixtures = startup == nil
+                let standardFixtures = startup == nil && live == nil
                 #else
                 if synthetic {
                     directory = FileManager.default.temporaryDirectory.appendingPathComponent("AgentDashboard-\(UUID().uuidString)")
@@ -222,7 +224,12 @@ final class DashboardModel {
                 let previewUsage = standardFixtures && synthetic &&
                     (CommandLine.arguments.contains("--synthetic-usage") ||
                      ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_USAGE"] == "1")
-                let bundled = !synthetic || !standardFixtures || previewUsage || syntheticPricingDirectory != nil
+                #if AGENTDASH_SYNTHETIC_ONLY
+                let startupPricing = startup != nil
+                #else
+                let startupPricing = false
+                #endif
+                let bundled = !synthetic || startupPricing || previewUsage || syntheticPricingDirectory != nil
                     ? Bundle.main.url(forResource: "pricing", withExtension: "json") : nil
                 let runtime = LocalPricingRuntime(external: externalDirectory?.appendingPathComponent("pricing.json"),
                                                   bundled: bundled, store: store)
@@ -234,6 +241,7 @@ final class DashboardModel {
                 }
                 #if AGENTDASH_SYNTHETIC_ONLY
                 if startup?.preparesIndex == true { try SyntheticStartupFixture.seed(in: directory, store: store) }
+                if let live { try live.register(in: store) }
                 #endif
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
@@ -290,11 +298,20 @@ final class DashboardModel {
                     } catch { self?.statusPipeline = nil }
                 }
             }
+            #if AGENTDASH_SYNTHETIC_ONLY
+            if let live = SyntheticLiveUpdateFixture.current {
+                guard let source = sources.first(where: live.matches) else { throw StoreError.invalidLocation }
+                startIndexing(source)
+            }
+            #endif
         } catch {
             storageFailed = true
             #if AGENTDASH_SYNTHETIC_ONLY
             if ProcessInfo.processInfo.environment[SyntheticStartupFixture.environmentKey] != nil {
                 FileHandle.standardOutput.write(Data("synthetic-startup: fixture unavailable\n".utf8))
+            }
+            if ProcessInfo.processInfo.environment[SyntheticLiveUpdateFixture.environmentKey] != nil {
+                FileHandle.standardOutput.write(Data("synthetic-live-update: fixture unavailable\n".utf8))
             }
             #endif
         }
@@ -1270,9 +1287,15 @@ struct SyntheticStartupFixture: Sendable {
     static let environmentKey = "AGENTDASH_SYNTHETIC_STARTUP"
     static let firstSession = SessionKey(agent: .codex, nativeID: "startup-preview-0")
     static let firstTitle = "Prepared synthetic session"
+    private static let current = try? request()
 
     let preparesIndex: Bool
     let id: UUID
+
+    static func marker(for session: SessionListItem) -> String? {
+        guard session.id == firstSession, session.title == firstTitle, let current else { return nil }
+        return "synthetic-startup: \(current.preparesIndex ? "prepared" : "reopened") row drawn"
+    }
 
     static func request() throws -> Self? {
         guard let value = ProcessInfo.processInfo.environment[environmentKey] else { return nil }

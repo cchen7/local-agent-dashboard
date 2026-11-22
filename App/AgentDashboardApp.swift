@@ -101,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data((message + "\n").utf8))
             Darwin.exit(EX_USAGE)
         }
+        if CommandLine.arguments.contains("--synthetic-live-update-writer") {
+            Darwin.exit(SyntheticLiveUpdateFixture.runWriter())
+        }
         return AppDelegate.self
     }
     #endif

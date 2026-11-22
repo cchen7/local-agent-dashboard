@@ -270,9 +270,9 @@ struct MainWindow: View {
                     SessionListCell(session: session, projectName: name, currency: model.pricing.currency)
                         #if AGENTDASH_SYNTHETIC_ONLY
                         .background {
-                            if session.id == SyntheticStartupFixture.firstSession,
-                               session.title == SyntheticStartupFixture.firstTitle {
-                                SyntheticStartupDrawMarker()
+                            if let event = SyntheticStartupFixture.marker(for: session)
+                                ?? SyntheticLiveUpdateFixture.current?.marker(for: session) {
+                                SyntheticRowDrawMarker(event: event)
                             }
                         }
                         #endif
@@ -441,26 +441,29 @@ struct MainWindow: View {
 }
 
 #if AGENTDASH_SYNTHETIC_ONLY
-/// Probe the first real list row when AppKit draws it in the shown QA window.
+/// Probe a real list row when AppKit draws it in the shown QA window.
 /// No accessibility access, screenshot capture, or injected input is needed.
-private struct SyntheticStartupDrawMarker: NSViewRepresentable {
+private struct SyntheticRowDrawMarker: NSViewRepresentable {
+    let event: String
+
     func makeNSView(context: Context) -> Marker { Marker() }
-    func updateNSView(_ nsView: Marker, context: Context) {}
+    func updateNSView(_ nsView: Marker, context: Context) { nsView.event = event }
 
     final class Marker: NSView {
-        private static var reported = false
+        private static var reported: Set<String> = []
+        var event: String? {
+            didSet { if event != oldValue { needsDisplay = true } }
+        }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func draw(_ dirtyRect: NSRect) {
             super.draw(dirtyRect)
-            guard !Self.reported, !dirtyRect.isEmpty, window?.isVisible == true,
-                  let fixture = try? SyntheticStartupFixture.request() else { return }
-            Self.reported = true
+            guard let event, !dirtyRect.isEmpty, window?.isVisible == true,
+                  Self.reported.insert(event).inserted else { return }
             // Emit after this draw pass has returned to the main queue.
             DispatchQueue.main.async {
-                let mode = fixture.preparesIndex ? "prepared" : "reopened"
-                FileHandle.standardOutput.write(Data("synthetic-startup: \(mode) row drawn\n".utf8))
+                FileHandle.standardOutput.write(Data((event + "\n").utf8))
             }
         }
     }

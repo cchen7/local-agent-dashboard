@@ -680,3 +680,22 @@ from the known first session row after its AppKit draw pass. This includes
 spawn and pipe overhead; it measures process startup with a recent disk
 cache, without capture or keyboard automation. It does not measure WindowServer
 presentation, normal Release startup, or a production-sized library.
+
+## DEV-086 — Measure live updates after the actual watcher starts
+
+Run `python3 Tools/measure-synthetic-live-update.py /path/to/AgentDashboard.app`
+against signed SyntheticQA. A separate writer process enters the QA-only
+tool mode before any UI or store setup. It creates and writes only its own
+private UUID fixture directory in the QA container and removes it at exit.
+The dashboard gets an agent and a fixture ID, opens the corresponding
+generated source read-only, and uses the normal Start Indexing action's
+controller. Release has neither test entry point.
+
+Wait for both the real watcher and a baseline row. Then measure an append to
+the existing JSONL and creation of a new session file, each through the
+normal discovery or tail, store, and Sessions list. The intervals include
+sending the small write command to the producer and end after AppKit draws
+the matching Chinese title in the real list. The command
+tests Claude Code, Codex, and Copilot CLI without keyboard input. It does
+not measure derived topic or status debounce, compressed immutable rollouts,
+or the load of a production-sized library.

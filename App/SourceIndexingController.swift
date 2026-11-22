@@ -63,13 +63,24 @@ final class SourceIndexingController {
         }
         jobs[id] = Task { [weak self] in
             var completed: SourceIndexScan?
+            #if AGENTDASH_SYNTHETIC_ONLY
+            var sentLiveReadiness = false
+            #endif
             let failure: IndexAccessFailure? = await withTaskCancellationHandler {
                 for await update in updates.stream {
                     if Task.isCancelled { break }
                     switch update {
                     case .discovering: self?.progress[id] = .starting
                     case .scanning(let scan): self?.progress[id] = .scanning(scan)
-                    case .watching(let scan): self?.progress[id] = .watching(scan)
+                    case .watching(let scan):
+                        self?.progress[id] = .watching(scan)
+                        #if AGENTDASH_SYNTHETIC_ONLY
+                        if !sentLiveReadiness, SyntheticLiveUpdateFixture.current?.matches(source) == true {
+                            sentLiveReadiness = true
+                            let marker = scan.checkedFiles == 1 && scan.failedFiles == 0 ? "watching" : "initial scan failed"
+                            FileHandle.standardOutput.write(Data("synthetic-live-update: \(marker)\n".utf8))
+                        }
+                        #endif
                     case .rescanned(let scan): completed = scan
                     }
                 }
@@ -88,6 +99,11 @@ final class SourceIndexingController {
             } onCancel: {
                 worker.cancel()
             }
+            #if AGENTDASH_SYNTHETIC_ONLY
+            if !sentLiveReadiness, SyntheticLiveUpdateFixture.current?.matches(source) == true {
+                FileHandle.standardOutput.write(Data("synthetic-live-update: watcher unavailable\n".utf8))
+            }
+            #endif
             self?.rescanRequests.removeValue(forKey: id)?.finish()
             self?.jobs[id] = nil
             self?.progress[id] = Task.isCancelled ? .stopped :
