@@ -276,6 +276,13 @@ struct SessionTranscript: View {
                 .scrollPosition($transcriptPosition, anchor: .top)
                 .id(viewRevision)
                 .accessibilityIdentifier("session.transcript.messages")
+                #if AGENTDASH_SYNTHETIC_ONLY
+                .background {
+                    if let fixture = SyntheticResourceFixture.current, fixture.matches(session) {
+                        SyntheticRowDrawMarker(event: "synthetic-resources transcript", onDraw: fixture.transcriptDidDraw)
+                    }
+                }
+                #endif
             } else {
                 EmptyPanel(title: "No transcript yet", symbol: "text.bubble",
                            message: "This indexed session does not have any transcript entries.")

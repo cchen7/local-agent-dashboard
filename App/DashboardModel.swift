@@ -195,15 +195,19 @@ final class DashboardModel {
                 #if AGENTDASH_SYNTHETIC_ONLY
                 let startup = try SyntheticStartupFixture.request()
                 let live = try SyntheticLiveUpdateFixture.request()
-                guard startup == nil || live == nil else { throw StoreError.invalidLocation }
+                let resources = try SyntheticResourceFixture.request()
+                let standardFixtures = startup == nil && live == nil && resources == nil
                 if let startup {
+                    guard live == nil && resources == nil else { throw StoreError.invalidLocation }
                     directory = try startup.openDirectory()
+                } else if let resources {
+                    guard live == nil else { throw StoreError.invalidLocation }
+                    directory = try resources.openDirectory()
                 } else if synthetic {
                     directory = FileManager.default.temporaryDirectory.appendingPathComponent("AgentDashboard-\(UUID().uuidString)")
                 } else {
                     throw StoreError.invalidLocation
                 }
-                let standardFixtures = startup == nil && live == nil
                 #else
                 if synthetic {
                     directory = FileManager.default.temporaryDirectory.appendingPathComponent("AgentDashboard-\(UUID().uuidString)")
@@ -225,7 +229,7 @@ final class DashboardModel {
                     (CommandLine.arguments.contains("--synthetic-usage") ||
                      ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_USAGE"] == "1")
                 #if AGENTDASH_SYNTHETIC_ONLY
-                let startupPricing = startup != nil
+                let startupPricing = startup != nil || resources != nil
                 #else
                 let startupPricing = false
                 #endif
@@ -242,6 +246,7 @@ final class DashboardModel {
                 #if AGENTDASH_SYNTHETIC_ONLY
                 if startup?.preparesIndex == true { try SyntheticStartupFixture.seed(in: directory, store: store) }
                 if let live { try live.register(in: store) }
+                if let resources, resources.mode == .prepare { try await resources.seed(store) }
                 #endif
                 let needsOnboarding = try store.needsSourceOnboarding()
                 let onboarding = synthetic ? CommandLine.arguments.contains("--synthetic-onboarding") && needsOnboarding
@@ -312,6 +317,9 @@ final class DashboardModel {
             }
             if ProcessInfo.processInfo.environment[SyntheticLiveUpdateFixture.environmentKey] != nil {
                 FileHandle.standardOutput.write(Data("synthetic-live-update: fixture unavailable\n".utf8))
+            }
+            if SyntheticResourceFixture.current != nil {
+                SyntheticResourceFixture.report("fixture unavailable")
             }
             #endif
         }

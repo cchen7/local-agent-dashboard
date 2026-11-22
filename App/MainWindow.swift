@@ -443,27 +443,34 @@ struct MainWindow: View {
 #if AGENTDASH_SYNTHETIC_ONLY
 /// Probe a real list row when AppKit draws it in the shown QA window.
 /// No accessibility access, screenshot capture, or injected input is needed.
-private struct SyntheticRowDrawMarker: NSViewRepresentable {
+struct SyntheticRowDrawMarker: NSViewRepresentable {
     let event: String
+    var onDraw: (@MainActor (NSWindow) -> Void)? = nil
 
     func makeNSView(context: Context) -> Marker { Marker() }
-    func updateNSView(_ nsView: Marker, context: Context) { nsView.event = event }
+    func updateNSView(_ nsView: Marker, context: Context) {
+        nsView.event = event
+        nsView.onDraw = onDraw
+    }
 
     final class Marker: NSView {
         private static var reported: Set<String> = []
         var event: String? {
             didSet { if event != oldValue { needsDisplay = true } }
         }
+        var onDraw: (@MainActor (NSWindow) -> Void)?
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func draw(_ dirtyRect: NSRect) {
             super.draw(dirtyRect)
-            guard let event, !dirtyRect.isEmpty, window?.isVisible == true,
+            guard let event, !dirtyRect.isEmpty, let window, window.isVisible,
                   Self.reported.insert(event).inserted else { return }
             // Emit after this draw pass has returned to the main queue.
+            let onDraw = self.onDraw
             DispatchQueue.main.async {
-                FileHandle.standardOutput.write(Data((event + "\n").utf8))
+                if let onDraw { onDraw(window) }
+                else { FileHandle.standardOutput.write(Data((event + "\n").utf8)) }
             }
         }
     }

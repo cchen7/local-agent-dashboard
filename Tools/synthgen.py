@@ -203,12 +203,20 @@ RECORDS = dict(zip(AGENTS, (claude_record, codex_record, copilot_record, grok_re
 def make_record(session, sid, seq, padding=0):
     turn, stage = divmod(seq - HEADERS[session.agent], 6)
     call = f"{sid}:{turn}:call"
-    prompt = f"合成检查 synthetic prompt {session.seed}/{session.number}/{turn}"
-    reply = f"Synthetic progress {session.number}/{turn} 已验证"
+    prompt, reply = transcript_text(session.seed, session.number, turn)
     # ASCII padding expands the encoded output by exactly padding bytes.
     output = FAKE_PAYLOAD + (FAKE_PAYLOAD * (padding // len(FAKE_PAYLOAD) + 1))[:padding] if stage == 2 else ""
     record, tokens = RECORDS[session.agent](session, sid, seq, stage, turn, stamp(session.time(seq)), prompt, reply, call, output)
     return encode(record), tokens
+
+
+def transcript_text(seed, number, turn):
+    return f"合成检查 synthetic prompt {seed}/{number}/{turn}", f"Synthetic progress {number}/{turn} 已验证"
+
+
+def resource_session_messages(number, turns=500, seed=27):
+    """Encode one resource benchmark session for the isolated app's index seeder."""
+    return encode([message for turn in range(turns) for message in transcript_text(seed, number, turn)])
 
 
 def sidecars(session, sid):

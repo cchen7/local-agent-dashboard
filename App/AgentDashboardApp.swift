@@ -104,6 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--synthetic-live-update-writer") {
             Darwin.exit(SyntheticLiveUpdateFixture.runWriter())
         }
+        if CommandLine.arguments.contains("--synthetic-resource-cleanup") {
+            Darwin.exit(SyntheticResourceFixture.runCleanup())
+        }
         return AppDelegate.self
     }
     #endif

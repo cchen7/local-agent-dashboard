@@ -699,3 +699,21 @@ the matching Chinese title in the real list. The command
 tests Claude Code, Codex, and Copilot CLI without keyboard input. It does
 not measure derived topic or status debounce, compressed immutable rollouts,
 or the load of a production-sized library.
+
+## DEV-087 — Measure loaded-app memory and idle CPU with one million events
+
+Build and sign SyntheticQA with Release optimization (`SWIFT_OPTIMIZATION_LEVEL=-O`),
+then run `python3 Tools/measure-synthetic-resources.py /path/to/AgentDashboard.app`.
+The generator supplies batches of synthetic messages to a separate prepare
+launch, which verifies stored event counts and finishes topic and status work.
+The timed runs reopen that same isolated index. One waits for the real
+transcript to draw; the other closes that same window normally and checks
+that the Dashboard, Settings and menu panel are hidden. The menu item remains
+registered. Neither run starts a live source read.
+
+After a four-second settling interval, the tool samples that PID's physical
+footprint and RSS and computes single-core-equivalent CPU usage from its
+cumulative user and system time. No accessibility access, screen capture or
+keyboard input is used. This tests a stable library with the menu panel
+closed; rendering the panel and workloads that change the library are
+separate cases.
