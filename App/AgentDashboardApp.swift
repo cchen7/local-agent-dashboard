@@ -113,6 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--synthetic-period-fixture") {
             Darwin.exit(SyntheticUsagePeriod.runFixtureCommand())
         }
+        if CommandLine.arguments.contains("--synthetic-reprice-fixture") {
+            Darwin.exit(SyntheticRepricing.runFixtureCommand())
+        }
         return AppDelegate.self
     }
     #endif

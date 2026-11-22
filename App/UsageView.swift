@@ -145,6 +145,11 @@ struct UsageView: View {
 
     #if AGENTDASH_SYNTHETIC_ONLY
     private func periodMarker(_ snapshot: UsagePageSnapshot, data: UsageChartSnapshot) -> SyntheticPeriodChartMarker? {
+        if SyntheticRepricing.measuring {
+            return .init(id: data.id) { [model] window in
+                SyntheticRepricingRun.shared.chartDidDraw(model: model, snapshot: snapshot, data: data, window: window)
+            }
+        }
         guard SyntheticUsagePeriod.measuring else { return nil }
         return .init(id: data.id) { [model] window in
             SyntheticPeriodRun.shared.chartDidDraw(model: model, snapshot: snapshot, data: data, window: window)

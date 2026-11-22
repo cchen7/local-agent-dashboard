@@ -136,6 +136,12 @@ final class PricingModel {
 
     private func receiveWatched(_ update: PricingRuntimeUpdate, watchID: UUID) {
         guard self.watchID == watchID else { return }
+        #if AGENTDASH_SYNTHETIC_ONLY
+        if SyntheticRepricing.measuring, update.status.origin == .none,
+           !update.status.issues.contains(where: { $0.failure == .watchingUnavailable }) {
+            SyntheticRepricingRun.shared.watcherDidStart()
+        }
+        #endif
         receive(update)
     }
 
@@ -147,6 +153,11 @@ final class PricingModel {
         let sweepID = self.sweepID
         backfilling = true
         backfillFailed = false
+        #if AGENTDASH_SYNTHETIC_ONLY
+        if SyntheticRepricing.measuring, status.origin == .external {
+            SyntheticRepricingRun.shared.sweepStarted()
+        }
+        #endif
         sweepTask = Task.detached(priority: .utility) { [weak self] in
             var savings = sweep.cacheSavings
             var unpriced = sweep.unpriced
@@ -156,9 +167,25 @@ final class PricingModel {
                     savings = try store.backfillCacheSavings(page).next
                     await Task.yield()
                 }
+                #if AGENTDASH_SYNTHETIC_ONLY
+                var measuredQuoted = 0
+                var nextProgress = 200_000
+                #endif
                 while let page = unpriced {
                     try Task.checkCancellation()
-                    unpriced = try store.backfillUnpriced(page).next
+                    // Fewer commit round-trips, while the worker still
+                    // yields between bounded writes.
+                    let batch = try store.backfillUnpriced(page, limit: 2_048)
+                    unpriced = batch.next
+                    #if AGENTDASH_SYNTHETIC_ONLY
+                    if SyntheticRepricing.measuring {
+                        measuredQuoted += batch.priced
+                        if measuredQuoted >= nextProgress {
+                            SyntheticRepricing.report("progress \(measuredQuoted)")
+                            nextProgress += 200_000
+                        }
+                    }
+                    #endif
                     await Task.yield()
                 }
                 await self?.finishSweep(sweepID, failed: false)
@@ -172,6 +199,11 @@ final class PricingModel {
         guard sweepID == id else { return }
         backfilling = false
         backfillFailed = failed
+        #if AGENTDASH_SYNTHETIC_ONLY
+        if SyntheticRepricing.measuring, status.origin == .external {
+            SyntheticRepricingRun.shared.sweepFinished(failed: failed)
+        }
+        #endif
     }
 
     func observeUnpriced(in store: AgentStore) async {

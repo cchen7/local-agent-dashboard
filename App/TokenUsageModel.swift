@@ -68,6 +68,8 @@ final class TokenUsageModel {
     private(set) var usageVersion: Int64 = 0
     private var clockVersion: UInt64 = 0
     @ObservationIgnored private var stagedPeriodRead: (request: UsageNavigationRequest, task: Task<UsagePageSnapshot, Error>)?
+    @ObservationIgnored private var deferredUsageRevision: Int64?
+    @ObservationIgnored private var deferredUsageTask: Task<Void, Never>?
 
     let pricing: PricingModel
 
@@ -76,6 +78,7 @@ final class TokenUsageModel {
         self.pricing = pricing
         #if AGENTDASH_SYNTHETIC_ONLY
         SyntheticUsagePeriod.configure(self)
+        if SyntheticRepricing.measuring { usagePeriod = .week }
         #endif
     }
 
@@ -111,14 +114,44 @@ final class TokenUsageModel {
         }.value
         guard !Task.isCancelled else { return }
         projects = metadata
+        defer {
+            deferredUsageTask?.cancel()
+            deferredUsageTask = nil
+            deferredUsageRevision = nil
+        }
         do {
             for try await revision in store.usageUpdates() {
                 guard !Task.isCancelled else { return }
-                usageVersion = revision
+                noteUsageRevision(revision)
             }
         } catch {
             if !Task.isCancelled { usageError = "Could not read token usage." }
         }
+    }
+
+    private func noteUsageRevision(_ revision: Int64) {
+        deferredUsageRevision = revision
+        guard pricing.backfilling else {
+            flushUsageRevision()
+            return
+        }
+        // A sweep commits many small transactions. Combine their display
+        // invalidations without delaying a user-selected period's read.
+        guard deferredUsageTask == nil else { return }
+        deferredUsageTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                self?.flushUsageRevision()
+            } catch { return }
+        }
+    }
+
+    func flushUsageRevision() {
+        deferredUsageTask?.cancel()
+        deferredUsageTask = nil
+        guard let revision = deferredUsageRevision else { return }
+        deferredUsageRevision = nil
+        usageVersion = revision
     }
 
     func observeRedlines() async {
@@ -282,6 +315,9 @@ struct TokenUsageEntry: View {
             .task { await model.observeRedlines() }
             .task(id: request) { await model.followUsage(request) }
             .onDisappear { model.cancelStagedPeriodRead() }
+            .onChange(of: model.pricing.backfilling) { _, active in
+                if !active { model.flushUsageRevision() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .NSSystemClockDidChange)) { _ in
                 Task { @MainActor in model.clockChanged() }
             }

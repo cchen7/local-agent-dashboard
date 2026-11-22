@@ -198,8 +198,14 @@ final class DashboardModel {
                 let resources = try SyntheticResourceFixture.request()
                 let transcript = try SyntheticLongTranscript.request()
                 let periods = try SyntheticUsagePeriod.request()
-                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil && periods == nil
-                if let periods {
+                let repricing = try SyntheticRepricing.request()
+                let standardFixtures = startup == nil && live == nil && resources == nil && transcript == nil && periods == nil && repricing == nil
+                if let repricing {
+                    guard startup == nil && live == nil && resources == nil && transcript == nil && periods == nil else {
+                        throw StoreError.invalidLocation
+                    }
+                    directory = try repricing.openMeasurementDirectory()
+                } else if let periods {
                     guard startup == nil && live == nil && resources == nil && transcript == nil else {
                         throw StoreError.invalidLocation
                     }
@@ -232,7 +238,13 @@ final class DashboardModel {
                 let store = try AgentStore(databaseURL: directory.appendingPathComponent("index.sqlite"))
                 let defaults = synthetic ? [] : try SourceAccessProbe.defaultSources()
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
-                let externalDirectory = synthetic ? syntheticPricingDirectory : home.map {
+                let externalOverride: URL?
+                #if AGENTDASH_SYNTHETIC_ONLY
+                externalOverride = repricing?.priceDirectory ?? syntheticPricingDirectory
+                #else
+                externalOverride = syntheticPricingDirectory
+                #endif
+                let externalDirectory = synthetic ? externalOverride : home.map {
                     URL(fileURLWithPath: $0).appendingPathComponent(".config/agent-dashboard", isDirectory: true)
                 }
                 let previewUsage = standardFixtures && synthetic &&
@@ -276,7 +288,7 @@ final class DashboardModel {
                 replaceSearchQuery(query)
             }
             #if AGENTDASH_SYNTHETIC_ONLY
-            if SyntheticResourceFixture.current?.mode == .usage || SyntheticUsagePeriod.measuring { page = .tokens }
+            if SyntheticResourceFixture.current?.mode == .usage || SyntheticUsagePeriod.measuring || SyntheticRepricing.measuring { page = .tokens }
             #endif
             store = result.0
             restartMenuBarThroughput()
@@ -339,6 +351,9 @@ final class DashboardModel {
             }
             if ProcessInfo.processInfo.environment[SyntheticUsagePeriod.environmentKey] != nil {
                 SyntheticUsagePeriod.report("fixture unavailable")
+            }
+            if ProcessInfo.processInfo.environment[SyntheticRepricing.environmentKey] != nil {
+                SyntheticRepricing.report("fixture unavailable")
             }
             #endif
         }

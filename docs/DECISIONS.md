@@ -780,3 +780,30 @@ and place the three viewport blocks with the same size proposal.
 Start a reader from the period selection; the view adopts it only if
 its full request still matches. Cancelling or leaving the page cannot
 publish a previous scope.
+
+## DEV-091 — Check native responsiveness during a real price-file sweep
+
+Export an owned fixture from the Release Package test, then use the
+signed, optimized SyntheticQA app:
+
+```sh
+fixture=$(uuidgen)
+AGENTDASH_NATIVE_REPRICE_EXPORT="$fixture" \
+  swift test --package-path Packages/AgentDashKit -c release \
+  --filter exportNativeRepricingFixture
+python3 Tools/measure-synthetic-repricing.py /path/to/AgentDashboard.app --export "$fixture"
+```
+
+The exporter verifies one million eligible rows and one previously
+quoted row. The app checks the transferred index and renders its old
+totals before accepting an atomic replacement inside its private
+synthetic price directory. Its normal watcher loads the price table.
+Measure file change to the final drawn total, and two actual period
+selections while the sweep is active. The historical estimate remains
+included at its original price. No real price table or keyboard is used.
+
+During a bulk sweep, combine committed usage revisions before redrawing
+and flush the last revision at completion. Explicit period selections
+still read the current index. The worker uses bounded 2,048-row
+transactions and yields between writes; hidden or unchanged pages do
+not start a polling loop.
