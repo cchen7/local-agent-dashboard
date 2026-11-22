@@ -877,6 +877,10 @@ Per prototype `31:847`:
 | Pricing | Active file (external / bundled), `updatedAt`, number of model entries, validation errors; unpriced models with token volume (one-click copy, to hand to an agent); display currency |
 | About | Version; statement that the app has no network permission, listing the entitlements actually present in the signature |
 
+The Sources index counts come from committed checkpoints and session rows,
+separate from checking directory access. Show a scan time only when the
+index contains one, and report errors without exposing raw source details.
+
 Launch at login is off until the user requests it in General. Use
 `SMAppService.mainApp` and show the observed macOS registration status,
 including any required approval in System Settings. Disabling it unregisters
