@@ -280,8 +280,10 @@ message ID rules. Normalized text blocks share the physical record's sequence an
 (`claude:event:<record identity>:`); the final numeric component orders the
 blocks. The Overview rejoins assistant text across records when the ID is
 available, or within one physical record otherwise, before masking and
-excerpting it. Version 4 replays older file checkpoints to add the ID
-without changing event keys.
+excerpting it. Version 5 replays v3 and v4 file checkpoints. A retained
+resume copy can backfill a missing ID on a matching assistant record UUID
+for the same owner, even if the original file is no longer present. The
+backfill leaves the stored text, order, event keys and token accounting intact.
 
 Tool results can contain a string or an array of text blocks. Field order
 is not assumed: `tool_use_id`, `is_error` and the outer record identity can

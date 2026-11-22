@@ -8,7 +8,7 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     }
 
     public static let kind: AgentKind = .claudeCode
-    public static let parserVersion = 4
+    public static let parserVersion = 5
 
     public init() {}
 

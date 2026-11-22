@@ -130,7 +130,10 @@ A session Overview observes one bounded database snapshot. Prefer the
 recorded summary, prompt, reply, file touches and command results. Rebuild
 Claude assistant text by producer message ID across physical records when
 available, and otherwise from the same physical record, before masking and
-making an excerpt. Use the newest actions across structured and normalized records.
+making an excerpt. Replaying a retained resume copy can fill a missing
+message ID on a matching record UUID and owner without changing any other
+stored event fields. The v5 replay also repairs files already read by v4.
+Use the newest actions across structured and normalized records.
 Each structured row replaces at most one call by timestamp, exact payload
 and tool kind so repeat calls and tool results survive.
 Omit oversized fields rather than clipping before masking. Catalog topic

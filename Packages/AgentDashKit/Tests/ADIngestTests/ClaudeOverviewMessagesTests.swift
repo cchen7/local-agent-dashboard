@@ -1,8 +1,9 @@
 import ADAdapters
 import ADCore
 import ADIngest
-import ADStore
+@testable import ADStore
 import Foundation
+import GRDB
 import Testing
 
 @Test("SPEC §10.3: overview reconstructs Claude prompt and reply blocks, then follows newer records",
@@ -72,7 +73,7 @@ func claudeOverviewPreservesSplitResponseAcrossRecords() async throws {
     let key = SessionKey(agent: .claudeCode, nativeID: nativeID)
 
     // Use the same v3 event keys with no message metadata, as stored before
-    // this change. Checkpoint v4 must backfill by replay, without duplicates.
+    // this change. The current parser must backfill by replay, without duplicates.
     let oldFile = SourceFile(sourceID: sourceID, relativePath: path, role: .session, parserVersion: 3)
     let snapshot = try SourceFileReader(root: root, relativePath: path).snapshot()
     let old = Checkpoint(inode: snapshot.inode, size: snapshot.size, offset: snapshot.size, parserVersion: 3,
@@ -94,7 +95,7 @@ func claudeOverviewPreservesSplitResponseAcrossRecords() async throws {
 
     let adapter = ClaudeCodeAdapter()
     let imported = try JSONLFileImporter.importFile(oldFile, from: source, authorizedRoot: root, store: store, adapter: adapter)
-    #expect(imported.checkpoint.parserVersion == 4 && imported.bytesRead == snapshot.size)
+    #expect(imported.checkpoint.parserVersion == ClaudeCodeAdapter.parserVersion && imported.bytesRead == snapshot.size)
     let after = try #require(try await updates.next() ?? nil)
     #expect(after.lastReply == "First part. Closing fragment")
     #expect(try store.events(in: key).filter { $0.kind == .assistant }.count == 4)
@@ -107,4 +108,96 @@ func claudeOverviewPreservesSplitResponseAcrossRecords() async throws {
     try JSONLFileImporter.importFile(oldFile, from: source, authorizedRoot: root, store: store, adapter: adapter)
     let last = try #require(try await updates.next() ?? nil)
     #expect(last.lastReply == "New response")
+}
+
+@Test("ADP-CC: replay of only the retained copy restores reply metadata without replacing archived records",
+      .timeLimit(.minutes(1)), arguments: [3, 4])
+func claudeOverviewBackfillsRetainedCopy(legacyVersion: Int) async throws {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("claude-copy-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: tmp) }
+    let root = tmp.appendingPathComponent("source")
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("projects/demo"),
+                                            withIntermediateDirectories: true)
+    let original = "00000000-0000-0000-0000-000000000081"
+    let resumed = "00000000-0000-0000-0000-000000000082"
+    let path = "projects/demo/\(resumed).jsonl"
+    let fixture = root.appendingPathComponent(path)
+    let records = [
+        #"{"type":"assistant","sessionId":"\#(original)","uuid":"copy-start","timestamp":10,"message":{"id":"retained-response","content":"Opening ","usage":{"input_tokens":8,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":1}}}"#,
+        #"{"type":"assistant","sessionId":"\#(original)","uuid":"copy-end","timestamp":20,"message":{"id":"retained-response","content":"closing.","usage":{"input_tokens":8,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":5}}}"#,
+    ]
+    let bytes = Data((records.joined(separator: "\n") + "\n").utf8)
+    try bytes.write(to: fixture)
+    let index = tmp.appendingPathComponent("upgraded.sqlite")
+    let adapter = ClaudeCodeAdapter()
+    var source = Source(agent: .claudeCode, label: "Synthetic", rootURL: root)
+    let key = SessionKey(agent: .claudeCode, nativeID: original)
+    let old: SourceFile
+    do {
+        let store = try AgentStore(databaseURL: index)
+        let sourceID = try store.upsertSource(source)
+        source.id = sourceID
+        old = SourceFile(sourceID: sourceID, relativePath: path, role: .session, parserVersion: legacyVersion)
+        var decoder = try adapter.makeDecoder(for: old, in: source)
+        // Reproduce v3's missing metadata (also left behind by the old v4 replay).
+        let previous = try JSONLFileImporter.importFile(old, authorizedRoot: root, store: store) { frame, context in
+            let decoded = try decoder.decode(frame, context: context)
+            return .init(records: decoded.records.map {
+                if case .event(var event) = $0, event.kind == .assistant {
+                    event.metadataJSON = nil
+                    return .event(event)
+                }
+                return $0
+            }, timestamp: decoded.timestamp, state: decoded.state, isUnknown: decoded.isUnknown)
+        }
+        #expect(previous.completeLines == 2 && previous.checkpoint.parserVersion == legacyVersion)
+        #expect(try store.events(in: key).map(\.metadataJSON) == [nil, nil])
+        if legacyVersion == 4 {
+            // The original had different text and positions before it went away.
+            try await store.databasePool.write { db in
+                try db.execute(sql: "UPDATE events SET seq=seq+10, ts=ts+5")
+                try db.execute(sql: "UPDATE events SET text='Archived opening ' WHERE dedupe_key='claude:event:copy-start:0'")
+            }
+        }
+    }
+    let store = try AgentStore(databaseURL: index)
+    let before = try store.events(in: key)
+    let rerun = try JSONLFileImporter.importFile(old, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    #expect(rerun.checkpoint.parserVersion == ClaudeCodeAdapter.parserVersion && rerun.completeLines == 2)
+    let updated = try store.events(in: key)
+    #expect(updated.map(\.metadataJSON) == Array(repeating: #"{"claude_message_id":"retained-response"}"#, count: 2))
+    #expect(updated.map { var row = $0; row.metadataJSON = nil; return row } == before)
+    #expect(try store.events(in: .init(agent: .claudeCode, nativeID: resumed)).isEmpty)
+    var upgradedUpdates = store.sessionOverviewUpdates(in: key).makeAsyncIterator()
+    let upgraded = try #require(try await upgradedUpdates.next() ?? nil)
+    #expect(upgraded.lastReply == (legacyVersion == 4 ? "Archived opening closing." : "Opening closing."))
+
+    let fresh = try AgentStore(databaseURL: tmp.appendingPathComponent("fresh.sqlite"))
+    var freshSource = source
+    freshSource.id = try fresh.upsertSource(freshSource)
+    let freshFile = try #require(try adapter.discover(in: freshSource, authorizedRoot: root).first)
+    try JSONLFileImporter.importFile(freshFile, from: freshSource, authorizedRoot: root, store: fresh, adapter: adapter)
+    var freshUpdates = fresh.sessionOverviewUpdates(in: key).makeAsyncIterator()
+    let freshOverview = try #require(try await freshUpdates.next() ?? nil)
+    #expect(freshOverview.lastReply == "Opening closing.")
+    if legacyVersion == 3 { #expect(try fresh.events(in: key) == updated) }
+
+    // Replace only the synthetic fixture inode to force a second full replay.
+    try bytes.write(to: fixture, options: .atomic)
+    let again = try JSONLFileImporter.importFile(old, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    #expect(again.completeLines == 2)
+    #expect(try store.events(in: key) == updated)
+    for checked in [store, fresh] {
+        try await checked.databasePool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT s.native_id, t.input_fresh, t.cache_read, t.cache_write, t.output
+                FROM token_events AS t JOIN sessions AS s ON s.id=t.session_id
+                """)
+            let usage = try #require(rows.first)
+            #expect(rows.count == 1)
+            #expect((usage["native_id"] as String) == original)
+            #expect((usage["input_fresh"] as Int) == 8 && (usage["cache_read"] as Int) == 4)
+            #expect((usage["cache_write"] as Int) == 2 && (usage["output"] as Int) == 5)
+        }
+    }
 }
