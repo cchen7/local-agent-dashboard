@@ -37,11 +37,10 @@ struct MenuBarPanel: View {
             } else {
                 ProgressView().controlSize(.small)
             }
-            Divider()
-            Button("Open Dashboard", action: openDashboard)
-                .keyboardShortcut("d").accessibilityIdentifier("openDashboard")
-            SettingsLink { Text("Settings…") }.keyboardShortcut(",")
-            Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
+            VStack(spacing: 4) {
+                Divider()
+                actionFooter
+            }
         }
         .padding(12)
         .frame(width: 360)
@@ -63,6 +62,43 @@ struct MenuBarPanel: View {
         .background(WindowConfigurationView(identifier: "menuBarPanel", updateVisibility: {
             if visible != $0 { visible = $0 }
         }))
+    }
+
+    private var actionFooter: some View {
+        HStack(spacing: 12) {
+            Button(action: openDashboard) {
+                footerLabel("Open Dashboard", systemImage: "macwindow")
+                    .fontWeight(.semibold)
+            }
+            .keyboardShortcut("d")
+            .help("Open Dashboard (⌘D)")
+            .accessibilityIdentifier("openDashboard")
+
+            Spacer(minLength: 0)
+
+            SettingsLink { footerLabel("Settings", systemImage: "gearshape") }
+                .keyboardShortcut(",")
+                .help("Settings (⌘,)")
+                .accessibilityIdentifier("menu.settings")
+
+            Button {
+                NSApp.terminate(nil)
+            } label: {
+                footerLabel("Quit", systemImage: "power")
+            }
+            .keyboardShortcut("q")
+            .help("Quit (⌘Q)")
+            .accessibilityIdentifier("menu.quit")
+        }
+        .buttonStyle(.borderless)
+        .font(.callout)
+        .frame(minHeight: 32)
+    }
+
+    private func footerLabel(_ title: LocalizedStringKey, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .frame(minHeight: 24)
+            .contentShape(.rect)
     }
 
     private var header: some View {

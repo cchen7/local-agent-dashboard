@@ -5016,6 +5016,23 @@
         }
       }
     },
+    "Open Dashboard (⌘D)": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Dashboard (⌘D)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开仪表盘 (⌘D)"
+          }
+        }
+      }
+    },
     "Projects": {
       "extractionState": "manual",
       "localizations": {
@@ -5046,6 +5063,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "退出"
+          }
+        }
+      }
+    },
+    "Quit (⌘Q)": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quit (⌘Q)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出 (⌘Q)"
           }
         }
       }
@@ -5084,19 +5118,36 @@
         }
       }
     },
-    "Settings…": {
+    "Settings": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Settings…"
+            "value": "Settings"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "设置…"
+            "value": "设置"
+          }
+        }
+      }
+    },
+    "Settings (⌘,)": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Settings (⌘,)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置 (⌘,)"
           }
         }
       }

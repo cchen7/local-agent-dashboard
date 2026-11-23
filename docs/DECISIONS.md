@@ -941,3 +941,10 @@ The context counts may wrap and the percentage is displayed separately.
 A one-row header fits the uncompressed fact widths before switching out of
 the two-column grid. Short date and turn facts no longer consume the same
 width as long values. No usage or pricing calculation changes.
+
+## DEV-103 — Keep menu bar actions in one row (§11.5)
+
+Replace the prototype's three stacked footer items with a single native row
+so the panel can show more of the active sessions. Keep Open Dashboard on
+the left and Settings and Quit on the right. All three keep text labels,
+their existing actions and their shortcuts; hover help shows the bindings.

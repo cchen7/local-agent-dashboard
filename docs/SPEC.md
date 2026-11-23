@@ -942,7 +942,7 @@ Per prototype `31:847`:
 - Three readouts: Now (tok/min + active agents), Today (total + estimated cost), Headroom.
 - Today's mini chart + legend.
 - Active sessions (max 6, then scroll): title, project, status and duration, current rate or "Needs input". Clicking opens the main window on that session.
-- Footer: Open Dashboard ⌘D, Settings… ⌘,, Quit ⌘Q.
+- Footer: one compact row with Open Dashboard on the left and Settings and Quit on the right. Keep ⌘D, ⌘, and ⌘Q, and show them in the button help.
 - Read the full menu snapshot only while the panel is visible. “Now” is rolling 60-second call-level throughput; “Today” starts at local midnight and includes all recorded precision levels.
 - While the panel is visible, refresh on relevant commits or at the next time a displayed value changes (trailing-minute boundary, quota expiration, displayed session age, or local midnight). An unchanged idle panel does not query the index on a fixed interval.
 - General can show the same tok/min next to the menu bar icon; default off. When enabled, read only the trailing minute of call-level usage for the icon, even with the panel closed. An idle reading waits for usage changes instead of polling the index.
