@@ -63,9 +63,9 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     public func resumeCommand(for session: SessionRecord) -> String? {
         guard session.key.agent == .claudeCode, let id = UUID(uuidString: session.key.nativeID),
               let path = session.cwd, path.hasPrefix("/"),
-              !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+              !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }),
+              let quoted = AdapterJSON.shellArgument(path)
         else { return nil }
-        let quoted = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
         return "cd \(quoted) && claude --resume \(id.uuidString.lowercased())"
     }
 

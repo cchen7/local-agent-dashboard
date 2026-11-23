@@ -1,5 +1,4 @@
 import ADCore
-import CoreFoundation
 import Foundation
 
 /// ADP-CC: preserve per-file metadata while global record keys deduplicate copied history.
@@ -130,7 +129,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                     case "tool_use":
                         let input = block["input"] as? [String: Any] ?? [:]
                         let text = (input["command"] as? String) ?? (input["file_path"] as? String) ?? ""
-                        records.append(event(.toolCall, Self.bounded(text, bytes: 2048), index: index,
+                        records.append(event(.toolCall, AdapterJSON.prefix(text, bytes: 2048), index: index,
                                              tool: Self.metadata(block["name"], maximum: 128),
                                              metadata: Self.toolMetadata(block["id"]),
                                              toolInput: !isUser && block["input"] is [String: Any] ? .init(.claude(block: index)) : nil,
@@ -140,7 +139,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                         let body = ToolOutputText.text(block["content"]) ?? ""
                         let success = ToolActionDecoder.boolean(block["is_error"]).map { !$0 }
                             ?? ToolActionDecoder.boolean(envelope?["success"])
-                        records.append(event(.toolResult, Self.bounded(body, bytes: ToolOutputCapture.searchableBytes),
+                        records.append(event(.toolResult, AdapterJSON.prefix(body, bytes: ToolOutputCapture.searchableBytes),
                                              index: index, metadata: Self.toolMetadata(block["tool_use_id"],
                                                  isError: (block["is_error"] as? Bool) == true),
                                              toolOutput: .init(format: .claude(block: index), text: body, complete: !frame.isTruncated),
@@ -188,7 +187,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             // Keep the marker without indexing the unclassified message body.
             let safePrefix = object != nil && type != "assistant" && type != "user" &&
                 !prefix.contains("\"thinking\"") && !prefix.contains("\"redacted_thinking\"") ? prefix : ""
-            records.append(event(.unknown, Self.bounded(safePrefix, bytes: 2048), index: 240))
+            records.append(event(.unknown, AdapterJSON.prefix(safePrefix, bytes: 2048), index: 240))
         }
         if frame.isTruncated, recoveredToolResult, let legacyEnd, frame.endOffset <= legacyEnd,
            try ClaudeV2OversizedJSON.lostRecord(from: frame) {
@@ -239,12 +238,12 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         if let text = raw as? String, let date = fractionalDate.date(from: text) ?? plainDate.date(from: text) {
             return Int64(exactly: (date.timeIntervalSince1970 * 1000).rounded())
         }
-        return Self.integer(raw)
+        return AdapterJSON.integer(raw)
     }
 
     private static func counts(_ usage: [String: Any]) -> TokenCounts? {
-        guard let input = integer(usage["input_tokens"]), input >= 0,
-              let output = integer(usage["output_tokens"]), output >= 0,
+        guard let input = AdapterJSON.integer(usage["input_tokens"]), input >= 0,
+              let output = AdapterJSON.integer(usage["output_tokens"]), output >= 0,
               let read = count(usage["cache_read_input_tokens"]),
               let aggregate = count(usage["cache_creation_input_tokens"])
         else { return nil }
@@ -271,13 +270,8 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
 
     private static func count(_ raw: Any?) -> Int64? {
         guard raw != nil else { return 0 }
-        guard let value = integer(raw), value >= 0 else { return nil }
+        guard let value = AdapterJSON.integer(raw), value >= 0 else { return nil }
         return value
-    }
-
-    private static func integer(_ raw: Any?) -> Int64? {
-        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        return Int64(number.stringValue)
     }
 
     private static func contentText(_ raw: Any?) -> String {
@@ -291,18 +285,14 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         var fields: [String: String] = [:]
         if let id = Self.id(message["id"]) { fields["claude_message_id"] = id }
         if message["stop_reason"] as? String == "end_turn" { fields["signal"] = "assistant.turn_end" }
-        guard !fields.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]) else { return nil }
-        return String(decoding: data, as: UTF8.self)
+        return fields.isEmpty ? nil : AdapterJSON.json(fields)
     }
 
     private static func toolMetadata(_ id: Any?, isError: Bool = false) -> String? {
         var fields: [String: Any] = [:]
         if let id = Self.id(id) { fields["tool_use_id"] = id }
         if isError { fields["is_error"] = true }
-        guard !fields.isEmpty, let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
-        else { return nil }
-        return String(decoding: data, as: UTF8.self)
+        return fields.isEmpty ? nil : AdapterJSON.json(fields)
     }
 
     private static func id(_ raw: Any?) -> String? {
@@ -315,14 +305,6 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         guard let text = raw as? String, !text.isEmpty, !text.utf8.contains(0) else { return nil }
         // Never clip a path or identifier into a different actionable value.
         return text.utf8.count <= maximum ? text : nil
-    }
-
-    private static func bounded(_ value: String, bytes: Int) -> String {
-        let piece = value.utf8.prefix(bytes)
-        for drop in 0...min(3, piece.count) {
-            if let text = String(bytes: piece.dropLast(drop), encoding: .utf8) { return text }
-        }
-        return ""
     }
 
     private static func isEarlySnapshot(_ data: Data) -> Bool {
