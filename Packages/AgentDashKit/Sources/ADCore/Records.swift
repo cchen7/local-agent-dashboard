@@ -201,5 +201,7 @@ public enum NormalizedRecord: Equatable, Sendable {
     case copilotUsageSnapshot(CopilotUsageSnapshot)
     /// Reconcile an empty legacy marker in the app-owned index during replay.
     case removeEmptyPlaceholder(session: SessionKey, fileID: Int64, sequence: Int64, dedupeKey: String)
+    /// Remove only the stub left by a recovered Copilot call of the same physical file.
+    case removeCopilotUsagePlaceholder(session: SessionKey, fileID: Int64, sequence: Int64, timestamp: Int64, dedupeKey: String)
     case rateLimit(RateLimitSnapshot)
 }

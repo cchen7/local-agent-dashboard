@@ -962,6 +962,18 @@ Backfill valid model-less Copilot calls as unpriced. Attribute their counts
 to a uniquely identified covering checkpoint only for reconciliation,
 without assuming a model price or changing the independent CLI audit.
 
+## DEV-105 — Reconcile anonymous Copilot calls across cumulative samples (ADP-CP)
+
+Use the first complete checkpoint remainder that covers every component in
+exactly one model, even if other models are present in that same sample.
+Once overlap is established, remove earlier partial fallback past the
+call's position. No timestamp, model or price is assigned to the exact
+call. Replay rederives already stored fallback and clears only a verified
+same-file old usage placeholder, leaving genuinely unknown events intact.
+
+The owner deferred the 30-minute offline observation as a gate for 0.1.0.
+The no-network restrictions and static verification are unchanged.
+
 ## DEV-103 — Keep menu bar actions in one row (§11.5)
 
 Replace the prototype's three stacked footer items with a single native row

@@ -287,7 +287,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | Metadata DB | `session-store.db` (SQLite): **optional**, snapshot read for enrichment. |
 | Envelope | `{ "type", "data", "id", "timestamp", "parentId", "agentId"? }` |
 | Main events | `session.start` (`sessionId`, `copilotVersion`, `startTime`, `context.cwd`, …), `session.resume`, `session.context_changed`, `user.message` (`content` is what the user typed; `transformedContent` includes injected context — **index `content` only**), `assistant.message`, `assistant.turn_start` / `turn_end`, `tool.execution_start` (`toolName`, `arguments`) / `tool.execution_complete` (success), `session.task_complete` (`summary`, `success` — the agent's own completion summary, used directly as "latest progress"), `session.compaction_complete`, `session.model_change`, `subagent.started` / `completed`, `skill.invoked`, `session.shutdown`. |
-| Tokens (preferred) | Per-call `session.usage_record` events; dedupe by event `id`. Use the explicit model in the event data, including `data.usage.model`, before falling back to the session model. A valid call without a model remains in exact token totals and is unpriced. The first covering cumulative checkpoint can account for that call only when it names one model. |
+| Tokens (preferred) | Per-call `session.usage_record` events; dedupe by event `id`. Use the explicit model in the event data, including `data.usage.model`, before falling back to the session model. A valid call without a model remains in exact token totals and is unpriced. After named calls are subtracted, reconcile it against a complete remainder that covers all its counters in exactly one model. Later checkpoints may establish coverage that an earlier sample did not. |
 | Tokens (fallback) | `data.modelMetrics` on `session.shutdown` (and `session.usage_checkpoint`): per model `usage.inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens / reasoningTokens`. **These are cumulative:** a resumed session appends more shutdown events, so diff consecutive events per model and keep only increases; ignore repeated event ids and decreasing values. Fallback data has session-level time precision; record it at the shutdown time with `precision = checkpoint` (drawn with hatching, §11.4). |
 | ⚠️ Accounting | `inputTokens` **includes** cache reads and writes: `input_fresh = inputTokens − cacheReadTokens − cacheWriteTokens`; `reasoningTokens` is part of `outputTokens`. Records stamped with `agentId` (subagents) are already included in the parent totals — **do not count them twice**. |
 | Resume command | `cd "<cwd>" && copilot --resume <sessionId>` |
@@ -1104,6 +1104,7 @@ opening the index to search and usage, without reading the original files.
 
 - CI: entitlement check (§14.4).
 - Manual check before each release: watch the app for 30 minutes with Activity Monitor or a network monitor — no connections. In Console, filter `subsystem:com.apple.sandbox.reporting`; there must be no network violations from this app (any violation means some code tried to connect and must be removed).
+- 0.1.0 exception: the product owner deferred the 30-minute observation as a release gate. The no-network constraints and entitlements still apply; record the observation as deferred rather than passed.
 
 ---
 
@@ -1229,7 +1230,7 @@ sources or request input permissions. See the [input QA matrix](reports/FIXED-IN
 
 - [ ] All §14.4 checks pass
 - [ ] §15.4 smoke tests pass; real Apple Pinyin search and applicable ABC form and shortcut cases are verified separately
-- [ ] Manual zero-network check (§12.4) passes
+- [ ] Manual zero-network check (§12.4) passes, except where explicitly deferred for 0.1.0
 - [ ] On the user's real data for each agent supported by the [release scope](RELEASE-SCOPE.md): session counts and token totals match each CLI's own statistics on spot checks (within 1%; record reasons for differences in FORMATS.md)
 - [ ] Sessions remain viewable and searchable after their raw files are deleted
 - [ ] Minimum / default / large window screenshots match Figma

@@ -45,8 +45,92 @@ enum CopilotAccounting {
             """, arguments: [sessionID]) == true
     }
 
-    static func reconcile(_ key: Key, touchedUsage: inout Set<String>, db: Database) throws {
-        let hasAnonymous = try hasModelLessCalls(sessionID: key.sessionID, db: db)
+    typealias CoveredCall = (sequence: Int64, counts: [Int64])
+
+    /// Find a checkpoint that fully covers each anonymous call in exactly one
+    /// model's remaining cumulative usage. Use that result only to subtract
+    /// already counted volume. Never set or price the call's model.
+    static func coveredCalls(sessionID: Int64, db: Database) throws -> [Key: [CoveredCall]] {
+        let anonymous = try Row.fetchAll(db, sql: """
+            SELECT source_seq,input_fresh,cache_read,cache_write,output,reasoning
+            FROM token_events WHERE session_id=? AND model IS NULL AND agent='copilot'
+              AND precision='call' AND source_seq IS NOT NULL AND cache_write_1h=0
+            ORDER BY source_seq,dedupe_key
+            """, arguments: [sessionID]).map { row in
+                (sequence: row["source_seq"] as Int64, counts: parts(readCounts(row)))
+            }
+        guard !anonymous.isEmpty else { return [:] }
+        let snapshots = try Row.fetchCursor(db, sql: """
+            SELECT model,seq,input_fresh,cache_read,cache_write,output,reasoning
+            FROM copilot_usage_snapshots WHERE session_id=? ORDER BY seq,dedupe_key
+            """, arguments: [sessionID])
+        var highWater: [Key: [Int64]] = [:]
+        var assigned: [Key: [Int64]] = [:]
+        var result: [Key: [CoveredCall]] = [:]
+        var matched = Set<Int>()
+        var next = try snapshots.next()
+        while let first = next {
+            try Task.checkCancellation()
+            let sequence: Int64 = first["seq"]
+            var group: [Key: [Int64]] = [:]
+            var coherent = true
+            while let row = next, (row["seq"] as Int64) == sequence {
+                let key = Key(sessionID: sessionID, model: row["model"])
+                let counts = parts(readCounts(row))
+                if group.updateValue(counts, forKey: key) != nil ||
+                    highWater[key].map({ !zip(counts, $0).allSatisfy { $0.0 >= $0.1 } }) == true {
+                    coherent = false
+                }
+                next = try snapshots.next()
+            }
+            guard coherent else { continue }
+            highWater.merge(group) { _, latest in latest }
+            var remaining: [Key: [Int64]] = [:]
+            for (key, counts) in group {
+                let named = try namedCalls(key, after: -1, through: sequence, db: db)
+                let alreadyAssigned = assigned[key] ?? Array(repeating: 0, count: counts.count)
+                remaining[key] = counts.indices.map { max(0, max(0, counts[$0] - named[$0]) - alreadyAssigned[$0]) }
+            }
+            for i in anonymous.indices where !matched.contains(i) {
+                let call = anonymous[i]
+                if call.sequence > sequence { break }
+                let candidates = remaining.filter { _, counts in
+                    zip(call.counts, counts).allSatisfy { $0.0 <= $0.1 }
+                }
+                guard candidates.count == 1, let (key, capacity) = candidates.first else { continue }
+                assigned[key] = try add(assigned[key] ?? Array(repeating: 0, count: capacity.count), call.counts)
+                remaining[key] = zip(capacity, call.counts).map { $0.0 - $0.1 }
+                result[key, default: []].append(call)
+                matched.insert(i)
+            }
+            if matched.count == anonymous.count { break }
+        }
+        for key in Array(result.keys) {
+            result[key]?.sort { $0.sequence < $1.sequence }
+        }
+        return result
+    }
+
+    private static func namedCalls(_ key: Key, after: Int64, through: Int64, db: Database) throws -> [Int64] {
+        let row = try Row.fetchOne(db, sql: """
+            SELECT coalesce(sum(input_fresh),0) AS input_fresh,
+                   coalesce(sum(cache_read),0) AS cache_read,coalesce(sum(cache_write),0) AS cache_write,
+                   coalesce(sum(output),0) AS output,coalesce(sum(reasoning),0) AS reasoning
+            FROM token_events WHERE session_id=? AND model=? AND agent='copilot' AND precision='call'
+            AND source_seq>? AND source_seq<=?
+            """, arguments: [key.sessionID, key.model, after, through])
+        return row.map { parts(readCounts($0)) } ?? Array(repeating: 0, count: 5)
+    }
+
+    private static func add(_ a: [Int64], _ b: [Int64]) throws -> [Int64] {
+        try zip(a, b).map {
+            let (total, overflow) = $0.0.addingReportingOverflow($0.1)
+            guard !overflow else { throw StoreError.invalidTokenCounts }
+            return total
+        }
+    }
+
+    static func reconcile(_ key: Key, covered: [CoveredCall] = [], touchedUsage: inout Set<String>, db: Database) throws {
         let snapshots = try Row.fetchCursor(db, sql: """
             SELECT * FROM copilot_usage_snapshots WHERE session_id=? AND model=? ORDER BY seq,dedupe_key
             """, arguments: [key.sessionID, key.model])
@@ -54,6 +138,7 @@ enum CopilotAccounting {
         var calls = highWater
         var checkpointed = highWater
         var lastSequence: Int64 = -1
+        var coveredIndex = 0
         while let row = try snapshots.next() {
             try Task.checkCancellation()
             let counts = parts(readCounts(row))
@@ -65,41 +150,12 @@ enum CopilotAccounting {
                 try removeGenerated(dedupeKey, db: db)
                 continue
             }
-            let callRow = try Row.fetchOne(db, sql: """
-                SELECT coalesce(sum(input_fresh),0) AS input_fresh,
-                       coalesce(sum(cache_read),0) AS cache_read,coalesce(sum(cache_write),0) AS cache_write,
-                       coalesce(sum(output),0) AS output,coalesce(sum(reasoning),0) AS reasoning
-                FROM token_events WHERE session_id=? AND model=? AND agent='copilot' AND precision='call'
-                AND source_seq>? AND source_seq<=?
-                """, arguments: [key.sessionID, key.model, lastSequence, sequence])
-            if let callRow {
-                for (index, count) in parts(readCounts(callRow)).enumerated() {
-                    let (sum, overflow) = calls[index].addingReportingOverflow(count)
-                    guard !overflow else { throw StoreError.invalidTokenCounts }
-                    calls[index] = sum
-                }
-            }
-            if hasAnonymous, let attributed = try Row.fetchOne(db, sql: """
-                SELECT coalesce(sum(t.input_fresh),0) AS input_fresh,
-                       coalesce(sum(t.cache_read),0) AS cache_read,coalesce(sum(t.cache_write),0) AS cache_write,
-                       coalesce(sum(t.output),0) AS output,coalesce(sum(t.reasoning),0) AS reasoning
-                FROM token_events t WHERE t.session_id=?1 AND t.model IS NULL AND t.agent='copilot'
-                AND t.precision='call' AND t.source_seq>?2 AND t.source_seq<=?3
-                AND (
-                    SELECT CASE WHEN count(DISTINCT s.model)=1 THEN min(s.model) END
-                    FROM copilot_usage_snapshots s WHERE s.session_id=t.session_id AND s.seq=(
-                        SELECT min(n.seq) FROM copilot_usage_snapshots n
-                        WHERE n.session_id=t.session_id AND n.seq>=t.source_seq
-                    )
-                )=?4 COLLATE BINARY
-                """, arguments: [key.sessionID, lastSequence, sequence, key.model]) {
-                // Require the single-model checkpoint to contain the known
-                // calls and all candidate counters. Partial overlap does not
-                // establish that an anonymous call belongs to this model.
-                let values = parts(readCounts(attributed))
-                if values.indices.allSatisfy({ calls[$0] <= counts[$0] && values[$0] <= counts[$0] - calls[$0] }) {
-                    for index in values.indices { calls[index] += values[index] }
-                }
+            calls = try add(calls, namedCalls(key, after: lastSequence, through: sequence, db: db))
+            // Once a later sample establishes overlap, remove the earlier
+            // partial fallback too. The exact call stays at its own timestamp.
+            while coveredIndex < covered.count, covered[coveredIndex].sequence <= sequence {
+                calls = try add(calls, covered[coveredIndex].counts)
+                coveredIndex += 1
             }
             var delta = counts.indices.map { index in
                 max(0, max(0, counts[index] - calls[index]) - checkpointed[index])

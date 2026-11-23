@@ -566,6 +566,23 @@ public final class AgentStore: Sendable {
         var admittedClaudeFiles: Set<SessionKey> = []
         let redact = try IndexSecretRedaction.enabled(db)
         let includeThinking = try ThinkingPrivacy.enabled(db)
+        // Check the previous owner before saving any session rows from this
+        // batch. A replay must not take ownership and then remove another
+        // physical file's placeholder.
+        for case let .removeCopilotUsagePlaceholder(session, sourceFile, sequence, timestamp, dedupeKey) in records {
+            guard session.agent == .copilot, fileID == sourceFile,
+                  let identity = recordIdentity, identity.fileID == sourceFile else { continue }
+            try db.cachedStatement(sql: """
+                DELETE FROM events
+                WHERE dedupe_key=? AND seq=? AND ts=? AND kind='unknown' AND text IS NULL
+                    AND tool_name IS NULL AND meta_json='{"unrecognized":true}' AND blob_id IS NULL
+                    AND session_id IN (
+                        SELECT id FROM sessions WHERE agent='copilot' AND native_id=? AND file_id=?
+                            AND record_device=? AND record_inode=? AND source_deleted_at IS NULL
+                    )
+                """).execute(arguments: [dedupeKey, sequence, timestamp, session.nativeID, sourceFile,
+                                          identity.device, identity.inode])
+        }
         for record in records {
             switch record {
             case .session(let session):
@@ -594,19 +611,21 @@ public final class AgentStore: Sendable {
                         if let model = event.model {
                             let key = CopilotAccounting.Key(sessionID: sessionID, model: model)
                             if try CopilotAccounting.coversCall(key, sequence: order, db: db) { copilotKeys.insert(key) }
-                        } else {
+                        }
+                        if try event.model == nil || CopilotAccounting.hasModelLessCalls(sessionID: sessionID, db: db) {
                             copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: sessionID, db: db))
                         }
                     }
                 }
             case .copilotUsageSnapshot(let sample):
-                if let key = try CopilotAccounting.record(sample, sessionID: Self.sessionID(sample.session, db: db), db: db) {
+                let sessionID = try Self.sessionID(sample.session, db: db)
+                if let key = try CopilotAccounting.record(sample, sessionID: sessionID, db: db) {
                     copilotKeys.insert(key)
-                    if try CopilotAccounting.hasModelLessCalls(sessionID: key.sessionID, db: db) {
-                        // A late snapshot can change which model is uniquely
-                        // attributable for an already indexed anonymous call.
-                        copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: key.sessionID, db: db))
-                    }
+                }
+                if try CopilotAccounting.hasModelLessCalls(sessionID: sessionID, db: db) {
+                    // Reconcile on replay too: a stored snapshot can already
+                    // exist with amounts calculated by an older parser.
+                    copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: sessionID, db: db))
                 }
             case let .removeEmptyPlaceholder(session, fileID, sequence, dedupeKey):
                 try db.cachedStatement(sql: """
@@ -618,11 +637,15 @@ public final class AgentStore: Sendable {
                                 AND source_deleted_at IS NULL
                         )
                     """).execute(arguments: [dedupeKey, sequence, session.agent.rawValue, session.nativeID, fileID])
+            case .removeCopilotUsagePlaceholder: break // checked before updating the session owner
             case .rateLimit(let sample): try Self.save(sample, db: db)
             }
         }
-        for key in copilotKeys {
-            try CopilotAccounting.reconcile(key, touchedUsage: &touchedUsage, db: db)
+        for (sessionID, keys) in Dictionary(grouping: copilotKeys, by: \.sessionID) {
+            let covered = try CopilotAccounting.coveredCalls(sessionID: sessionID, db: db)
+            for key in keys {
+                try CopilotAccounting.reconcile(key, covered: covered[key] ?? [], touchedUsage: &touchedUsage, db: db)
+            }
         }
         if let quote, !touchedUsage.isEmpty {
             var writer = try TokenQuoteStore.Writer(quote: quote, db: db)

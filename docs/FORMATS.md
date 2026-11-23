@@ -317,11 +317,15 @@ Parser v6 retains valid parent-call counters as unpriced when neither the
 event nor the session supplies a model. A sanitized local capture confirmed
 the nested numeric usage shape with a model; the bounded recent-file pass
 did not locate a model-less parent call. The missing-model, replay and
-later-checkpoint cases use synthetic variations of that envelope. The store
-subtracts anonymous counts from the first covering checkpoint only when
-that checkpoint names one model and covers all the candidate counters;
-the call itself remains unpriced. This
-does not change the separate comparison with CLI statistics.
+later-checkpoint cases use synthetic variations of that envelope. Parser
+v7 replays older checkpoints. After subtracting named calls and previously
+covered anonymous calls, the store counts a model-less call only once when
+exactly one model's cumulative remainder covers all its counters. Later
+covering checkpoints can reconcile an earlier partial sample. The call
+stays unpriced at its original time; ambiguous coverage does not set a
+model. During verified v5/v6 prefix replay, only the matching old unknown
+stub is removed after decoding the same call successfully. This does not
+change the separate comparison with CLI statistics.
 Event-backed Copilot workspaces expose the native title as top-level
 `name`, with an optional top-level `summary`. The observed strings used
 plain scalars, single or double quotes, and literal `|-` blocks. The

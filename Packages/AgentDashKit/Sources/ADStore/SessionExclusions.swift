@@ -337,7 +337,7 @@ struct SessionExclusionGate {
         case .event(let value): value.session
         case .tokens(let value): value.session
         case .copilotUsageSnapshot(let value): value.session
-        case .removeEmptyPlaceholder(let key, _, _, _): key
+        case .removeEmptyPlaceholder(let key, _, _, _), .removeCopilotUsagePlaceholder(let key, _, _, _, _): key
         case .rateLimit: nil // Agent-wide, no session association.
         }
     }

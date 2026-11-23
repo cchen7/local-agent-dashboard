@@ -157,7 +157,7 @@ enum ArchiveRetentionStore {
                 key = value.session
                 if try Int.fetchOne(tokenCheck, arguments: [tokenDigest(value.dedupeKey)]) != nil { return false }
             case .copilotUsageSnapshot(let value): key = value.session
-            case .removeEmptyPlaceholder(let value, _, _, _): key = value
+            case .removeEmptyPlaceholder(let value, _, _, _), .removeCopilotUsagePlaceholder(let value, _, _, _, _): key = value
             case .rateLimit: return true
             }
             let hash = digest(key)

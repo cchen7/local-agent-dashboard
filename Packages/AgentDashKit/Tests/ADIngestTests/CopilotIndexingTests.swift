@@ -123,7 +123,7 @@ func copilotReplaysNestedUsageModel() throws {
     #expect(try totals(in: store, session: key).total == 142)
 }
 
-@Test("ADP-CP / FR-COST: preserve model-less calls; reconcile only a covering single-model snapshot",
+@Test("ADP-CP / FR-COST: preserve model-less calls and do not guess when two models can cover them",
       arguments: [false, true])
 func copilotKeepsUnpricedCallWithoutSnapshotDoubleCount(ambiguous: Bool) throws {
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID().uuidString)")
@@ -147,7 +147,7 @@ func copilotKeepsUnpricedCallWithoutSnapshotDoubleCount(ambiguous: Bool) throws 
     #expect(first.checkpoint.unknownRecords == 0)
     #expect(try totals(in: store, session: key) == .init(inputFresh: 80, cacheRead: 20, output: 20, reasoning: 3))
     let metric = #"{"usage":{"inputTokens":130,"cacheReadTokens":26,"outputTokens":27,"reasoningTokens":5}}"#
-    let additional = ambiguous ? #","other-model":{"usage":{"inputTokens":7,"outputTokens":3}}"# : ""
+    let additional = ambiguous ? #","other-model":{"usage":{"inputTokens":103,"cacheReadTokens":20,"outputTokens":21,"reasoningTokens":3}}"# : ""
     let later = #"{"type":"session.usage_checkpoint","id":"sample","timestamp":"2020-01-01T00:00:02Z","data":{"modelMetrics":{"synthetic-model":"#
         + metric + additional + "}}}\n"
     let fileHandle = try FileHandle(forWritingTo: url)
@@ -155,7 +155,7 @@ func copilotKeepsUnpricedCallWithoutSnapshotDoubleCount(ambiguous: Bool) throws 
     try fileHandle.write(contentsOf: Data(later.utf8))
     try fileHandle.close()
     _ = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
-    let expected = ambiguous ? TokenCounts(inputFresh: 191, cacheRead: 46, output: 50, reasoning: 8)
+    let expected = ambiguous ? TokenCounts(inputFresh: 267, cacheRead: 66, output: 68, reasoning: 11)
         : TokenCounts(inputFresh: 104, cacheRead: 26, output: 27, reasoning: 5)
     #expect(try totals(in: store, session: key) == expected)
     try store.databasePool.read { db in
@@ -172,11 +172,135 @@ func copilotKeepsUnpricedCallWithoutSnapshotDoubleCount(ambiguous: Bool) throws 
     #expect(try totals(in: store, session: key) == expected)
 }
 
+@Test("ADP-CP: model-less calls overlap a unique remainder in multi-model and later checkpoints",
+      arguments: [false, true])
+func reconcileCopilotAnonymousOverlappingCheckpoints(later: Bool) throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID())")
+    let root = temp.appendingPathComponent("source")
+    let folder = root.appendingPathComponent("session-state/synthetic")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let url = folder.appendingPathComponent("events.jsonl")
+    let start = #"{"type":"session.start","id":"start","timestamp":"2020-01-01T00:00:00Z","data":{"sessionId":"synthetic"}}"#
+    let named = #"{"type":"session.usage_record","id":"named","timestamp":"2020-01-01T00:00:01Z","data":{"modelId":"model-a","usage":{"inputTokens":8,"outputTokens":2}}}"#
+    let call = #"{"type":"session.usage_record","id":"anonymous","timestamp":"2020-01-01T00:00:02Z","data":{"usage":{"inputTokens":100,"outputTokens":20}}}"#
+    let small = #"{"type":"session.usage_checkpoint","id":"small","timestamp":"2020-01-01T00:00:03Z","data":{"modelMetrics":{"model-b":{"usage":{"inputTokens":50,"outputTokens":10}}}}}"#
+    let cumulative = later
+        ? #"{"type":"session.shutdown","id":"end","timestamp":"2020-01-01T00:00:04Z","data":{"modelMetrics":{"model-b":{"usage":{"inputTokens":130,"outputTokens":26}}}}}"#
+        : #"{"type":"session.shutdown","id":"end","timestamp":"2020-01-01T00:00:04Z","data":{"modelMetrics":{"model-a":{"usage":{"inputTokens":8,"outputTokens":2}},"model-b":{"usage":{"inputTokens":100,"outputTokens":20}}}}}"#
+    let provisional = later ? [start, call, small] : [start, named, call]
+    try Data((provisional.joined(separator: "\n") + "\n").utf8).write(to: url)
+    let index = temp.appendingPathComponent("index.sqlite")
+    let store = try AgentStore(databaseURL: index)
+    var source = Source(agent: .copilot, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let adapter = CopilotAdapter()
+    let file = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((cumulative + "\n").utf8))
+    try handle.close()
+    let reopened = try AgentStore(databaseURL: index)
+    try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: reopened, adapter: adapter)
+    #expect(try totals(in: reopened, session: key).total == (later ? 156 : 130))
+    let window = try UsageWindow.make(.hour, now: 1_577_836_805_000, timeZone: .gmt)
+    let report = try reopened.usage(window: window)
+    #expect(report.totals.counts.total == (later ? 156 : 130))
+    try reopened.databasePool.read { db in
+        let anonymous = try #require(try Row.fetchOne(db, sql: """
+            SELECT ts,model,price_status,input_fresh,output FROM token_events WHERE model IS NULL AND precision='call'
+            """))
+        #expect((anonymous["ts"] as Int64) == 1_577_836_802_000)
+        #expect((anonymous["price_status"] as String) == "unpriced")
+        #expect((anonymous["input_fresh"] as Int64) == 100)
+        #expect((anonymous["output"] as Int64) == 20)
+        #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM token_events WHERE precision='checkpoint'") == (later ? 1 : 0))
+    }
+    try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, replay: true,
+                                     store: reopened, adapter: adapter)
+    #expect(try totals(in: reopened, session: key).total == (later ? 156 : 130))
+
+    // Reproduce the already stored v6 overcount. Replaying only duplicates
+    // must rederive the checkpoint rows even when no calls or snapshots insert.
+    let updated = try #require(try reopened.checkpoint(for: reopened.upsertFile(file, checkpoint: nil)))
+    try reopened.databasePool.write { db in
+        try db.execute(sql: "DELETE FROM token_events WHERE precision='checkpoint'")
+        if later {
+            try db.execute(sql: """
+                INSERT INTO token_events(session_id,agent,model,ts,input_fresh,output,precision,dedupe_key)
+                SELECT id,'copilot','model-b',1577836803000,50,10,'checkpoint','cp:9:synthetic:id:5:small:checkpoint:model-b'
+                FROM sessions WHERE native_id='synthetic'
+                """)
+        }
+        try db.execute(sql: """
+            INSERT INTO token_events(session_id,agent,model,ts,input_fresh,output,precision,dedupe_key)
+            SELECT id,'copilot','model-b',1577836804000,?,?,'checkpoint','cp:9:synthetic:id:3:end:checkpoint:model-b'
+            FROM sessions WHERE native_id='synthetic'
+            """, arguments: [later ? 80 : 100, later ? 16 : 20])
+        try db.execute(sql: "UPDATE source_files SET parser_version=6 WHERE rel_path=?", arguments: [file.relativePath])
+    }
+    #expect(try totals(in: reopened, session: key).total == (later ? 276 : 250))
+    let replayed = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: reopened, adapter: adapter)
+    #expect(replayed.checkpoint.offset == updated.offset && replayed.checkpoint.parserVersion == CopilotAdapter.parserVersion)
+    #expect(try totals(in: reopened, session: key).total == (later ? 156 : 130))
+}
+
+@Test("ADP-CP: replay v5/v6 removes only a recovered same-file anonymous usage placeholder",
+      arguments: [5, 6])
+func replayCopilotRecoveredUsageMatchesFreshTranscript(oldVersion: Int) throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID())")
+    let root = temp.appendingPathComponent("source")
+    let folder = root.appendingPathComponent("session-state/synthetic")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let url = folder.appendingPathComponent("events.jsonl")
+    let body = [
+        #"{"type":"session.start","id":"start","timestamp":"2020-01-01T00:00:00Z","data":{"sessionId":"synthetic"}}"#,
+        #"{"type":"session.usage_record","id":"anonymous","timestamp":"2020-01-01T00:00:01Z","data":{"usage":{"inputTokens":100,"outputTokens":20}}}"#,
+        #"{"type":"session.usage_record","id":"invalid","timestamp":"2020-01-01T00:00:02Z","data":{"usage":{"inputTokens":-1,"outputTokens":20}}}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(body.utf8).write(to: url)
+    let index = temp.appendingPathComponent("index.sqlite")
+    let store = try AgentStore(databaseURL: index)
+    var source = Source(agent: .copilot, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let adapter = CopilotAdapter()
+    let file = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    let id = try store.upsertFile(file, checkpoint: nil)
+    let snapshot = try SourceFileReader(root: root, relativePath: file.relativePath).snapshot()
+    let checkpoint = Checkpoint(inode: snapshot.inode, size: snapshot.size, offset: snapshot.size,
+        parserVersion: oldVersion, sequence: 2, previousTimestamp: 1_577_836_802_000,
+        device: snapshot.device, modificationTimeNS: snapshot.modificationTimeNS, unknownRecords: oldVersion == 5 ? 2 : 1)
+    let staleKey = "cp:9:synthetic:id:9:anonymous:unknown"
+    let stale = EventRecord(session: key, sequence: 1, timestamp: 1_577_836_801_000, kind: .unknown,
+                            metadataJSON: #"{"unrecognized":true}"#, dedupeKey: staleKey)
+    let owner = try #require(source.id)
+    try store.commitFileBatch([.session(.init(key: key, sourceID: owner, fileID: id, environment: "Synthetic")),
+                               .event(stale)], for: id, from: nil, to: checkpoint)
+    #expect(try store.events(in: key).contains { $0.dedupeKey == staleKey })
+    let migrated = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    #expect(migrated.checkpoint.unknownRecords == 1)
+    #expect(try totals(in: store, session: key).total == 120)
+    let fresh = try AgentStore(databaseURL: temp.appendingPathComponent("fresh.sqlite"))
+    source.id = try fresh.upsertSource(source)
+    let freshFile = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    try JSONLFileImporter.importFile(freshFile, from: source, authorizedRoot: root, store: fresh, adapter: adapter)
+    let migratedEvents = try #require(try store.transcriptPage(in: key)).events.filter { $0.kind == .unknown }
+    let freshEvents = try #require(try fresh.transcriptPage(in: key)).events.filter { $0.kind == .unknown }
+    #expect(migratedEvents.map(\.dedupeKey) == freshEvents.map(\.dedupeKey))
+    #expect(migratedEvents.map(\.sequence) == [2])
+    #expect(try store.events(in: key).allSatisfy { $0.dedupeKey != staleKey })
+}
+
 private func totals(in store: AgentStore, session: SessionKey) throws -> TokenCounts {
     try store.databasePool.read { db in
         let row = try #require(try Row.fetchOne(db, sql: """
-            SELECT sum(input_fresh) AS fresh,sum(cache_read) AS cached,sum(cache_write) AS written,
-                   sum(output) AS output,sum(reasoning) AS reasoning
+            SELECT coalesce(sum(input_fresh),0) AS fresh,coalesce(sum(cache_read),0) AS cached,
+                   coalesce(sum(cache_write),0) AS written,coalesce(sum(output),0) AS output,
+                   coalesce(sum(reasoning),0) AS reasoning
             FROM token_events t JOIN sessions s ON s.id=t.session_id WHERE s.agent=? AND s.native_id=?
             """, arguments: [session.agent.rawValue, session.nativeID]))
         return TokenCounts(inputFresh: row["fresh"], cacheRead: row["cached"], cacheWrite: row["written"],

@@ -5,7 +5,7 @@ import Foundation
 /// GitHub Copilot CLI's append-only event stream (ADP-CP).
 public struct CopilotAdapter: AgentAdapter {
     public static let kind: AgentKind = .copilot
-    public static let parserVersion = 6
+    public static let parserVersion = 7
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}
@@ -53,6 +53,7 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
     private struct Saved: Codable, Equatable, Sendable {
         var session: SessionRecord?
         var recentCalls: [Call] = []
+        var legacyUsageEndOffset: Int64?
     }
 
     private let file: SourceFile
@@ -72,6 +73,9 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
             encodedState = context.state
         }
         let prior = state
+        let legacyUsageEnd = context.replayedPrefix.flatMap {
+            (5...6).contains($0.parserVersion) ? $0.endOffset : nil
+        } ?? prior.legacyUsageEndOffset
         let object = frame.isTruncated ? nil : AdapterJSON.object(frame.bytes)
         let data = object?["data"] as? AdapterJSON.Object ?? [:]
         let type = object?["type"] as? String
@@ -161,6 +165,10 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
                 if let counts = Self.counts(usage) {
                     records.append(.tokens(.init(session: key, timestamp: time, model: model, counts: counts,
                         dedupeKey: "\(eventKey):call", sourceSequence: frame.sequence)))
+                    if model == nil, let legacyUsageEnd, frame.endOffset <= legacyUsageEnd {
+                        records.append(.removeCopilotUsagePlaceholder(session: key, fileID: context.fileID,
+                            sequence: frame.sequence, timestamp: time, dedupeKey: "\(eventKey):unknown"))
+                    }
                 } else { unknown = true }
             }
         case "session.shutdown", "session.usage_checkpoint":
@@ -184,6 +192,7 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
         if unknown { records.append(event(.unknown, fields: ["unrecognized": true])) }
         state.session = metadata
         state.recentCalls = recentCalls
+        state.legacyUsageEndOffset = legacyUsageEnd.flatMap { frame.endOffset < $0 ? $0 : nil }
         if metadata != prior.session { records.insert(.session(metadata), at: 0) }
         if state != prior {
             let encoder = JSONEncoder()
