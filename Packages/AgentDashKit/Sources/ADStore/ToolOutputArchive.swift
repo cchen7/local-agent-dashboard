@@ -96,7 +96,7 @@ public extension AgentStore {
 
 enum ToolOutputArchive {
     static func limit(_ db: Database) throws -> ToolOutputArchiveLimit {
-        guard let value = try String.fetchOne(db, sql: "SELECT value FROM app_meta WHERE key='tool_output_archive_limit'")
+        guard let value = try String.fetchOne(db.cachedStatement(sql: "SELECT value FROM app_meta WHERE key='tool_output_archive_limit'"))
         else { return .standard }
         guard let int = Int(value), let limit = ToolOutputArchiveLimit(rawValue: int) else { throw StoreError.invalidStoredValue }
         return limit
