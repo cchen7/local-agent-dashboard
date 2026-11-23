@@ -918,3 +918,11 @@ generally or treat unknown labels as a public model.
 Add the [published Opus 5.5 launch rates](https://www.anthropic.com/news/claude-opus-5-5)
 effective 2026-09-22. Existing rate entries are unchanged. Earlier dates
 without verified rates and unrecognized labels stay unpriced.
+
+## DEV-100 — Verify access without mounting a volume (SEC-3)
+
+Source access checks, indexing and identity probes resolve bookmarks
+without UI or mounting volumes. Verify Access rejects a bookmark that
+resolves to a different folder instead of showing it as readable.
+Identity lookup can still recognize a renamed directory during permission
+renewal; a status check does not renew the grant.

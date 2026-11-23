@@ -14,6 +14,8 @@ enum SourceFilePreview: Equatable, Sendable {
 /// M0 access verification reads directory entry metadata only, never file contents.
 /// Top-level entry counts establish access, not session discovery or parser coverage.
 enum SourceAccessProbe {
+    private static let bookmarkResolutionOptions: URL.BookmarkResolutionOptions = [.withSecurityScope, .withoutUI, .withoutMounting]
+
     static func defaultSources() throws -> [Source] {
         // NSHomeDirectory is the container home under App Sandbox. Resolve the real
         // local account home using the read-only POSIX account lookup instead.
@@ -40,9 +42,10 @@ enum SourceAccessProbe {
             case .defaultLocation: return try countEntries(at: source.rootURL)
             case .bookmark(let data):
                 var stale = false
-                let url = try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI],
+                let url = try URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
                                   relativeTo: nil, bookmarkDataIsStale: &stale)
                 guard !stale else { return .staleBookmark }
+                guard url.standardizedFileURL == source.rootURL.standardizedFileURL else { return .wrongDirectory }
                 guard url.startAccessingSecurityScopedResource() else { return .denied }
                 defer { url.stopAccessingSecurityScopedResource() }
                 return try countEntries(at: url)
@@ -61,7 +64,7 @@ enum SourceAccessProbe {
             var stale = false
             let root: URL
             do {
-                root = try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+                root = try URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
                                relativeTo: nil, bookmarkDataIsStale: &stale)
             } catch {
                 throw IndexAccessFailure.denied
@@ -104,7 +107,7 @@ enum SourceAccessProbe {
             return try? SourceFileReader.registrationIdentity(root: source.rootURL)
         case .bookmark(let data):
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+            guard let url = try? URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
                                      relativeTo: nil, bookmarkDataIsStale: &stale),
                   !stale, url.startAccessingSecurityScopedResource() else { return nil }
             defer { url.stopAccessingSecurityScopedResource() }

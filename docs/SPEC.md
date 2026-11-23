@@ -35,6 +35,10 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 
 ### 1.2 Goals (v1)
 
+These are product goals. The [0.1.0 release scope](RELEASE-SCOPE.md)
+includes Claude Code, Codex and GitHub Copilot CLI. Grok Build support
+remains a goal for a later release, after format capture and validation.
+
 - G1 Auto-discover each agent's local sessions and usage data; index incrementally and in near real time.
 - G2 **Unified full-text search** across agents, directories and environments; must work well for both Chinese and English.
 - G3 **Read-only** session view: directory, branch, environment, main topics, latest progress, full transcript.
@@ -1220,11 +1224,11 @@ sources or request input permissions. See the [input QA matrix](reports/FIXED-IN
 - [ ] All §14.4 checks pass
 - [ ] §15.4 smoke tests pass; real Apple Pinyin search and applicable ABC form and shortcut cases are verified separately
 - [ ] Manual zero-network check (§12.4) passes
-- [ ] On the user's real data for all four agents: session counts and token totals match each CLI's own statistics on spot checks (within 1%; record reasons for differences in FORMATS.md)
+- [ ] On the user's real data for each agent supported by the [release scope](RELEASE-SCOPE.md): session counts and token totals match each CLI's own statistics on spot checks (within 1%; record reasons for differences in FORMATS.md)
 - [ ] Sessions remain viewable and searchable after their raw files are deleted
 - [ ] Minimum / default / large window screenshots match Figma
 - [ ] Light mode works
-- [ ] Cost: for each agent, 3 sessions hand-priced from the price table match the app
+- [ ] Cost: for each supported agent, 3 sessions hand-priced from the price table match the app
 - [ ] The exact final Developer ID ZIP matches the approved revision and digest, passes notarization and distribution checks, and first launch/reopen is verified on a clean account. See [Release verification](RELEASE-VERIFY.md).
 
 ---
