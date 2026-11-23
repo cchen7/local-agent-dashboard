@@ -206,24 +206,7 @@ struct SessionTranscript: View {
                     Spacer(minLength: 8)
                     SessionStatusPill(status: session.status, reason: session.statusReason)
                 }
-                Group {
-                    if compactFacts {
-                        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                            GridRow { startFact; turnsFact }
-                            GridRow { usageFact; contextFact }
-                        }
-                    } else {
-                        HStack(alignment: .top, spacing: 16) {
-                            startFact
-                            turnsFact
-                            usageFact
-                            contextFact
-                        }
-                    }
-                }
-                .font(.caption)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier(compactFacts ? "session.details.facts.compact" : "session.details.facts.wide")
+                detailFacts.font(.caption)
                 if running, let activity {
                     SessionActivityBar(activity: activity)
                 }
@@ -351,6 +334,36 @@ struct SessionTranscript: View {
         }
     }
 
+    @ViewBuilder private var detailFacts: some View {
+        if compactFacts {
+            twoColumnFacts
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 0) {
+                    startFact.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 16)
+                    turnsFact.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 16)
+                    usageFact.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 16)
+                    contextFact.fixedSize(horizontal: true, vertical: false)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("session.details.facts.wide")
+                twoColumnFacts
+            }
+        }
+    }
+
+    private var twoColumnFacts: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+            GridRow(alignment: .top) { startFact; turnsFact }
+            GridRow(alignment: .top) { usageFact; contextFact }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("session.details.facts.compact")
+    }
+
     private var startFact: some View {
         sessionFact("Started") {
             if let time = session.startedAt {
@@ -372,8 +385,8 @@ struct SessionTranscript: View {
                     .help(breakdown(usage.totals.counts))
                 if usage.totals.hasPricedUsage {
                     let currency = displayCurrency.formattedMicroUSD(Decimal(usage.totals.costMicroUSD))
-                    Text(usage.totals.unpricedTokens > 0 ? "Partial estimate: \(currency)" : "List-price estimate: \(currency)")
-                        .foregroundStyle(.secondary)
+                    costReading(currency, partial: usage.totals.unpricedTokens > 0)
+                        .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("session.usage.cost")
                         .help(Text("\(usage.totals.unpricedTokens.formatted()) unpriced tokens"))
                     if usage.hasApproximateQuote {
@@ -383,6 +396,29 @@ struct SessionTranscript: View {
                     Text("Unpriced").foregroundStyle(.secondary)
                 } else { Text(verbatim: "—").foregroundStyle(.secondary) }
             } else { Text(verbatim: "—").foregroundStyle(.secondary) }
+        }
+    }
+
+    private func costReading(_ currency: String, partial: Bool) -> some View {
+        let amount = Text(verbatim: currency)
+            .monospacedDigit()
+            .fontWeight(.semibold)
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+        let estimate = Text(partial ? "Partial estimate" : "List-price estimate")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                amount
+                estimate
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 1) {
+                amount
+                estimate
+            }
         }
     }
 
@@ -431,10 +467,17 @@ struct SessionTranscript: View {
     @ViewBuilder private var contextReading: some View {
         if let value = SessionContextUsage(input: indexedContext?.input, recordedCapacity: indexedContext?.capacity,
                                            model: indexedContext?.model, rules: contextWindowRules) {
-            Text("\(value.input.formatted()) / \(value.capacity.formatted()) tokens · \(value.fraction.formatted(.percent.precision(.fractionLength(1))))")
-                .monospacedDigit()
-                .lineLimit(1)
-                .help(Text(value.source == .recorded ? "Context capacity from the source" : "Context capacity from Settings"))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(value.input.formatted()) / \(value.capacity.formatted()) tokens")
+                    .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(value.fraction.formatted(.percent.precision(.fractionLength(1)))) used")
+                    .monospacedDigit()
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .help(Text(value.source == .recorded ? "Context capacity from the source" : "Context capacity from Settings"))
         } else {
             Text(verbatim: "—").foregroundStyle(.secondary)
         }

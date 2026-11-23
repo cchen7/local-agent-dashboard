@@ -933,3 +933,11 @@ The Finder and Dock icon uses an Icon Composer document with original
 vector layers: a glass surface, a search lens and a usage signal.
 Xcode compiles the appearance variants and applies the system mask.
 The menu bar keeps its monochrome symbol.
+
+## DEV-102 — Keep session cost and context values readable (§11.2, §11.8)
+
+The estimate label stays secondary; the currency amount is a primary value.
+The context counts may wrap and the percentage is displayed separately.
+A one-row header fits the uncompressed fact widths before switching out of
+the two-column grid. Short date and turn facts no longer consume the same
+width as long values. No usage or pricing calculation changes.

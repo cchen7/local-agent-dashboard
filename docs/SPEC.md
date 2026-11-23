@@ -857,7 +857,7 @@ List rows and detail read the same committed, cache-inclusive usage summary. Sho
 **Detail:**
 
 - Header: avatar, title, `agent · full path · branch · environment`, status badge (hover shows inference evidence).
-- Meta grid: Started, Turns, Tokens · Cost (two lines in one cell: total tokens including cache / list-price cost estimate; hover shows the breakdown), Context window.
+- Meta grid: Started, Turns, Tokens · Cost, Context window. Show both cache-inclusive tokens and the estimated amount as primary values, with the estimate label next to or below the amount. Hover shows the breakdown. Show full context usage and capacity with the percent used on its own line.
   Count each user record once by file sequence. Use stored event quotes and label a subset of priced tokens as a partial estimate.
 - Live activity bar (running only): show the latest eligible unanswered tool, its masked command when available, time since that call and time since the latest indexed activity. If no call is known, show the most recent kind of activity and its age. Omit times that cannot be determined. **No process ID** (the sandbox cannot see it).
 - Two tabs: **Overview** | **Transcript**.
@@ -998,7 +998,7 @@ Keep this decision in the app index; an existing indexed library skips setup.
 - Sidebar 240 default, draggable 200–300, collapsible.
 - Toolbar search field fills the remaining width, minimum ≈ 200.
 - Session list width: 300 at minimum window / 356 default / 420 large (interpolated with window width; remember user drags).
-- Session detail narrower than 480: meta grid becomes 2×2 instead of 1×4.
+- Session detail narrower than 480, or without room for the four full-width readouts: meta grid becomes 2×2 instead of 1×4. On one row, the facts use their content widths rather than four equal cells.
 - Token page content narrower than 760: readout captions hidden.
 - Main chart minimum height 220; if it does not fit, the whole page scrolls.
 - Detail table: name and share columns split the free width; narrow windows hide columns as in §11.4.

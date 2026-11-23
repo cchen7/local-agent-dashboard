@@ -1182,6 +1182,33 @@ final class SmokeTests: XCTestCase {
         XCTAssertFalse(settings.staticTexts["Synthetic custom source"].exists)
     }
 
+    func testSessionDetailValuesAtNativeWindowSizes() throws {
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_DETAIL_FACTS"] = "1"
+        app.launchEnvironment["AGENTDASH_SYNTHETIC_USAGE"] = "1"
+        let sizes = [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)]
+        for appearance in ["dark", "light"] {
+            for size in sizes {
+                let window = try launch(size: size, appearance: appearance, populated: true)
+                let facts = window.descendants(matching: .any).matching(NSPredicate(
+                    format: "identifier IN %@", ["session.details.facts.compact", "session.details.facts.wide"])).firstMatch
+                XCTAssertTrue(facts.waitForExistence(timeout: 5))
+                try awaitVisualReviewIfRequested(caseName: "session-facts-\(appearance)-\(Int(size.width))", frame: window.frame)
+                if size.width == 960 {
+                    XCTAssertEqual(facts.identifier, "session.details.facts.compact")
+                } else if size.width == 1440 {
+                    XCTAssertEqual(facts.identifier, "session.details.facts.wide")
+                }
+                for value in ["460,098,000", "$1,043.47", "List-price estimate", "654,321 / 999,999 tokens", "65.4% used"] {
+                    let reading = facts.staticTexts.matching(NSPredicate(
+                        format: "label CONTAINS %@ OR value CONTAINS %@", value, value)).firstMatch
+                    XCTAssertTrue(reading.waitForExistence(timeout: 5), "Missing detail value: \(value)")
+                    XCTAssertTrue(window.frame.contains(reading.frame))
+                }
+                app.terminate()
+            }
+        }
+    }
+
     func testNativeWindowGeometry() throws {
         for appearance in ["dark", "light"] {
             for size in [CGSize(width: 960, height: 600), CGSize(width: 1120, height: 720), CGSize(width: 1440, height: 900)] {

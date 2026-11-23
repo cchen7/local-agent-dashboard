@@ -8229,6 +8229,23 @@
         }
       }
     },
+    "List-price estimate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List-price estimate"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "列表价估算"
+          }
+        }
+      }
+    },
     "Partial estimate": {
       "extractionState": "manual",
       "localizations": {
@@ -8735,6 +8752,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "上下文窗口"
+          }
+        }
+      }
+    },
+    "%@ / %@ tokens": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ / %@ tokens"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ / %2$@ 个令牌"
           }
         }
       }

@@ -898,6 +898,20 @@ final class DashboardModel {
         let other = SessionKey(agent: .codex, nativeID: "preview-docs")
         let realNow = Int64(Date().timeIntervalSince1970 * 1000)
         #if AGENTDASH_SYNTHETIC_ONLY
+        if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_DETAIL_FACTS"] == "1" {
+            try store.write([
+                .session(.init(key: primary, sourceID: sourceID, environment: "Synthetic",
+                               cwd: "/synthetic/detail", title: "Synthetic detail values",
+                               startedAt: realNow, lastEventAt: realNow, status: .completed,
+                               contextWindow: 999_999, contextUsed: 654_321)),
+                .event(.init(session: primary, sequence: 0, timestamp: realNow,
+                             kind: .user, text: "Review synthetic detail metrics", dedupeKey: "preview:detail:prompt")),
+                .tokens(.init(session: primary, timestamp: 1_795_260_000_000, model: "gpt-6.1-sol",
+                              counts: .init(inputFresh: 250_000_000, cacheRead: 210_000_000, output: 98_000),
+                              dedupeKey: "preview:detail:usage")),
+            ])
+            return
+        }
         if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SESSION_TITLE"] == "1" {
             try store.write([
                 .session(.init(key: primary, sourceID: sourceID, environment: "Synthetic",
