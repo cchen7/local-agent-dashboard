@@ -3158,7 +3158,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Agent：%lld"
+            "value": "代理：%lld"
           }
         }
       }
@@ -3243,7 +3243,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Agent"
+            "value": "代理"
           }
         }
       }
