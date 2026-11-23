@@ -949,6 +949,9 @@ Compare mapping edits by UTF-8 bytes, clear newly excluded index data in
 the save transaction, and recheck previously excluded keys only when the
 changed source supplies an authoritative workspace. Legacy exclusion keys
 can be associated with that source if all their tracked inputs agree.
+When upgrading an older index, reapply existing rules to live rows and
+retained usage in one migration so previously missed matches are removed
+before the index is visible. No agent source is read during the migration.
 
 Resolve bookmark health at startup without enumerating files. Verification
 and indexing accept the same physical directory across APFS aliases and

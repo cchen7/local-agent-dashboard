@@ -217,6 +217,18 @@ public final class AgentStore: Sendable {
                 ALTER TABLE session_exclusion_keys ADD COLUMN source_id INTEGER;
                 """)
         }
+        migrator.registerMigration("reapply_mapped_workspace_exclusions", foreignKeyChecks: .immediate) { db in
+            // Older versions could miss saved exclusions when a recorded
+            // workspace needed normalization before applying its mapping.
+            // Use the ordinary foreign-key cascades for these row deletions.
+            let policy = try SessionExclusionPolicy.read(db)
+            guard !policy.patterns.isEmpty else { return }
+            var gate = try SessionExclusionGate(policy: policy)
+            try gate.removeExistingMatches(db: db)
+            try gate.removeRetainedMatches(db: db)
+            try gate.finishRemovals(db: db)
+            try UsageChartChanges.publish(db)
+        }
         try migrator.migrate(databasePool)
     }
 

@@ -1097,6 +1097,8 @@ Apply mappings to the same byte-preserving normalized workspaces used by
 Projects. A byte-only mapping change applies existing exclusions immediately;
 previously excluded sessions can be reconsidered from an authoritative
 workspace in the affected source on its next scan.
+An upgrade that corrects exclusion matching reapplies existing rules before
+opening the index to search and usage, without reading the original files.
 
 ### 12.4 Proving zero network
 
