@@ -66,7 +66,7 @@ public struct SourceSettings: Equatable, Sendable {
 
     private static func bytesEqual(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
 
-    private static func sameMappings(_ a: [PathMapping], _ b: [PathMapping]) -> Bool {
+    public static func sameMappings(_ a: [PathMapping], _ b: [PathMapping]) -> Bool {
         a.elementsEqual(b) { bytesEqual($0.from, $1.from) && bytesEqual($0.to, $1.to) }
     }
 

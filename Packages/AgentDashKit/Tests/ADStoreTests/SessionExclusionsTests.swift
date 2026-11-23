@@ -141,3 +141,79 @@ func mappedWorkspaceChangeAppliesExclusionImmediately() throws {
     #expect(try fixture.store.checkpoint(for: remapped.file)?.parserVersion == 0)
     #expect(try fixture.store.checkpoint(for: unaffected.file)?.parserVersion == 1)
 }
+
+@Test("SEC-7: mapped exclusions normalize recorded separators and dot components",
+      arguments: [false, true])
+func mappedWorkspaceUsesNormalizedPath(importBeforeRule: Bool) throws {
+    let fixture = try ExclusionFixture()
+    defer { fixture.remove() }
+    if !importBeforeRule {
+        _ = try fixture.store.replaceSessionExclusions(["/work/private/**"], hostHome: nil)
+    }
+    let hidden = try fixture.seed("mapped-dirty-path", cwd: "/mnt//./private/repo/", count: 11)
+    let ordinary = try fixture.seed("mapped-safe-path", cwd: "/mnt//./public/repo/", count: 3)
+    if importBeforeRule {
+        #expect(try fixture.total() == 14)
+        let update = try fixture.store.replaceSessionExclusions(["/work/private/**"], hostHome: nil)
+        #expect(update.removedSessions == 1)
+    }
+    #expect(try fixture.store.events(in: hidden.key).isEmpty)
+    #expect(try fixture.store.events(in: ordinary.key).count == 1)
+    #expect(try fixture.store.searchIndex(SearchQuery.parse("synthetic"), scope: fixture.scope).sessionCount == 1)
+    #expect(try fixture.total() == 3)
+}
+
+@Test("SEC-7: a byte-only change of the mapped path applies existing exclusions")
+func unicodeMappingChangePurgesSearchAndUsage() throws {
+    let fixture = try ExclusionFixture()
+    defer { fixture.remove() }
+    let source = try #require(try fixture.store.sources().first)
+    let original = SourceSettings(source)
+    var before = original
+    before.pathMappings = [.init(from: "/mnt", to: "/work/cafe\u{301}")]
+    try fixture.store.updateSourceSettings(for: fixture.source, from: original, to: before, hostHome: nil)
+    _ = try fixture.store.replaceSessionExclusions(["/work/caf\u{e9}/**"], hostHome: nil)
+    let existing = try fixture.seed("byte-exact-mapping", cwd: "/mnt/project", count: 9)
+    #expect(try fixture.total() == 9)
+    var after = before
+    after.pathMappings = [.init(from: "/mnt", to: "/work/caf\u{e9}")]
+    try fixture.store.updateSourceSettings(for: fixture.source, from: before, to: after, hostHome: nil)
+    #expect(try fixture.store.events(in: existing.key).isEmpty)
+    #expect(try fixture.store.searchIndex(SearchQuery.parse("synthetic"), scope: fixture.scope).sessionCount == 0)
+    #expect(try fixture.total() == 0)
+}
+
+@Test("SEC-7: only trustworthy workspace evidence can release an exclusion after remapping its source")
+func remappingReevaluatesExcludedWorkspace() throws {
+    let fixture = try ExclusionFixture()
+    defer { fixture.remove() }
+    _ = try fixture.store.replaceSessionExclusions(["/work/private/**"], hostHome: nil)
+    let hidden = try fixture.seed("previously-excluded", cwd: "/mnt/private/repo", count: 11)
+    let source = try #require(try fixture.store.sources().first)
+    let before = SourceSettings(source)
+    var after = before
+    after.pathMappings = [.init(from: "/mnt", to: "/safe")]
+    try fixture.store.updateSourceSettings(for: fixture.source, from: before, to: after, hostHome: nil)
+    let copied: NormalizedRecord = .event(.init(session: hidden.key, sequence: 4, timestamp: fixture.stamp,
+        kind: .assistant, text: "synthetic copy", dedupeKey: "previously-excluded:copy"))
+    try fixture.store.write([.session(.init(key: hidden.key, sourceID: fixture.source, environment: "Synthetic",
+        cwd: "/mnt/private/repo", referenceOnly: true)), copied])
+    #expect(try fixture.store.events(in: hidden.key).isEmpty)
+    try fixture.store.write([.session(.init(key: hidden.key, sourceID: fixture.source, environment: "Synthetic",
+        cwd: "/mnt/../ambiguous")), copied])
+    #expect(try fixture.store.events(in: hidden.key).isEmpty)
+    let other = try fixture.store.upsertSource(.init(agent: .codex, label: "Other synthetic source",
+        rootURL: fixture.dir.appendingPathComponent("other")))
+    try fixture.store.write([.session(.init(key: hidden.key, sourceID: other, environment: "Synthetic",
+        cwd: "/safe/unrelated")), copied])
+    #expect(try fixture.store.events(in: hidden.key).isEmpty)
+    let position = try fixture.store.fileImportPosition(for: hidden.file)
+    _ = try fixture.store.commitFileBatch([
+        .session(.init(key: hidden.key, sourceID: fixture.source, fileID: hidden.file, environment: "Synthetic", cwd: "/mnt/private/repo")),
+        .event(.init(session: hidden.key, sequence: 0, timestamp: fixture.stamp, kind: .user,
+                     text: "synthetic original", dedupeKey: "previously-excluded:event")),
+        .tokens(.init(session: hidden.key, timestamp: fixture.stamp, counts: .init(output: 11), dedupeKey: "previously-excluded:tokens")),
+    ], for: hidden.file, from: position.checkpoint, to: fixture.checkpoint, exclusionRevision: position.exclusionRevision)
+    #expect(try fixture.store.events(in: hidden.key).count == 1)
+    #expect(try fixture.total() == 11)
+}

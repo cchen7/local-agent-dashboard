@@ -313,6 +313,15 @@ Observed `session.usage_record` events can put the explicit model in
 reads that field before falling back to session metadata. Replaying a
 v4 file fills previously skipped calls; earlier native checkpoints
 continue to supply only the usage not already represented by calls.
+Parser v6 retains valid parent-call counters as unpriced when neither the
+event nor the session supplies a model. A sanitized local capture confirmed
+the nested numeric usage shape with a model; the bounded recent-file pass
+did not locate a model-less parent call. The missing-model, replay and
+later-checkpoint cases use synthetic variations of that envelope. The store
+subtracts anonymous counts from the first covering checkpoint only when
+that checkpoint names one model and covers all the candidate counters;
+the call itself remains unpriced. This
+does not change the separate comparison with CLI statistics.
 Event-backed Copilot workspaces expose the native title as top-level
 `name`, with an optional top-level `summary`. The observed strings used
 plain scalars, single or double quotes, and literal `|-` blocks. The

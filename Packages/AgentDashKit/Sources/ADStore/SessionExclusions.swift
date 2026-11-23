@@ -13,6 +13,7 @@ public struct FileImportPosition: Sendable {
     public let checkpoint: Checkpoint?
     public let exclusionRevision: Int64
     public let needsSessionIdentityReplay: Bool
+    public let hasRecordedError: Bool
 }
 
 public struct FileBatchCommit: Sendable {
@@ -31,7 +32,8 @@ public extension AgentStore {
             let row = try Row.fetchOne(db, sql: "SELECT * FROM source_files WHERE id=?", arguments: [fileID])
             let checkpoint = row.flatMap { row in (row["size"] as Int64?) == nil ? nil : Self.decodeCheckpoint(row) }
             return .init(checkpoint: checkpoint, exclusionRevision: try SessionExclusionPolicy.read(db).revision,
-                         needsSessionIdentityReplay: (row?["confirm_session_identity"] as Bool?) == true)
+                         needsSessionIdentityReplay: (row?["confirm_session_identity"] as Bool?) == true,
+                         hasRecordedError: (row?["last_error"] as String?) != nil)
         }
     }
 
@@ -124,6 +126,23 @@ struct SessionExclusionGate {
         self.init(policy: policy, matcher: try PathExclusions(policy.patterns, hostHome: policy.hostHome))
     }
 
+    mutating func reconsiderMappedSource(_ sourceID: Int64, db: Database) throws {
+        guard !policy.patterns.isEmpty else { return }
+        // Keep the previous denial as evidence: inherited content still
+        // needs a trusted workspace. Only keys linked to this source can
+        // be reconsidered, and the next scan must reread their workspace.
+        try db.execute(sql: """
+            UPDATE session_exclusion_keys SET revision=0,source_id=?1
+            WHERE disposition=?2 AND (source_id=?1 OR (source_id IS NULL AND digest IN (
+                SELECT i.digest FROM session_exclusion_inputs i JOIN source_files f ON f.id=i.file_id
+                GROUP BY i.digest HAVING min(f.source_id)=?1 AND max(f.source_id)=?1)));
+            """, arguments: [sourceID, Disposition.excluded.rawValue])
+        try db.execute(sql: """
+            UPDATE source_files SET parser_version=0,decoder_state=NULL WHERE source_id=? AND id IN (
+                SELECT file_id FROM session_exclusion_inputs);
+            """, arguments: [sourceID])
+    }
+
     mutating func removeExistingMatches(sourceID: Int64? = nil, db: Database) throws {
         guard !policy.patterns.isEmpty else { return }
         var after: Int64 = 0
@@ -138,7 +157,7 @@ struct SessionExclusionGate {
             for row in rows where try decision(row["cwd"], sourceID: row["source_id"], db: db) == .excluded {
                 guard let agent = AgentKind(rawValue: row["agent"]) else { throw StoreError.invalidStoredValue }
                 let digest = Self.digest(.init(agent: agent, nativeID: row["native_id"]))
-                try save(.excluded, digest: digest, db: db)
+                try save(.excluded, digest: digest, sourceID: row["source_id"], db: db)
                 try mark(row["file_id"], digest: digest, disposition: .excluded, db: db)
                 try remove(row, db: db)
             }
@@ -162,10 +181,11 @@ struct SessionExclusionGate {
                 projects.insert(project)
             }
             try db.execute(sql: """
-                INSERT INTO session_exclusion_keys(digest,revision,disposition)
-                SELECT digest,?,? FROM expired_archive_sessions WHERE scope_id=?
-                ON CONFLICT(digest) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition
-                """, arguments: [policy.revision, Disposition.excluded.rawValue, id])
+                INSERT INTO session_exclusion_keys(digest,revision,disposition,source_id)
+                SELECT digest,?,?,? FROM expired_archive_sessions WHERE scope_id=?
+                ON CONFLICT(digest) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition,
+                    source_id=excluded.source_id
+                """, arguments: [policy.revision, Disposition.excluded.rawValue, scope["source_id"] as Int64, id])
             try db.execute(sql: "DELETE FROM retained_archive_scopes WHERE id=?", arguments: [id])
         }
         for id in projects {
@@ -181,6 +201,7 @@ struct SessionExclusionGate {
         // A confirmed match always wins. Otherwise use the newest explicit
         // workspace in this batch; missing metadata cannot displace a known path.
         var observed: [Data: PathExclusions.Decision] = [:]
+        var observedSource: [Data: Int64] = [:]
         var verifiedOwners: [Data: SessionRecord] = [:]
         for case .session(let session) in records {
             // A copied-history placeholder cannot establish the original's path.
@@ -189,6 +210,7 @@ struct SessionExclusionGate {
             if observed[digest] != .excluded {
                 let outcome = try decision(cwd, sourceID: session.sourceID, db: db)
                 observed[digest] = outcome
+                observedSource[digest] = session.sourceID
                 verifiedOwners[digest] = outcome == .notExcluded ? session : nil
             }
         }
@@ -206,11 +228,16 @@ struct SessionExclusionGate {
                     SELECT id,source_id,file_id,project_id,cwd FROM sessions WHERE agent=? AND native_id=?
                     """, arguments: [key.agent.rawValue, key.nativeID])
                 var disposition: Disposition?
-                if saved?.kind == .excluded && saved?.revision == policy.revision {
+                var deniedSource: Int64?
+                let waitingForMappedOwner = saved?.kind == .excluded && saved?.revision == 0 &&
+                    (observedSource[digest] == nil || observedSource[digest] != saved?.sourceID ||
+                        observed[digest] == .indeterminate)
+                if saved?.kind == .excluded && (saved?.revision == policy.revision || waitingForMappedOwner) {
                     disposition = .excluded
+                    deniedSource = saved?.sourceID
                 } else if let observation = observed[digest] {
                     switch observation {
-                    case .excluded: disposition = .excluded
+                    case .excluded: disposition = .excluded; deniedSource = observedSource[digest]
                     case .indeterminate: disposition = .invalidPath
                     case .notExcluded: disposition = nil
                     }
@@ -220,7 +247,7 @@ struct SessionExclusionGate {
                     disposition = saved.kind == .excluded ? .waitingForPath : saved.kind
                 } else if let previous, let cwd: String = previous["cwd"] {
                     switch try decision(cwd, sourceID: previous["source_id"], db: db) {
-                    case .excluded: disposition = .excluded
+                    case .excluded: disposition = .excluded; deniedSource = previous["source_id"]
                     case .indeterminate: disposition = .invalidPath
                     case .notExcluded: disposition = nil
                     }
@@ -229,7 +256,9 @@ struct SessionExclusionGate {
                 }
                 if let disposition {
                     withheld[digest] = disposition
-                    try save(disposition, digest: digest, db: db)
+                    if !waitingForMappedOwner {
+                        try save(disposition, digest: digest, sourceID: deniedSource, db: db)
+                    }
                     try mark(fileID, digest: digest, disposition: disposition, db: db)
                     if disposition == .excluded, let previous {
                         try mark(previous["file_id"], digest: digest, disposition: disposition, db: db)
@@ -291,8 +320,15 @@ struct SessionExclusionGate {
             rules = try JSONDecoder().decode([PathMapping].self, from: Data(raw.utf8))
             mappings[sourceID] = rules
         }
-        guard !rules.isEmpty, let mapped = try? PathMapper.map(path, using: rules, hostHome: policy.hostHome) else { return direct }
-        return matcher.decision(for: mapped)
+        guard !rules.isEmpty else { return direct }
+        guard let recorded = PathMapper.normalizedWorkspace(path) else { return .indeterminate }
+        do {
+            guard let mapped = try PathMapper.mappedPath(recorded, using: rules, hostHome: policy.hostHome)
+            else { return .notExcluded }
+            return matcher.decision(for: mapped)
+        } catch {
+            return .indeterminate
+        }
     }
 
     private static func key(for record: NormalizedRecord) -> SessionKey? {
@@ -310,19 +346,20 @@ struct SessionExclusionGate {
         Data(SHA256.hash(data: Data((key.agent.rawValue + "\u{0}" + key.nativeID).utf8)))
     }
 
-    private func prior(_ digest: Data, db: Database) throws -> (kind: Disposition, revision: Int64)? {
-        guard let row = try Row.fetchOne(db, sql: "SELECT disposition,revision FROM session_exclusion_keys WHERE digest=?",
+    private func prior(_ digest: Data, db: Database) throws -> (kind: Disposition, revision: Int64, sourceID: Int64?)? {
+        guard let row = try Row.fetchOne(db, sql: "SELECT disposition,revision,source_id FROM session_exclusion_keys WHERE digest=?",
                                          arguments: [digest]) else { return nil }
         guard let kind = Disposition(rawValue: row["disposition"]) else { throw StoreError.invalidStoredValue }
-        return (kind, row["revision"])
+        return (kind, row["revision"], row["source_id"])
     }
 
-    private func save(_ disposition: Disposition, digest: Data, db: Database) throws {
+    private func save(_ disposition: Disposition, digest: Data, sourceID: Int64? = nil, db: Database) throws {
         try db.cachedStatement(sql: """
-            INSERT INTO session_exclusion_keys(digest,revision,disposition) VALUES(?,?,?)
-            ON CONFLICT(digest) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition
-            WHERE revision<>excluded.revision OR disposition<>excluded.disposition
-            """).execute(arguments: [digest, policy.revision, disposition.rawValue])
+            INSERT INTO session_exclusion_keys(digest,revision,disposition,source_id) VALUES(?,?,?,?)
+            ON CONFLICT(digest) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition,
+                source_id=excluded.source_id
+            WHERE revision<>excluded.revision OR disposition<>excluded.disposition OR source_id IS NOT excluded.source_id
+            """).execute(arguments: [digest, policy.revision, disposition.rawValue, sourceID])
     }
 
     private mutating func mark(_ fileID: Int64?, digest: Data, disposition: Disposition, db: Database) throws {

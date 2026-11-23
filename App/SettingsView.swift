@@ -215,6 +215,7 @@ struct SettingsView: View {
     @ViewBuilder private func status(_ value: SourceAccessStatus) -> some View {
         switch value {
         case .notChecked: Text("Not checked").foregroundStyle(.secondary)
+        case .verifiedBookmark: Text("Folder access verified").foregroundStyle(.green)
         case .readable(let count): Text("Readable · top-level entries: \(count)").foregroundStyle(.green)
         case .missing: Text("Directory not found").foregroundStyle(.secondary)
         case .denied: Text("Access denied. Grant access again.").foregroundStyle(.red)

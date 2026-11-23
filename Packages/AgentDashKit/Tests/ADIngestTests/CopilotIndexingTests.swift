@@ -123,6 +123,55 @@ func copilotReplaysNestedUsageModel() throws {
     #expect(try totals(in: store, session: key).total == 142)
 }
 
+@Test("ADP-CP / FR-COST: preserve model-less calls; reconcile only a covering single-model snapshot",
+      arguments: [false, true])
+func copilotKeepsUnpricedCallWithoutSnapshotDoubleCount(ambiguous: Bool) throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID().uuidString)")
+    let root = temp.appendingPathComponent("source")
+    let folder = root.appendingPathComponent("session-state/synthetic")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let url = folder.appendingPathComponent("events.jsonl")
+    let initial = [
+        #"{"type":"session.start","id":"start","timestamp":"2020-01-01T00:00:00Z","data":{"sessionId":"synthetic"}}"#,
+        #"{"type":"session.usage_record","id":"call","timestamp":"2020-01-01T00:00:01Z","data":{"usage":{"inputTokens":100,"cacheReadTokens":20,"outputTokens":20,"reasoningTokens":3}}}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(initial.utf8).write(to: url)
+    let store = try AgentStore(databaseURL: temp.appendingPathComponent("index.sqlite"))
+    var source = Source(agent: .copilot, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let adapter = CopilotAdapter()
+    let file = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    let first = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    #expect(first.checkpoint.unknownRecords == 0)
+    #expect(try totals(in: store, session: key) == .init(inputFresh: 80, cacheRead: 20, output: 20, reasoning: 3))
+    let metric = #"{"usage":{"inputTokens":130,"cacheReadTokens":26,"outputTokens":27,"reasoningTokens":5}}"#
+    let additional = ambiguous ? #","other-model":{"usage":{"inputTokens":7,"outputTokens":3}}"# : ""
+    let later = #"{"type":"session.usage_checkpoint","id":"sample","timestamp":"2020-01-01T00:00:02Z","data":{"modelMetrics":{"synthetic-model":"#
+        + metric + additional + "}}}\n"
+    let fileHandle = try FileHandle(forWritingTo: url)
+    try fileHandle.seekToEnd()
+    try fileHandle.write(contentsOf: Data(later.utf8))
+    try fileHandle.close()
+    _ = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    let expected = ambiguous ? TokenCounts(inputFresh: 191, cacheRead: 46, output: 50, reasoning: 8)
+        : TokenCounts(inputFresh: 104, cacheRead: 26, output: 27, reasoning: 5)
+    #expect(try totals(in: store, session: key) == expected)
+    try store.databasePool.read { db in
+        let rows = try Row.fetchAll(db, sql: "SELECT model,precision,price_status,input_fresh,output FROM token_events ORDER BY ts,model")
+        #expect(rows.count == (ambiguous ? 3 : 2))
+        #expect((rows.first?["model"] as String?) == nil)
+        #expect((rows.first?["price_status"] as String?) == "unpriced")
+        #expect((rows.last?["precision"] as String?) == "checkpoint")
+        #expect((rows.last?["input_fresh"] as Int64?) == (ambiguous ? 104 : 24))
+        #expect((rows.last?["output"] as Int64?) == (ambiguous ? 27 : 7))
+    }
+    _ = try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, replay: true,
+                                         store: store, adapter: adapter)
+    #expect(try totals(in: store, session: key) == expected)
+}
+
 private func totals(in store: AgentStore, session: SessionKey) throws -> TokenCounts {
     try store.databasePool.read { db in
         let row = try #require(try Row.fetchOne(db, sql: """

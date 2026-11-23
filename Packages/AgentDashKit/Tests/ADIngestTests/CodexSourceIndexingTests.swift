@@ -89,6 +89,35 @@ func codexPreflightsArchiveBeforeCommitting() throws {
     #expect(try box.store.events(in: box.key).count == 520)
 }
 
+@Test("FR-SRC-2: a corrupt archive's diagnostic survives reopen and clears on a successful rescan")
+func codexArchiveScanFailureIsDurable() async throws {
+    let box = try CodexFixture()
+    defer { box.remove() }
+    let good = rawZstd(lines([box.header,
+        #"{"type":"event_msg","payload":{"type":"agent_message","message":"synthetic archive entry"}}"#]))
+    try box.write(good, to: box.archive)
+    let previous = try box.importPath(box.archive)
+    try box.write(good + rawZstd(Data("synthetic trailing record".utf8)).dropLast(2), to: box.archive)
+    try await JSONLSourceIndexing.run(source: box.source, authorizedRoot: box.root, adapter: CodexAdapter(),
+                                     store: box.store, mode: .fullRescan) { _ in }
+    let reopened = try AgentStore(databaseURL: box.index)
+    var status = reopened.indexedSourceStatusUpdates().makeAsyncIterator()
+    let failed = try #require(try await status.next()?.first)
+    #expect(failed.failedFiles == 1 && failed.trackedFiles == 1 && failed.lastScanAt != nil)
+    #expect(try reopened.checkpoint(for: previous.fileID) == previous.checkpoint)
+    #expect(try reopened.events(in: box.key).count == 1)
+
+    try box.write(good, to: box.archive, atomic: true)
+    try await JSONLSourceIndexing.run(source: box.source, authorizedRoot: box.root, adapter: CodexAdapter(),
+                                     store: reopened, mode: .fullRescan) { _ in }
+    let refreshed = try AgentStore(databaseURL: box.index)
+    var next = refreshed.indexedSourceStatusUpdates().makeAsyncIterator()
+    let succeeded = try #require(try await next.next()?.first)
+    #expect(succeeded.failedFiles == 0 && succeeded.indexedFiles == 1)
+    #expect(try refreshed.checkpoint(for: previous.fileID)?.offset == Int64(good.count))
+    #expect(try refreshed.events(in: box.key).count == 1)
+}
+
 @Test("ADP-CX / SPEC §10.6: next-model metadata cannot mix context measurements")
 func codexContextCapacityDoesNotCarryAcrossModels() async throws {
     let box = try CodexFixture()

@@ -33,7 +33,20 @@ enum CopilotAccounting {
             """, arguments: [key.sessionID, key.model, sequence]) ?? false
     }
 
+    static func snapshotKeys(sessionID: Int64, db: Database) throws -> [Key] {
+        try String.fetchAll(db, sql: "SELECT DISTINCT model FROM copilot_usage_snapshots WHERE session_id=?",
+                            arguments: [sessionID]).map { Key(sessionID: sessionID, model: $0) }
+    }
+
+    static func hasModelLessCalls(sessionID: Int64, db: Database) throws -> Bool {
+        try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(SELECT 1 FROM token_events WHERE session_id=? AND model IS NULL
+                          AND agent='copilot' AND precision='call' AND source_seq IS NOT NULL)
+            """, arguments: [sessionID]) == true
+    }
+
     static func reconcile(_ key: Key, touchedUsage: inout Set<String>, db: Database) throws {
+        let hasAnonymous = try hasModelLessCalls(sessionID: key.sessionID, db: db)
         let snapshots = try Row.fetchCursor(db, sql: """
             SELECT * FROM copilot_usage_snapshots WHERE session_id=? AND model=? ORDER BY seq,dedupe_key
             """, arguments: [key.sessionID, key.model])
@@ -64,6 +77,28 @@ enum CopilotAccounting {
                     let (sum, overflow) = calls[index].addingReportingOverflow(count)
                     guard !overflow else { throw StoreError.invalidTokenCounts }
                     calls[index] = sum
+                }
+            }
+            if hasAnonymous, let attributed = try Row.fetchOne(db, sql: """
+                SELECT coalesce(sum(t.input_fresh),0) AS input_fresh,
+                       coalesce(sum(t.cache_read),0) AS cache_read,coalesce(sum(t.cache_write),0) AS cache_write,
+                       coalesce(sum(t.output),0) AS output,coalesce(sum(t.reasoning),0) AS reasoning
+                FROM token_events t WHERE t.session_id=?1 AND t.model IS NULL AND t.agent='copilot'
+                AND t.precision='call' AND t.source_seq>?2 AND t.source_seq<=?3
+                AND (
+                    SELECT CASE WHEN count(DISTINCT s.model)=1 THEN min(s.model) END
+                    FROM copilot_usage_snapshots s WHERE s.session_id=t.session_id AND s.seq=(
+                        SELECT min(n.seq) FROM copilot_usage_snapshots n
+                        WHERE n.session_id=t.session_id AND n.seq>=t.source_seq
+                    )
+                )=?4 COLLATE BINARY
+                """, arguments: [key.sessionID, lastSequence, sequence, key.model]) {
+                // Require the single-model checkpoint to contain the known
+                // calls and all candidate counters. Partial overlap does not
+                // establish that an anonymous call belongs to this model.
+                let values = parts(readCounts(attributed))
+                if values.indices.allSatisfy({ calls[$0] <= counts[$0] && values[$0] <= counts[$0] - calls[$0] }) {
+                    for index in values.indices { calls[index] += values[index] }
                 }
             }
             var delta = counts.indices.map { index in

@@ -9,6 +9,26 @@ public struct SourceArchiveCandidate: Sendable {
 }
 
 public extension AgentStore {
+    /// Record a bounded diagnostic without changing the last committed cursor.
+    func recordSourceFileImportFailure(_ file: SourceFile) throws {
+        try databasePool.write { db in
+            try db.execute(sql: """
+                UPDATE source_files SET last_error='import_failed'
+                WHERE source_id=? AND rel_path=? COLLATE BINARY
+                  AND EXISTS(SELECT 1 FROM sources WHERE id=? AND enabled=1 AND removed=0)
+                """, arguments: [file.sourceID, file.relativePath, file.sourceID])
+        }
+    }
+
+    /// An unchanged, successfully checked file may not write a new cursor.
+    func clearSourceFileImportFailure(fileID: Int64, at expected: Checkpoint) throws {
+        try databasePool.write { db in
+            guard try Self.readCheckpoint(fileID, db: db) == expected else { return }
+            try db.execute(sql: "UPDATE source_files SET last_error=NULL WHERE id=? AND last_error='import_failed'",
+                           arguments: [fileID])
+        }
+    }
+
     /// Record a completed discovery pass, separately from verifying access.
     func recordSourceScan(sourceID: Int64, at timestamp: Int64) throws {
         try databasePool.write { db in

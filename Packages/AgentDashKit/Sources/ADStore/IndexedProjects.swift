@@ -309,18 +309,16 @@ private struct WorkspacePath {
     init?(_ path: String) {
         let bytes = path.utf8
         guard bytes.first == 0x2F, !bytes.contains(0) else { return nil }
-        let components = bytes.split(separator: 0x2F)
-        let hasAuthority = bytes.starts(with: [0x2F, 0x2F]) && !bytes.starts(with: [0x2F, 0x2F, 0x2F])
-        if hasAuthority || components.contains(where: { $0.elementsEqual("..".utf8) }) {
+        guard let clean = PathMapper.normalizedWorkspace(path) else {
             normalized = nil
             root = path
-            name = components.last.map { String(decoding: $0, as: UTF8.self) } ?? path
+            name = bytes.split(separator: 0x2F).last.map { String(decoding: $0, as: UTF8.self) } ?? path
             worktree = nil
             return
         }
-        let cleaned = components.filter { !$0.elementsEqual(".".utf8) }
+        let cleaned = clean.utf8.split(separator: 0x2F)
             .map { String(decoding: $0, as: UTF8.self) }
-        normalized = "/" + cleaned.joined(separator: "/")
+        normalized = clean
         let marker = cleaned.indices.first {
             $0 > 0 && $0 + 2 < cleaned.count && cleaned[$0] == ".claude" && cleaned[$0 + 1] == "worktrees"
         }

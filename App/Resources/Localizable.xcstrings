@@ -9232,6 +9232,23 @@
         }
       }
     },
+    "Folder access verified": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Folder access verified"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件夹访问已验证"
+          }
+        }
+      }
+    },
     "Folder unavailable. Verify access to index it.": {
       "extractionState": "manual",
       "localizations": {

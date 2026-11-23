@@ -4,7 +4,7 @@ import ADAdapters
 import ADCore
 
 enum SourceAccessStatus: Equatable, Sendable {
-    case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
+    case notChecked, verifiedBookmark, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
 }
 
 enum SourceFilePreview: Equatable, Sendable {
@@ -36,18 +36,22 @@ enum SourceAccessProbe {
         ]
     }
 
-    static func check(_ source: Source) -> SourceAccessStatus {
+    static func check(_ source: Source, expectedIdentity: SourceRootIdentity? = nil,
+                      bookmarkOnly: Bool = false) -> SourceAccessStatus {
         do {
             switch source.access {
-            case .defaultLocation: return try countEntries(at: source.rootURL)
+            case .defaultLocation:
+                if bookmarkOnly { return .notChecked }
+                return try countEntries(at: source.rootURL)
             case .bookmark(let data):
                 var stale = false
                 let url = try URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
                                   relativeTo: nil, bookmarkDataIsStale: &stale)
                 guard !stale else { return .staleBookmark }
-                guard url.standardizedFileURL == source.rootURL.standardizedFileURL else { return .wrongDirectory }
                 guard url.startAccessingSecurityScopedResource() else { return .denied }
                 defer { url.stopAccessingSecurityScopedResource() }
+                guard matchesRegistration(url, source: source, expectedIdentity: expectedIdentity) else { return .wrongDirectory }
+                if bookmarkOnly { return .verifiedBookmark }
                 return try countEntries(at: url)
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return .missing }
@@ -55,10 +59,15 @@ enum SourceAccessProbe {
     }
 
     /// Keep a read-only bookmark active until scanning and watching have both stopped.
-    static func withIndexingAccess<Value: Sendable>(to source: Source, _ run: @Sendable (URL) async throws -> Value)
+    static func withIndexingAccess<Value: Sendable>(to source: Source, expectedIdentity: SourceRootIdentity? = nil,
+                                                   _ run: @Sendable (URL) async throws -> Value)
         async throws -> Value {
         switch source.access {
         case .defaultLocation:
+            if let expectedIdentity,
+               (try? SourceFileReader.registrationIdentity(root: source.rootURL)) != expectedIdentity {
+                throw IndexAccessFailure.rootChanged
+            }
             return try await run(source.rootURL)
         case .bookmark(let data):
             var stale = false
@@ -70,13 +79,24 @@ enum SourceAccessProbe {
                 throw IndexAccessFailure.denied
             }
             guard !stale else { throw IndexAccessFailure.staleBookmark }
-            guard root.standardizedFileURL == source.rootURL.standardizedFileURL else {
-                throw IndexAccessFailure.rootChanged
-            }
             guard root.startAccessingSecurityScopedResource() else { throw IndexAccessFailure.denied }
             defer { root.stopAccessingSecurityScopedResource() }
+            guard matchesRegistration(root, source: source, expectedIdentity: expectedIdentity) else {
+                throw IndexAccessFailure.rootChanged
+            }
             return try await run(root)
         }
+    }
+
+    /// Run while the resolved bookmark's read-only scope is active. APFS
+    /// aliases may spell the same root differently. A moved bookmark must
+    /// not silently follow the old root when its saved path was replaced.
+    private static func matchesRegistration(_ root: URL, source: Source, expectedIdentity: SourceRootIdentity?) -> Bool {
+        guard let resolved = try? SourceFileReader.registrationIdentity(root: root),
+              expectedIdentity == nil || resolved == expectedIdentity
+        else { return false }
+        if root.standardizedFileURL.path.utf8.elementsEqual(source.rootURL.standardizedFileURL.path.utf8) { return true }
+        return (try? SourceFileReader.registrationIdentity(root: source.rootURL)) == resolved
     }
 
     /// Count discovered session files without opening any session content.

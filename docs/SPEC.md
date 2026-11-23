@@ -287,7 +287,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | Metadata DB | `session-store.db` (SQLite): **optional**, snapshot read for enrichment. |
 | Envelope | `{ "type", "data", "id", "timestamp", "parentId", "agentId"? }` |
 | Main events | `session.start` (`sessionId`, `copilotVersion`, `startTime`, `context.cwd`, …), `session.resume`, `session.context_changed`, `user.message` (`content` is what the user typed; `transformedContent` includes injected context — **index `content` only**), `assistant.message`, `assistant.turn_start` / `turn_end`, `tool.execution_start` (`toolName`, `arguments`) / `tool.execution_complete` (success), `session.task_complete` (`summary`, `success` — the agent's own completion summary, used directly as "latest progress"), `session.compaction_complete`, `session.model_change`, `subagent.started` / `completed`, `skill.invoked`, `session.shutdown`. |
-| Tokens (preferred) | Per-call `session.usage_record` events; dedupe by event `id`. Use the explicit model in the event data, including `data.usage.model`, before falling back to the session model. |
+| Tokens (preferred) | Per-call `session.usage_record` events; dedupe by event `id`. Use the explicit model in the event data, including `data.usage.model`, before falling back to the session model. A valid call without a model remains in exact token totals and is unpriced. The first covering cumulative checkpoint can account for that call only when it names one model. |
 | Tokens (fallback) | `data.modelMetrics` on `session.shutdown` (and `session.usage_checkpoint`): per model `usage.inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens / reasoningTokens`. **These are cumulative:** a resumed session appends more shutdown events, so diff consecutive events per model and keep only increases; ignore repeated event ids and decreasing values. Fallback data has session-level time precision; record it at the shutdown time with `precision = checkpoint` (drawn with hatching, §11.4). |
 | ⚠️ Accounting | `inputTokens` **includes** cache reads and writes: `input_fresh = inputTokens − cacheReadTokens − cacheWriteTokens`; `reasoningTokens` is part of `outputTokens`. Records stamped with `agentId` (subagents) are already included in the parent totals — **do not count them twice**. |
 | Resume command | `cd "<cwd>" && copilot --resume <sessionId>` |
@@ -1093,6 +1093,10 @@ files. Affected files are reconsidered on their next scan. A previously
 withheld prefix with missing workspace metadata is replayed when the same
 session supplies a trustworthy path. A malformed path alone does not prove
 admission or removal. Clearing rules can recover only available source files.
+Apply mappings to the same byte-preserving normalized workspaces used by
+Projects. A byte-only mapping change applies existing exclusions immediately;
+previously excluded sessions can be reconsidered from an authoritative
+workspace in the affected source on its next scan.
 
 ### 12.4 Proving zero network
 

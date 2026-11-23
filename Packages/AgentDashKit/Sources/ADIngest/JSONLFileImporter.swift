@@ -110,6 +110,7 @@ public enum JSONLFileImporter {
         }
         if encoding == .zstd {
             if let matched, matched.size == initial.size, matched.offset == initial.size {
+                if position.hasRecordedError { try store.clearSourceFileImportFailure(fileID: fileID, at: matched) }
                 return .init(fileID: fileID, checkpoint: matched, completeLines: 0, bytesRead: 0)
             }
             // A corrupt frame can be discovered after provisional output.
@@ -236,6 +237,9 @@ public enum JSONLFileImporter {
             bytesRead = initial.size - startingOffset
         }
         try commit()
+        if position.hasRecordedError, let saved {
+            try store.clearSourceFileImportFailure(fileID: fileID, at: saved)
+        }
         return .init(fileID: fileID, checkpoint: saved ?? next, completeLines: lines, bytesRead: bytesRead)
     }
 

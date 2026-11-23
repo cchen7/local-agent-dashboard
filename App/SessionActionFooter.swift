@@ -102,7 +102,7 @@ struct SessionActionFooter: View {
                     feedback = .copied
                 case .reveal:
                     guard let record = snapshot.record else { throw SessionLocalActionFailure.unavailable }
-                    try await SourceAccessProbe.withIndexingAccess(to: snapshot.source) { [store, session] root in
+                    try await SourceAccessProbe.withIndexingAccess(to: snapshot.source, expectedIdentity: record.rootIdentity) { [store, session] root in
                         try Task.checkCancellation()
                         guard try store.indexedSessionActions(session) == snapshot else {
                             throw SessionLocalActionFailure.unavailable

@@ -46,8 +46,9 @@ public extension AgentStore {
                 """, arguments: [value.label, value.environment,
                                   String(decoding: try encoder.encode(value.pathMappings), as: UTF8.self),
                                   String(decoding: try encoder.encode(value.environmentRules), as: UTF8.self), id])
-            if value.pathMappings != current.pathMappings {
+            if !SourceSettings.sameMappings(value.pathMappings, current.pathMappings) {
                 var gate = try SessionExclusionGate(policy: SessionExclusionPolicy.read(db))
+                try gate.reconsiderMappedSource(id, db: db)
                 try gate.removeExistingMatches(sourceID: id, db: db)
                 try gate.removeRetainedMatches(sourceID: id, db: db)
                 try gate.finishRemovals(db: db)

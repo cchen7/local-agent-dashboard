@@ -5,6 +5,42 @@ import ADStore
 import Foundation
 import Testing
 
+@Test("SEC-7: remapping an excluded source lets a full rescan restore its original workspace")
+func fullRescanAfterMappingChangeRestoresAllowedSession() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("synthetic-remap-\(UUID())")
+    let root = dir.appendingPathComponent("source")
+    let folder = root.appendingPathComponent("session-state/synthetic")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = try AgentStore(databaseURL: dir.appendingPathComponent("index.sqlite"))
+    var before = Source(agent: .copilot, label: "Synthetic", rootURL: root,
+                        pathMappings: [.init(from: "/recorded", to: "/synthetic/private")])
+    let id = try store.upsertSource(before)
+    before.id = id
+    let stream = [
+        #"{"type":"session.start","id":"start","timestamp":1000,"data":{"sessionId":"synthetic","context":{"cwd":"/recorded//./project"}}}"#,
+        #"{"type":"user.message","id":"prompt","timestamp":1001,"data":{"content":"synthetic workspace remap"}}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(stream.utf8).write(to: folder.appendingPathComponent("events.jsonl"))
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    func scan(_ source: Source) async throws {
+        try await JSONLSourceIndexing.run(source: source, authorizedRoot: root, adapter: CopilotAdapter(),
+                                         store: store, mode: .fullRescan) { _ in }
+    }
+    try await scan(before)
+    #expect(try store.events(in: key).contains { $0.kind == .user })
+    #expect(try store.replaceSessionExclusions(["/synthetic/private/**"], hostHome: nil).removedSessions == 1)
+    #expect(try store.events(in: key).isEmpty)
+    let expected = SourceSettings(before)
+    var after = expected
+    after.pathMappings = [.init(from: "/recorded", to: "/synthetic/public")]
+    try store.updateSourceSettings(for: id, from: expected, to: after, hostHome: nil)
+    let current = try #require(try store.sources().first)
+    try await scan(current)
+    #expect(try store.events(in: key).filter { $0.kind == .user }.count == 1)
+    #expect(try store.searchIndex(SearchQuery.parse("remap"), scope: .init(now: 1_002_000, timeZone: .gmt)).sessionCount == 1)
+}
+
 private enum SourceIndexTestFailure: Error { case noCompletedScan }
 
 @Test("FR-SR: a Copilot workspace title updates without transcript replay and never overrides a user title",

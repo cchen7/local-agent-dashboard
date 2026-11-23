@@ -942,6 +942,23 @@ A one-row header fits the uncompressed fact widths before switching out of
 the two-column grid. Short date and turn facts no longer consume the same
 width as long values. No usage or pricing calculation changes.
 
+## DEV-104 — Keep source and accounting decisions consistent (FR-SRC-2, SEC-7, ADP-CP)
+
+Use the same workspace normalization for Projects and privacy mappings.
+Compare mapping edits by UTF-8 bytes, clear newly excluded index data in
+the save transaction, and recheck previously excluded keys only when the
+changed source supplies an authoritative workspace. Legacy exclusion keys
+can be associated with that source if all their tracked inputs agree.
+
+Resolve bookmark health at startup without enumerating files. Verification
+and indexing accept the same physical directory across APFS aliases and
+reject a replacement. Store a fixed file import error without discarding the
+last checkpoint; clear it after a successful retry.
+
+Backfill valid model-less Copilot calls as unpriced. Attribute their counts
+to a uniquely identified covering checkpoint only for reconciliation,
+without assuming a model price or changing the independent CLI audit.
+
 ## DEV-103 — Keep menu bar actions in one row (§11.5)
 
 Replace the prototype's three stacked footer items with a single native row

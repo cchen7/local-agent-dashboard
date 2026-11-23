@@ -43,7 +43,8 @@ final class SourceIndexingController {
         if case .follow = mode { rescanRequests[id] = requests.continuation }
         let worker = Task.detached(priority: .utility) {
             defer { updates.continuation.finish() }
-            try await SourceAccessProbe.withIndexingAccess(to: source) { root in
+            let identity = try store.registeredRootIdentity(for: source)
+            try await SourceAccessProbe.withIndexingAccess(to: source, expectedIdentity: identity) { root in
                 let report: @Sendable (SourceIndexUpdate) -> Void = { updates.continuation.yield($0) }
                 switch source.agent {
                 case .claudeCode:

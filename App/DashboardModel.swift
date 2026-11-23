@@ -333,6 +333,7 @@ final class DashboardModel {
             toolOutputLimit = result.11
             scheduleArchiveMaintenance()
             pricing.attach(store: result.0, runtime: result.4, initial: result.5)
+            if !synthetic { Task { await verifyAccess(bookmarksOnly: true) } }
             if !synthetic { groupSessionsByProject = UserDefaults.standard.bool(forKey: Self.groupSessionsPreference) }
             if !synthetic, let data = UserDefaults.standard.data(forKey: Self.contextWindowPreferenceKey),
                data.count <= 131_072, let rules = try? JSONDecoder().decode([ModelContextWindow].self, from: data),
@@ -1144,13 +1145,24 @@ final class DashboardModel {
         }
     }
 
-    func verifyAccess() async {
-        guard !verifying else { return }
+    func verifyAccess(bookmarksOnly: Bool = false) async {
+        guard !verifying, let store else { return }
         verifying = true
         defer { verifying = false }
         for source in sources {
+            if bookmarksOnly, case .defaultLocation = source.access { continue }
             guard let id = source.id else { continue }
-            access[id] = await Task.detached { SourceAccessProbe.check(source) }.value
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    let identity = try store.registeredRootIdentity(for: source)
+                    return SourceAccessProbe.check(source, expectedIdentity: identity, bookmarkOnly: bookmarksOnly)
+                } catch { return SourceAccessStatus.notChecked }
+            }.value
+            guard sources.contains(where: {
+                $0.id == id && $0.access == source.access &&
+                    $0.rootURL.path.utf8.elementsEqual(source.rootURL.path.utf8)
+            }) else { continue }
+            access[id] = result
         }
     }
 
@@ -1335,7 +1347,7 @@ final class DashboardModel {
                 try store.updateSourceSettings(for: id, from: expected, to: replacement, hostHome: home)
                 return try store.sources()
             }.value
-            if !sessionExclusions.isEmpty && expected.pathMappings != replacement.pathMappings {
+            if !sessionExclusions.isEmpty && !SourceSettings.sameMappings(expected.pathMappings, replacement.pathMappings) {
                 invalidateTextPresentation()
             }
         } catch let failure as SourceSettingsEditFailure {

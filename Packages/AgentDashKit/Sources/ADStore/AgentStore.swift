@@ -212,6 +212,11 @@ public final class AgentStore: Sendable {
                 WHERE grain=1 AND precision='call' AND volume>unpriced_tokens
                 """)
         }
+        migrator.registerMigration("exclusion_source_identity") { db in
+            try db.execute(sql: """
+                ALTER TABLE session_exclusion_keys ADD COLUMN source_id INTEGER;
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -381,6 +386,21 @@ public final class AgentStore: Sendable {
     public func sources() throws -> [Source] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM sources WHERE removed=0 ORDER BY id").map(Self.decodeSource)
+        }
+    }
+
+    /// Fetch identity only if the stored registration still matches this
+    /// permission snapshot. No bookmark resolution or source reads here.
+    public func registeredRootIdentity(for source: Source) throws -> SourceRootIdentity? {
+        try databasePool.read { db in
+            let id = try Self.validateObservedSource(source, for: source.agent, db: db)
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT volume,inode,birth_seconds,birth_nanoseconds
+                FROM source_root_identities WHERE source_id=?
+                """, arguments: [id]) else { return nil }
+            guard let volume = UUID(uuidString: row["volume"]) else { throw StoreError.invalidStoredValue }
+            return .init(volume: volume, inode: row["inode"], birthSeconds: row["birth_seconds"],
+                         birthNanoseconds: row["birth_nanoseconds"])
         }
     }
 
@@ -557,14 +577,24 @@ public final class AgentStore: Sendable {
                 try Self.save(event, db: db)
                 if db.changesCount != 0 {
                     if quote != nil { touchedUsage.insert(event.dedupeKey) }
-                    if event.session.agent == .copilot, let order = event.sourceSequence, let model = event.model {
-                        let key = CopilotAccounting.Key(sessionID: try Self.sessionID(event.session, db: db), model: model)
-                        if try CopilotAccounting.coversCall(key, sequence: order, db: db) { copilotKeys.insert(key) }
+                    if event.session.agent == .copilot, let order = event.sourceSequence {
+                        let sessionID = try Self.sessionID(event.session, db: db)
+                        if let model = event.model {
+                            let key = CopilotAccounting.Key(sessionID: sessionID, model: model)
+                            if try CopilotAccounting.coversCall(key, sequence: order, db: db) { copilotKeys.insert(key) }
+                        } else {
+                            copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: sessionID, db: db))
+                        }
                     }
                 }
             case .copilotUsageSnapshot(let sample):
                 if let key = try CopilotAccounting.record(sample, sessionID: Self.sessionID(sample.session, db: db), db: db) {
                     copilotKeys.insert(key)
+                    if try CopilotAccounting.hasModelLessCalls(sessionID: key.sessionID, db: db) {
+                        // A late snapshot can change which model is uniquely
+                        // attributable for an already indexed anonymous call.
+                        copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: key.sessionID, db: db))
+                    }
                 }
             case let .removeEmptyPlaceholder(session, fileID, sequence, dedupeKey):
                 try db.cachedStatement(sql: """
@@ -783,7 +813,7 @@ public final class AgentStore: Sendable {
     private static func save(_ value: TokenEvent, db: Database) throws {
         let c = value.counts
         if let sequence = value.sourceSequence {
-            guard value.session.agent == .copilot, value.precision == .call, value.model != nil, sequence >= 0 else {
+            guard value.session.agent == .copilot, value.precision == .call, sequence >= 0 else {
                 throw StoreError.invalidTokenCounts
             }
         }

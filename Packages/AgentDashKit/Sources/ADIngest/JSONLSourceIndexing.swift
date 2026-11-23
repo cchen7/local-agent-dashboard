@@ -139,10 +139,12 @@ public enum JSONLSourceIndexing {
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
+                    try Task.checkCancellation()
                     try checkRoot()
                     if let absent = try confirmedMissing(item.file.relativePath) {
                         missing.append(absent)
                     } else {
+                        try store.recordSourceFileImportFailure(item.file)
                         failed += 1
                     }
                 }

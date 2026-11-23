@@ -25,7 +25,7 @@ public extension AgentStore {
             try Row.fetchAll(db, sql: """
                 WITH file_stats AS (
                     SELECT source_id,count(*) AS tracked,count(size) AS indexed,
-                           sum(state='partial') AS partial,sum(state='error') AS failed,sum(state='gone') AS gone,
+                           sum(state='partial') AS partial,sum(state='error' OR last_error IS NOT NULL) AS failed,sum(state='gone') AS gone,
                            sum(unknown_records) AS unknown
                     FROM source_files GROUP BY source_id
                 ), session_stats AS (

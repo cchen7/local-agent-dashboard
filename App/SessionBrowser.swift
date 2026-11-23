@@ -927,7 +927,7 @@ private struct ToolInputBody: View {
         let task = Task.detached(priority: .utility) {
             guard let registered = try store.registeredToolInput(in: key, eventKey: dedupe)
             else { throw ToolInputReadFailure.changedOrUnavailable }
-            let text = try await SourceAccessProbe.withIndexingAccess(to: registered.source) { root in
+            let text = try await SourceAccessProbe.withIndexingAccess(to: registered.source, expectedIdentity: registered.rootIdentity) { root in
                 try Task.checkCancellation()
                 return try ToolInputReader.read(registered, authorizedRoot: root)
             }
@@ -1001,7 +1001,8 @@ private struct ToolResultOutput: View {
         let task = Task.detached(priority: .utility) { () throws -> OriginalToolOutput in
             guard let registered = try store.registeredToolOutput(in: key, eventKey: dedupe)
             else { throw ToolOutputReadFailure.changedOrUnavailable }
-            let result = try await SourceAccessProbe.withIndexingAccess(to: registered.source) { root in
+            let identity = try store.registeredRootIdentity(for: registered.source)
+            let result = try await SourceAccessProbe.withIndexingAccess(to: registered.source, expectedIdentity: identity) { root in
                 try ToolOutputReader.read(registered, authorizedRoot: root)
             }
             guard try store.registeredToolOutput(in: key, eventKey: dedupe) == registered
