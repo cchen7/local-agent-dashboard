@@ -1,7 +1,6 @@
 import AppKit
 import ADCore
 import ADInsights
-import ADPrivacy
 import ADSearch
 import ADStore
 import SwiftUI
@@ -260,6 +259,7 @@ struct MainWindow: View {
 
     private func searchResults(_ results: SessionSearchResults, pending: Bool) -> some View {
         let sessions = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0) })
+        let currency = model.pricing.currency  // Resolved once, not per row.
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Text("Matches: \(results.matchCount) · Sessions: \(results.sessionCount)")
@@ -296,7 +296,7 @@ struct MainWindow: View {
                 rows(results.hits.filter { sessions[$0.id] != nil }) { hit, name in
                     if let session = sessions[hit.id] {
                         SessionListCell(session: session, snippet: hit.snippet, projectName: name,
-                                        currency: model.pricing.currency).tag(hit.id)
+                                        currency: currency).tag(hit.id)
                             #if AGENTDASH_SYNTHETIC_ONLY
                             .background {
                                 if SyntheticNativeSearch.measuring, !pending, hit.id == results.hits.first?.id,
@@ -337,9 +337,10 @@ struct MainWindow: View {
                        message: "Choose another filter or show all sessions.")
                 .accessibilityIdentifier("empty.sessionFilter")
         } else {
+            let currency = model.pricing.currency  // Resolved once, not per row.
             List(selection: $model.selectedSessionID) {
                 rows(model.visibleSessions) { session, name in
-                    SessionListCell(session: session, projectName: name, currency: model.pricing.currency)
+                    SessionListCell(session: session, projectName: name, currency: currency)
                         #if AGENTDASH_SYNTHETIC_ONLY
                         .background {
                             if let event = SyntheticStartupFixture.marker(for: session)

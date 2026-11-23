@@ -1,5 +1,4 @@
 import ADCore
-import CoreFoundation
 import Foundation
 
 /// GitHub Copilot CLI's append-only event stream (ADP-CP).
@@ -149,14 +148,14 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
             let text = body.map { AdapterJSON.prefix($0, bytes: ToolOutputCapture.searchableBytes) }
             let tool = recentCalls.last { $0.id == id }?.name
             var fields: AdapterJSON.Object = [:]
-            if let success = Self.boolean(data["success"]) { fields["success"] = success }
+            if let success = ToolActionDecoder.boolean(data["success"]) { fields["success"] = success }
             if let id { fields["call_id"] = id }
             records.append(event(.toolResult, text, tool: tool, fields: fields,
                                  toolOutput: body.flatMap { .init(format: .copilot, text: $0) },
                                  toolAction: ToolActionDecoder.completion(success: data["success"])))
         case "session.task_complete", "session.compaction_complete":
             var fields: AdapterJSON.Object = ["signal": type ?? ""]
-            if let success = Self.boolean(data["success"]) { fields["success"] = success }
+            if let success = ToolActionDecoder.boolean(data["success"]) { fields["success"] = success }
             records.append(event(.summary, AdapterJSON.string(data["summary"], bounded: 2048), fields: fields))
         case "session.usage_record":
             if !child {
@@ -203,11 +202,6 @@ public struct CopilotRecordDecoder: AgentFileDecoder {
     }
 
     private var recentCalls: [Call] = []
-
-    private static func boolean(_ value: Any?) -> Bool? {
-        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
-        return number.boolValue
-    }
 
     private static func identifier(_ value: Any?) -> String? {
         guard let id = AdapterJSON.string(value), id.utf8.count <= 256, !id.utf8.contains(0) else { return nil }

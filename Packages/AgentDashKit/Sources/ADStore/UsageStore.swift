@@ -610,7 +610,7 @@ private struct UsageCoverage {
             case .agent: label = nil
             case .model: label = id.isEmpty ? nil : id
             case .project:
-                label = try String.fetchOne(db, sql: "SELECT display_name FROM projects WHERE id=?", arguments: [Int64(id)])
+                label = try String.fetchOne(db.cachedStatement(sql: "SELECT display_name FROM projects WHERE id=?"), arguments: [Int64(id)])
             }
             let peak = hourly ? try scopePeak(db, agent: agent, metric: metric, precomputed: precomputed) : peaks[id]
             return UsageBreakdown(id: id, label: label, agent: agent, totals: Self.readTotals(row),
@@ -786,10 +786,8 @@ private struct UsageCoverage {
         }
     }
 
-    static func pricingPeakFilter(_ metric: UsageMetric, raw: Bool = false) -> String {
-        guard metric == .cost else { return "" }
-        return raw ? "AND price_status<>'unpriced' AND (\(amount(.tokens)))>0"
-                   : "AND (\(amount(.tokens)))>unpriced_tokens"
+    static func pricingPeakFilter(_ metric: UsageMetric) -> String {
+        metric == .cost ? "AND (\(amount(.tokens)))>unpriced_tokens" : ""
     }
 
     static func readTotals(_ row: Row) -> UsageTotals { .fromAggregate(row) }

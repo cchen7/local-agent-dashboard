@@ -1,7 +1,6 @@
 import ADCore
 import ADInsights
 import ADPricing
-import ADPrivacy
 import ADStore
 import AppKit
 import Charts

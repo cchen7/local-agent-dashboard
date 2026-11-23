@@ -1,6 +1,5 @@
 import ADCore
 import ADPrivacy
-import CryptoKit
 import Foundation
 import GRDB
 
@@ -156,7 +155,7 @@ struct SessionExclusionGate {
             guard let last = rows.last else { break }
             for row in rows where try decision(row["cwd"], sourceID: row["source_id"], db: db) == .excluded {
                 guard let agent = AgentKind(rawValue: row["agent"]) else { throw StoreError.invalidStoredValue }
-                let digest = Self.digest(.init(agent: agent, nativeID: row["native_id"]))
+                let digest = ArchiveRetentionStore.digest(.init(agent: agent, nativeID: row["native_id"]))
                 try save(.excluded, digest: digest, sourceID: row["source_id"], db: db)
                 try mark(row["file_id"], digest: digest, disposition: .excluded, db: db)
                 try remove(row, db: db)
@@ -206,7 +205,7 @@ struct SessionExclusionGate {
         for case .session(let session) in records {
             // A copied-history placeholder cannot establish the original's path.
             guard session.referenceOnly != true, let cwd = session.cwd else { continue }
-            let digest = Self.digest(session.key)
+            let digest = ArchiveRetentionStore.digest(session.key)
             if observed[digest] != .excluded {
                 let outcome = try decision(cwd, sourceID: session.sourceID, db: db)
                 observed[digest] = outcome
@@ -221,7 +220,7 @@ struct SessionExclusionGate {
         kept.reserveCapacity(records.count)
         for record in records {
             guard let key = Self.key(for: record) else { kept.append(record); continue }
-            let digest = Self.digest(key)
+            let digest = ArchiveRetentionStore.digest(key)
             if !allowed.contains(digest) && withheld[digest] == nil {
                 let saved = try prior(digest, db: db)
                 let previous = try Row.fetchOne(db, sql: """
@@ -340,10 +339,6 @@ struct SessionExclusionGate {
         case .removeEmptyPlaceholder(let key, _, _, _), .removeCopilotUsagePlaceholder(let key, _, _, _, _): key
         case .rateLimit: nil // Agent-wide, no session association.
         }
-    }
-
-    private static func digest(_ key: SessionKey) -> Data {
-        Data(SHA256.hash(data: Data((key.agent.rawValue + "\u{0}" + key.nativeID).utf8)))
     }
 
     private func prior(_ digest: Data, db: Database) throws -> (kind: Disposition, revision: Int64, sourceID: Int64?)? {

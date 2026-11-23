@@ -19,30 +19,30 @@ enum CopilotAccounting {
         let c = sample.counts
         guard sample.session.agent == .copilot, sample.sequence >= 0, c.cacheWrite1h == 0,
               parts(c).allSatisfy({ $0 >= 0 }), c.reasoning <= c.output else { throw StoreError.invalidTokenCounts }
-        try db.execute(sql: """
+        try db.cachedStatement(sql: """
             INSERT INTO copilot_usage_snapshots(dedupe_key,session_id,model,seq,ts,input_fresh,cache_read,cache_write,output,reasoning)
             VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO NOTHING
-            """, arguments: [sample.dedupeKey, sessionID, sample.model, sample.sequence, sample.timestamp,
+            """).execute(arguments: [sample.dedupeKey, sessionID, sample.model, sample.sequence, sample.timestamp,
                               c.inputFresh, c.cacheRead, c.cacheWrite, c.output, c.reasoning])
         return db.changesCount == 0 ? nil : Key(sessionID: sessionID, model: sample.model)
     }
 
     static func coversCall(_ key: Key, sequence: Int64, db: Database) throws -> Bool {
-        try Bool.fetchOne(db, sql: """
+        try Bool.fetchOne(db.cachedStatement(sql: """
             SELECT EXISTS(SELECT 1 FROM copilot_usage_snapshots WHERE session_id=? AND model=? AND seq>=?)
-            """, arguments: [key.sessionID, key.model, sequence]) ?? false
+            """), arguments: [key.sessionID, key.model, sequence]) ?? false
     }
 
     static func snapshotKeys(sessionID: Int64, db: Database) throws -> [Key] {
-        try String.fetchAll(db, sql: "SELECT DISTINCT model FROM copilot_usage_snapshots WHERE session_id=?",
+        try String.fetchAll(db.cachedStatement(sql: "SELECT DISTINCT model FROM copilot_usage_snapshots WHERE session_id=?"),
                             arguments: [sessionID]).map { Key(sessionID: sessionID, model: $0) }
     }
 
     static func hasModelLessCalls(sessionID: Int64, db: Database) throws -> Bool {
-        try Bool.fetchOne(db, sql: """
+        try Bool.fetchOne(db.cachedStatement(sql: """
             SELECT EXISTS(SELECT 1 FROM token_events WHERE session_id=? AND model IS NULL
                           AND agent='copilot' AND precision='call' AND source_seq IS NOT NULL)
-            """, arguments: [sessionID]) == true
+            """), arguments: [sessionID]) == true
     }
 
     typealias CoveredCall = (sequence: Int64, counts: [Int64])

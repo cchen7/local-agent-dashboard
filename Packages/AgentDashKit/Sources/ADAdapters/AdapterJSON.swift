@@ -8,8 +8,14 @@ enum AdapterJSON {
         (try? JSONSerialization.jsonObject(with: data)) as? Object
     }
 
+    // Hoisted: these run for nearly every JSONL line (ADP-6).
+    private static let blank = CharacterSet.whitespacesAndNewlines
+    private static let fractionalDate = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let wholeDate = Date.ISO8601FormatStyle(includingFractionalSeconds: false)
+
     static func string(_ value: Any?, bounded limit: Int? = nil) -> String? {
-        guard let value = value as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        // Equivalent to trimming to empty, without copying a large value.
+        guard let value = value as? String, !value.unicodeScalars.allSatisfy(blank.contains) else { return nil }
         return limit.map { prefix(value, bytes: $0) } ?? value
     }
 
@@ -27,9 +33,7 @@ enum AdapterJSON {
     static func timestamp(_ value: Any?) -> Int64? {
         if let millis = integer(value) { return millis }
         guard let string = value as? String, string.utf8.count <= 64 else { return nil }
-        let fraction = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-        let whole = Date.ISO8601FormatStyle(includingFractionalSeconds: false)
-        guard let date = (try? fraction.parse(string)) ?? (try? whole.parse(string)) else { return nil }
+        guard let date = (try? fractionalDate.parse(string)) ?? (try? wholeDate.parse(string)) else { return nil }
         return Int64(exactly: (date.timeIntervalSince1970 * 1000).rounded())
     }
 

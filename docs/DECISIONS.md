@@ -985,3 +985,19 @@ Replace the prototype's three stacked footer items with a single native row
 so the panel can show more of the active sessions. Keep Open Dashboard on
 the left and Settings and Quit on the right. All three keep text labels,
 their existing actions and their shortcuts; hover help shows the bindings.
+
+## DEV-106 — Index session self references; keep the house format (NFR-3, FR-STO-1)
+
+A deleted session checks both `sessions` self references. Without an index,
+clearing or expiring N sessions scanned the table N times: deleting 20,000
+synthetic rows took 4.98 s, against 0.04 s with partial indexes on the non-null
+parent and resumed-from IDs. The `session_parent_indexes` migration adds those
+indexes with immediate foreign-key checks, so an upgrade skips GRDB's deferred
+whole-database check; results and stored values are unchanged. Per-record
+lookups in the ingest writer and the project usage breakdown use GRDB cached
+statements with the same SQL.
+
+The code consistently uses four-space indentation and has no formatter
+configuration. A default `swift-format` lint reports mostly layout
+differences, so the code is not mass-reformatted. Its remaining suggestions
+(cursor `forEach`, file-scope `fileprivate`) do not change behavior.

@@ -229,6 +229,16 @@ public final class AgentStore: Sendable {
             try gate.finishRemovals(db: db)
             try UsageChartChanges.publish(db)
         }
+        migrator.registerMigration("session_parent_indexes", foreignKeyChecks: .immediate) { db in
+            // Each deleted session checks both self references; without an
+            // index, clear and expiry scan `sessions` once per deleted row.
+            // Adding an index cannot violate a foreign key, so skip GRDB's
+            // deferred whole-database check on upgrade.
+            try db.execute(sql: """
+                CREATE INDEX sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL;
+                CREATE INDEX sessions_resumed_from ON sessions(resumed_from_session_id) WHERE resumed_from_session_id IS NOT NULL;
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -674,7 +684,8 @@ public final class AgentStore: Sendable {
     }
 
     private static func sessionID(_ key: SessionKey, db: Database) throws -> Int64 {
-        guard let id = try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE agent=? AND native_id=?",
+        // Cached: the ingest writer resolves the owner of every event (NFR-3).
+        guard let id = try Int64.fetchOne(db.cachedStatement(sql: "SELECT id FROM sessions WHERE agent=? AND native_id=?"),
                                           arguments: [key.agent.rawValue, key.nativeID]) else { throw StoreError.missingSession }
         return id
     }
@@ -732,16 +743,17 @@ public final class AgentStore: Sendable {
             guard value.kind == .user || value.kind == .assistant,
                   value.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             else { throw StoreError.invalidTranscriptChannel }
-            if channel == .fallback, try Bool.fetchOne(db, sql: """
+            if channel == .fallback, try Bool.fetchOne(db.cachedStatement(sql: """
                 SELECT EXISTS(SELECT 1 FROM events WHERE session_id=? AND transcript_channel='preferred')
-                """, arguments: [session]) == true { return }
+                """), arguments: [session]) == true { return }
         }
         var blob: Int64?
         var origin: String?
         if value.kind == .toolResult, let capture = value.toolOutput {
             if let address = capture.origin { origin = String(decoding: try JSONEncoder().encode(address), as: UTF8.self) }
             if let text = capture.archiveText, let encoded = try ToolOutputArchive.encode(text, limit: ToolOutputArchive.limit(db)) {
-                try db.execute(sql: "INSERT INTO blobs(codec,raw_len,data) VALUES('lzfse',?,?)", arguments: [encoded.rawCount, encoded.bytes])
+                try db.cachedStatement(sql: "INSERT INTO blobs(codec,raw_len,data) VALUES('lzfse',?,?)")
+                    .execute(arguments: [encoded.rawCount, encoded.bytes])
                 blob = db.lastInsertedRowID
             }
         }
@@ -861,7 +873,7 @@ public final class AgentStore: Sendable {
             guard !overflow else { throw StoreError.invalidTokenCounts }
             total = next
         }
-        guard let session = try Row.fetchOne(db, sql: "SELECT id,project_id FROM sessions WHERE agent=? AND native_id=?",
+        guard let session = try Row.fetchOne(db.cachedStatement(sql: "SELECT id,project_id FROM sessions WHERE agent=? AND native_id=?"),
                                              arguments: [value.session.agent.rawValue, value.session.nativeID])
         else { throw StoreError.missingSession }
         let sessionID: Int64 = session["id"]

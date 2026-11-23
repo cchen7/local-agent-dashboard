@@ -41,9 +41,9 @@ public enum SearchTokenization {
                     let atEnd = position == index
                     let separator = !atEnd && "_-.".unicodeScalars.contains(scalars[position])
                     let camel = position > partStart && !atEnd && (
-                        (CharacterSet.lowercaseLetters.contains(scalars[position - 1]) && CharacterSet.uppercaseLetters.contains(scalars[position])) ||
-                        (position + 1 < index && CharacterSet.uppercaseLetters.contains(scalars[position - 1]) &&
-                         CharacterSet.uppercaseLetters.contains(scalars[position]) && CharacterSet.lowercaseLetters.contains(scalars[position + 1])))
+                        (lowercase.contains(scalars[position - 1]) && uppercase.contains(scalars[position])) ||
+                        (position + 1 < index && uppercase.contains(scalars[position - 1]) &&
+                         uppercase.contains(scalars[position]) && lowercase.contains(scalars[position + 1])))
                     if atEnd || separator || camel {
                         if position > partStart {
                             let part = normalize(text(partStart, position))
@@ -58,11 +58,17 @@ public enum SearchTokenization {
         return result
     }
 
+    // Built once: this runs for every indexed word and query term.
+    private static let lowercase = CharacterSet.lowercaseLetters
+    private static let uppercase = CharacterSet.uppercaseLetters
+    private static let posix = Locale(identifier: "en_US_POSIX")
+
     private static func normalize(_ value: String) -> String {
-        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX")).lowercased()
+        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: posix).lowercased()
     }
 
-    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
+    /// The CJK ranges split into bigrams (§9.2); topic scoring uses the same ranges (§10.2).
+    public static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
         case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x323AF,
              0x3040...0x30FF, 0x31F0...0x31FF, 0xAC00...0xD7AF: true

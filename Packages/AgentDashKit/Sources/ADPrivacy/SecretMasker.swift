@@ -12,7 +12,8 @@ public enum SecretMasker {
     private static let privateKeyMarkers = try? NSRegularExpression(
         pattern: #"-----(BEGIN|END) ((?:[A-Z0-9-]+ )*PRIVATE KEY)-----"#
     )
-    private static let sensitiveSuffixes = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+    /// Shared with stored index redaction: changing it changes what a redacted index keeps.
+    static let sensitiveSuffixes = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
 
     /// Return the original text if no known pattern matched. No files are read
     /// or changed. Callers should apply this to raw text before formatting it.

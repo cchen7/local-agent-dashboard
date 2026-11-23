@@ -47,13 +47,13 @@ public struct TopicScorer: Sendable {
             for text in texts {
                 // Match the shared splitter's word contract without SQLite or unsafe pointers.
                 let words = text.unicodeScalars.split { scalar in
-                    !CharacterSet.alphanumerics.contains(scalar)
-                        && !CharacterSet.nonBaseCharacters.contains(scalar)
+                    !Self.alphanumerics.contains(scalar)
+                        && !Self.nonBase.contains(scalar)
                         && !"_-.".unicodeScalars.contains(scalar)
                 }
                 for word in words {
                     // Strip prose/Markdown punctuation, retaining internal identifier separators.
-                    let identifier = String(word).trimmingCharacters(in: CharacterSet(charactersIn: "_-."))
+                    let identifier = String(word).trimmingCharacters(in: Self.separators)
                     for group in SearchTokenization.groups(in: identifier) {
                         for term in group.terms where Self.isTopic(term) && !stopWords.contains(term) {
                             counts[term, default: 0] += weight
@@ -90,19 +90,17 @@ public struct TopicScorer: Sendable {
         return selected
     }
 
+    // Built once: counts() visits every scalar of each changed session's text.
+    private static let alphanumerics = CharacterSet.alphanumerics
+    private static let nonBase = CharacterSet.nonBaseCharacters
+    private static let letters = CharacterSet.letters
+    private static let separators = CharacterSet(charactersIn: "_-.")
+
     private static func isTopic(_ term: String) -> Bool {
         let scalars = term.unicodeScalars
-        if scalars.allSatisfy(isCJK) { return scalars.count == 2 }
-        return term.count >= 3 && scalars.contains(where: CharacterSet.letters.contains)
-    }
-
-    // Same CJK ranges as ADCore.SearchTokenization; only bigrams are topics (§10.2).
-    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x323AF,
-             0x3040...0x30FF, 0x31F0...0x31FF, 0xAC00...0xD7AF: true
-        default: false
-        }
+        // Same CJK ranges as the search splitter; only bigrams are topics (§10.2).
+        if scalars.allSatisfy(SearchTokenization.isCJK) { return scalars.count == 2 }
+        return term.count >= 3 && scalars.contains(where: letters.contains)
     }
 
     private static func loadStopWords(_ name: String) throws -> Set<String> {

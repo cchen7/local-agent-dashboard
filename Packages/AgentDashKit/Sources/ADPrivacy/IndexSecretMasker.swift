@@ -83,7 +83,7 @@ public enum IndexSecretMasker {
             (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95
         }) else { return false }
         let upper = key.uppercased()
-        return ["KEY", "TOKEN", "SECRET", "PASSWORD"].contains { upper.hasSuffix($0) }
+        return SecretMasker.sensitiveSuffixes.contains { upper.hasSuffix($0) }
     }
 
     private static func decoderIdentity(_ key: String, field: Any, scope: Scope) -> Bool {
