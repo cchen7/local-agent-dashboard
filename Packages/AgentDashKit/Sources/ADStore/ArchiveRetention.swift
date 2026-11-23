@@ -135,6 +135,7 @@ enum ArchiveRetentionStore {
         return rows.count
     }
 
+    /// Session exclusions copy these digests from expired archives, so both use this one.
     static func digest(_ key: SessionKey) -> Data {
         Data(SHA256.hash(data: Data((key.agent.rawValue + "\u{0}" + key.nativeID).utf8)))
     }

@@ -28,11 +28,6 @@ public extension AgentStore {
         }
     }
 
-    /// Reports persisted unpriced volume without confusing it with file validity.
-    func unpricedUsageByModel(limit: Int = 200) throws -> [UnpricedModelUsage] {
-        try databasePool.read { try unpricedModelRows($0, limit: limit) }
-    }
-
     func unpricedUsageUpdates(limit: Int = 200) -> some AsyncSequence<[UnpricedModelUsage], any Error> & Sendable {
         ValueObservation.tracking { db in
             // Backfill updates the rollups and publishes this revision in the

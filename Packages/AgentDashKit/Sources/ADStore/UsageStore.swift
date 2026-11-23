@@ -786,10 +786,8 @@ private struct UsageCoverage {
         }
     }
 
-    static func pricingPeakFilter(_ metric: UsageMetric, raw: Bool = false) -> String {
-        guard metric == .cost else { return "" }
-        return raw ? "AND price_status<>'unpriced' AND (\(amount(.tokens)))>0"
-                   : "AND (\(amount(.tokens)))>unpriced_tokens"
+    static func pricingPeakFilter(_ metric: UsageMetric) -> String {
+        metric == .cost ? "AND (\(amount(.tokens)))>unpriced_tokens" : ""
     }
 
     static func readTotals(_ row: Row) -> UsageTotals { .fromAggregate(row) }
