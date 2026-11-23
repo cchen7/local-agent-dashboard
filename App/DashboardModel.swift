@@ -210,7 +210,7 @@ final class DashboardModel {
         visibleSessions.first { $0.id == selectedSessionID }
     }
 
-    func load(syntheticPricingDirectory: URL? = nil) async {
+    func load() async {
         guard !loaded else { return }
         loaded = true
         do {
@@ -270,9 +270,9 @@ final class DashboardModel {
                 let home = synthetic ? "/synthetic" : defaults.first?.rootURL.deletingLastPathComponent().path
                 let externalOverride: URL?
                 #if AGENTDASH_SYNTHETIC_ONLY
-                externalOverride = repricing?.priceDirectory ?? syntheticPricingDirectory
+                externalOverride = repricing?.priceDirectory
                 #else
-                externalOverride = syntheticPricingDirectory
+                externalOverride = nil
                 #endif
                 let externalDirectory = synthetic ? externalOverride : home.map {
                     URL(fileURLWithPath: $0).appendingPathComponent(".config/agent-dashboard", isDirectory: true)
@@ -285,7 +285,7 @@ final class DashboardModel {
                 #else
                 let startupPricing = false
                 #endif
-                let bundled = !synthetic || startupPricing || previewUsage || syntheticPricingDirectory != nil
+                let bundled = !synthetic || startupPricing || previewUsage
                     ? Bundle.main.url(forResource: "pricing", withExtension: "json") : nil
                 let runtime = LocalPricingRuntime(external: externalDirectory?.appendingPathComponent("pricing.json"),
                                                   bundled: bundled, store: store)

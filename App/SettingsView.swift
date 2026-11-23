@@ -3,7 +3,6 @@ import ADStore
 import ADCore
 import ADIngest
 import ADInsights
-import ADPrivacy
 
 enum SettingsPage: Hashable { case general, sources, thresholds, storage, privacy, pricing, about }
 
