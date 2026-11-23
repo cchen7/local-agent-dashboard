@@ -4,6 +4,10 @@
 	classes = {};
 	objectVersion = 56;
 	objects = {
+		AD6300000000000000000001 = { isa = PBXFileReference; lastKnownFileType = text; path = "THIRD-PARTY-NOTICES.txt"; sourceTree = "<group>"; };
+		AD6300000000000000000002 = { isa = PBXBuildFile; fileRef = AD6300000000000000000001; };
+		AD6300000000000000000003 = { isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = SOURCE_ROOT; };
+		AD6300000000000000000004 = { isa = PBXBuildFile; fileRef = AD6300000000000000000003; };
 		AD6200000000000000000001 = { isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		AD6200000000000000000002 = { isa = PBXBuildFile; fileRef = AD6200000000000000000001; };
 		AD6100000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticNativeSearch.swift; sourceTree = "<group>"; };
@@ -195,6 +199,8 @@
 		};
 		C5E55183ECB076EB335DF6EE = {
 			isa = PBXGroup; children = (
+				AD6300000000000000000001,
+				AD6300000000000000000003,
 				AD6200000000000000000001,
 				652F55016243BF1B9F1BBEA4,
 				AD4C00000000000000000007,
@@ -247,6 +253,8 @@
 		};
 		F9187E824FE171A6F0EFAE28 = {
 			isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (
+				AD6300000000000000000002,
+				AD6300000000000000000004,
 				AD6200000000000000000002,
 				BAB7530B9399702DECCC3C35,
 				AD4C00000000000000000008,

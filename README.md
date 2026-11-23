@@ -12,8 +12,9 @@ Development starts with [AGENTS.md](AGENTS.md) and [the specification](docs/SPEC
 See [the development plan](docs/DEVELOPMENT_PLAN.md) for milestones and review gates,
 and [the handover](docs/HANDOVER.md) for worktrees and task prompts.
 
-The Agent Dashboard source is available under the [MIT License](LICENSE).
-Third-party components retain their own licenses.
+Agent Dashboard is licensed under the [MIT License](LICENSE).
+[Third-party license notices](App/Resources/THIRD-PARTY-NOTICES.txt) are
+included alongside it in the app bundle.
 
 Release status: local candidate under review. See
 [release verification](docs/RELEASE-VERIFY.md) for signing, verification,
