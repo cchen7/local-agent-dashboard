@@ -34,7 +34,7 @@ public struct UTCDate: Equatable, Hashable, Comparable, Sendable {
 }
 
 /// USD per million tokens, represented as Decimal throughout accounting.
-public struct PriceRates: Equatable, Sendable {
+public struct PriceRates: Codable, Equatable, Sendable {
     public let input: Decimal
     public let output: Decimal
     public let cacheRead: Decimal?
@@ -48,7 +48,7 @@ public struct PriceRates: Equatable, Sendable {
     }
 }
 
-public struct PriceTier: Equatable, Sendable {
+public struct PriceTier: Codable, Equatable, Sendable {
     public let whenPromptTokensAbove: Int64
     public let rates: PriceRates
 }

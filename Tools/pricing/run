@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+case "${AGENTDASH_PRICING_TOOL:-}" in
+    /*) ;;
+    *) echo "Pricing: set AGENTDASH_PRICING_TOOL to the built executable; see pricing/UPDATE_PLAYBOOK.md." >&2; exit 2 ;;
+esac
+if [ ! -f "$AGENTDASH_PRICING_TOOL" ] || [ ! -x "$AGENTDASH_PRICING_TOOL" ]; then
+    echo "Pricing: executable missing or not executable." >&2
+    exit 2
+fi
+exec "$AGENTDASH_PRICING_TOOL" "$@"

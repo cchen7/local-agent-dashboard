@@ -40,6 +40,28 @@ func mixedSearchGroupsAndAnchors() throws {
     #expect(restricted.hits.first?.id != second.hits.first?.id)
 }
 
+@Test("FR-SR: interleaved writes keep exact session counts, relevance and earliest anchors")
+func interleavedSearchUsesAllHitsForEachSession() throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    let a = fixture.session("interleaved-a", cwd: "/synthetic/work/a")
+    let b = fixture.session("interleaved-b", cwd: "/synthetic/work/b")
+    try fixture.store.write([
+        .session(a), .session(b),
+        fixture.event(a.key, "a-later", 4, "auth"),
+        fixture.event(b.key, "b-later", 3, "auth"),
+        fixture.event(a.key, "a-earliest", 1, "auth"),
+        fixture.event(b.key, "b-earliest", 1, "auth"),
+        fixture.event(a.key, "a-best", 2, "auth auth auth"),
+    ])
+    let exact = try fixture.run("auth OR middleware")
+    #expect(exact.sessionCount == 2 && exact.matchCount == 5)
+    #expect(exact.hits.map(\.id) == [a.key, b.key])
+    #expect(exact.hits.map(\.matchCount) == [3, 2])
+    #expect(exact.hits.map(\.firstMatchKey) == ["a-earliest", "b-earliest"])
+    #expect(exact.hits.first?.snippet.filter(\.highlighted).count == 3)
+}
+
 @Test("FR-SR: navigation keeps query scope, file order, stable ties and bounded pages")
 func navigatesMatchesWithinTheSelectedSession() throws {
     let fixture = try SearchFixture()
@@ -186,21 +208,7 @@ func masksCompleteSearchCandidate() throws {
 func millionEntrySearchLatency() throws {
     let fixture = try SearchFixture()
     defer { fixture.remove() }
-    let sessions = (1...2_000).map { fixture.session("bench-\($0)", cwd: "/synthetic/work/bench-\($0)") }
-    try fixture.store.write(sessions.map(NormalizedRecord.session))
-    try fixture.store.databasePool.write { db in
-        try db.execute(sql: """
-            WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<499)
-            INSERT INTO events(session_id,seq,ts,kind,text,dedupe_key)
-            SELECT s.id,seq.n,1795000000000+seq.n,'assistant',
-                   CASE WHEN seq.n%50=0 THEN '修复登录问题 verifyAndRotate auth.ts'
-                        WHEN seq.n%10=0 THEN 'updated middleware cache'
-                        ELSE 'Synthetic source update finished' END,
-                   printf('%lld:%d',s.id,seq.n)
-            FROM sessions s CROSS JOIN seq
-            """)
-        #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM events") == 1_000_000)
-    }
+    try populateMillionSearchEntries(fixture)
 
     for (label, query, expected) in [
         ("mixed", "登录 verify", 20_000),
@@ -240,15 +248,56 @@ func millionEntrySearchLatency() throws {
     }
 }
 
+/// Export from the exact same workload used by the package latency check.
+@Test("NFR-4: export a verified million-message native search fixture",
+      .enabled(if: ProcessInfo.processInfo.environment["AGENTDASH_NATIVE_SEARCH_EXPORT"] != nil))
+func exportNativeSearchFixture() throws {
+    let id = try #require(ProcessInfo.processInfo.environment["AGENTDASH_NATIVE_SEARCH_EXPORT"]
+        .flatMap(UUID.init(uuidString:)))
+    let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        .appendingPathComponent("agentdash-search-fixture-\(id.uuidString)", isDirectory: true)
+    let fixture = try SearchFixture(directory: directory)
+    var complete = false
+    defer { if !complete { fixture.remove() } }
+    try populateMillionSearchEntries(fixture)
+    _ = try fixture.store.databasePool.writeWithoutTransaction { try $0.checkpoint(.truncate) }
+    try fixture.store.databasePool.close()
+    let index = directory.appendingPathComponent("index.sqlite")
+    let attributes = try FileManager.default.attributesOfItem(atPath: index.path)
+    let bytes = try #require((attributes[.size] as? NSNumber)?.int64Value)
+    try JSONEncoder().encode(["bytes": bytes, "events": 1_000_000, "sessions": 2_000])
+        .write(to: directory.appendingPathComponent("proof.json"), options: .withoutOverwriting)
+    complete = true
+}
+
+private func populateMillionSearchEntries(_ fixture: SearchFixture) throws {
+    let sessions = (1...2_000).map { fixture.session("bench-\($0)", cwd: "/synthetic/work/bench-\($0)") }
+    try fixture.store.write(sessions.map(NormalizedRecord.session))
+    try fixture.store.databasePool.write { db in
+        try db.execute(sql: """
+            WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<499)
+            INSERT INTO events(session_id,seq,ts,kind,text,dedupe_key)
+            SELECT s.id,seq.n,1795000000000+seq.n,'assistant',
+                   CASE WHEN seq.n%50=0 THEN '修复登录问题 verifyAndRotate auth.ts'
+                        WHEN seq.n%10=0 THEN 'updated middleware cache'
+                        ELSE 'Synthetic source update finished' END,
+                   printf('%lld:%d',s.id,seq.n)
+            FROM sessions s CROSS JOIN seq
+            """)
+        #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM events") == 1_000_000)
+    }
+}
+
 private struct SearchFixture {
     let directory: URL
     let store: AgentStore
     let scope: IndexedSearchScope
     let sourceID: Int64
 
-    init(timeZone: TimeZone = TimeZone(secondsFromGMT: 0) ?? .current) throws {
-        directory = FileManager.default.temporaryDirectory.appendingPathComponent("indexed-search-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    init(timeZone: TimeZone = TimeZone(secondsFromGMT: 0) ?? .current, directory requested: URL? = nil) throws {
+        directory = requested ?? FileManager.default.temporaryDirectory.appendingPathComponent("indexed-search-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
         store = try AgentStore(databaseURL: directory.appendingPathComponent("index.sqlite"))
         sourceID = try store.upsertSource(.init(agent: .codex, label: "Synthetic",
                                                rootURL: directory.appendingPathComponent("unused-source")))

@@ -119,22 +119,27 @@ public struct Checkpoint: Codable, Equatable, Sendable {
     public var previousTimestamp: Int64?
     public var decoderState: Data?
     public var unknownRecords: Int64
+    /// A confirmed missing source file keeps its saved position, but must be
+    /// replayed if it returns. Observed absence also invalidates in-flight writers.
+    public var sourceFileWasMissing: Bool
 
     /// Create a normalized value without performing file access.
     public init(inode: Int64?, size: Int64, offset: Int64, parserVersion: Int,
                 sequence: Int64, previousTimestamp: Int64?, device: Int64? = nil,
-                modificationTimeNS: Int64? = nil, decoderState: Data? = nil, unknownRecords: Int64 = 0) {
+                modificationTimeNS: Int64? = nil, decoderState: Data? = nil, unknownRecords: Int64 = 0,
+                sourceFileWasMissing: Bool = false) {
         self.device = device
         self.inode = inode; self.size = size; self.offset = offset; self.parserVersion = parserVersion
         self.sequence = sequence; self.previousTimestamp = previousTimestamp
         self.modificationTimeNS = modificationTimeNS
         self.decoderState = decoderState
         self.unknownRecords = unknownRecords
+        self.sourceFileWasMissing = sourceFileWasMissing
     }
 
     private enum CodingKeys: String, CodingKey {
         case device, inode, size, modificationTimeNS, offset, parserVersion, sequence, previousTimestamp
-        case decoderState, unknownRecords
+        case decoderState, unknownRecords, sourceFileWasMissing
     }
 
     /// Old checkpoints still decode; an importer replays once if device information is missing.
@@ -149,6 +154,7 @@ public struct Checkpoint: Codable, Equatable, Sendable {
                       device: fields.decodeIfPresent(Int64.self, forKey: .device),
                       modificationTimeNS: fields.decodeIfPresent(Int64.self, forKey: .modificationTimeNS),
                       decoderState: fields.decodeIfPresent(Data.self, forKey: .decoderState),
-                      unknownRecords: fields.decodeIfPresent(Int64.self, forKey: .unknownRecords) ?? 0)
+                      unknownRecords: fields.decodeIfPresent(Int64.self, forKey: .unknownRecords) ?? 0,
+                      sourceFileWasMissing: fields.decodeIfPresent(Bool.self, forKey: .sourceFileWasMissing) ?? false)
     }
 }

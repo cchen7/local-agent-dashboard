@@ -108,6 +108,11 @@ public struct UsageWindow: Equatable, Sendable {
         return try UsageWindow(range: range, previous: previous, bucket: .fixed(milliseconds: 300_000))
     }
 
+    /// Exclusive end of the current Gregorian day in the supplied zone.
+    public static func nextLocalDayBoundary(after now: Int64, timeZone: TimeZone) throws -> Int64 {
+        try localDay(containing: now, timeZone: timeZone).upperBound
+    }
+
     /// Full chart bucket containing the timestamp. Intersect this with the exact
     /// report range before aggregation so partial first/last bars do not add events.
     public func bucketRange(containing timestamp: Int64) throws -> UsageRange {
@@ -118,6 +123,18 @@ public struct UsageWindow: Equatable, Sendable {
         case .localDay(let timeZone):
             return try Self.localDay(containing: timestamp, timeZone: timeZone)
         }
+    }
+
+    /// Full chart buckets intersecting this report, in display order.
+    public func chartBuckets() throws -> [UsageRange] {
+        var result: [UsageRange] = []
+        var cursor = range.lowerBound
+        while cursor < range.upperBound {
+            let bucket = try bucketRange(containing: cursor)
+            result.append(bucket)
+            cursor = bucket.upperBound
+        }
+        return result
     }
 
     /// Floor a UTC epoch millisecond timestamp to a positive-width bucket anchored at epoch 0.
@@ -161,6 +178,8 @@ public struct UsageWindow: Equatable, Sendable {
             // Reserve one point for the partial edges. This bound needs no widening loop.
             width = try multiply(ceilingQuotient(ceilingQuotient(range.duration, width: 499), width: minute), minute)
         }
+        // Use exact hour rollups for longer automatic windows.
+        if width >= 3_600_000 { return try multiply(ceilingQuotient(width, width: 3_600_000), 3_600_000) }
         return width
     }
 

@@ -1,5 +1,8 @@
 import Foundation
 
+/// Physical representation of a discovered JSONL file.
+public enum JSONLStorageEncoding: Equatable, Sendable { case plain, zstd }
+
 /// One complete physical line. Offsets include its LF (or CRLF), while bytes
 /// exclude the terminator. Oversized lines carry a bounded prefix.
 public struct JSONLFrame: Sendable {

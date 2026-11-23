@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+scripts=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo=$(CDPATH= cd -- "$scripts/../.." && pwd)
+bundled="$repo/pricing/pricing.json"
+if [ "$#" -eq 1 ] && [ "$1" = --apply ]; then
+    set -- "$bundled" --apply
+fi
+if [ "$#" -ne 2 ] || [ "$2" != --apply ]; then
+    echo "Usage: Tools/pricing/install [PRICE_FILE] --apply" >&2
+    exit 2
+fi
+exec "$scripts/run" install "$1" "$bundled" --apply

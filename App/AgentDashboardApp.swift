@@ -1,10 +1,16 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
 struct AgentDashboardApp: App {
+    #if AGENTDASH_SYNTHETIC_ONLY
+    @NSApplicationDelegateAdaptor(AppDelegate.syntheticLaunchType) private var appDelegate
+    @Environment(\.openWindow) private var openSyntheticWindow
+    #else
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = DashboardModel()
+    #endif
+    private var model: DashboardModel { appDelegate.model }
 
     var body: some Scene {
         Window("Agent Dashboard", id: "dashboard") {
@@ -16,14 +22,25 @@ struct AgentDashboardApp: App {
                 Button("Sessions") { model.page = .sessions }.keyboardShortcut("1")
                 Button("Projects") { model.page = .projects }.keyboardShortcut("2")
                 Button("Token Usage") { model.page = .tokens }.keyboardShortcut("3")
+                Divider()
+                Button("Full Rescan") { model.rescanSources() }
+                    .keyboardShortcut("r")
+                    .disabled(!model.canRescanSources)
             }
         }
 
-        MenuBarExtra("Agent Dashboard", systemImage: "gauge.with.needle") {
-            MenuBarPanel()
-                .background(WindowConfigurationView(identifier: "menuBarPanel"))
+        MenuBarExtra {
+            MenuBarPanel(model: model)
+                .id(model.privacyRevision)
+        } label: {
+            DashboardStatusLabel(model: model)
         }
         .menuBarExtraStyle(.window)
+        #if AGENTDASH_SYNTHETIC_ONLY
+        .onChange(of: model.syntheticQALaunchReady, initial: true) { _, ready in
+            if ready { openSyntheticWindow(id: "dashboard") }
+        }
+        #endif
 
         Settings {
             SettingsView(model: model)
@@ -33,27 +50,94 @@ struct AgentDashboardApp: App {
     }
 }
 
+private struct DashboardStatusLabel: View {
+    let model: DashboardModel
+
+    var body: some View {
+        if let tokens = model.menuBarTokensPerMinute {
+            Label("\(tokens.formatted(.number.notation(.compactName))) tok/min", systemImage: "gauge.with.needle")
+                .labelStyle(.titleAndIcon)
+                .accessibilityLabel("Agent Dashboard")
+                .accessibilityValue(Text("\(tokens.formatted()) tok/min"))
+                .accessibilityIdentifier("dashboard.statusItem")
+        } else {
+            Label("Agent Dashboard", systemImage: "gauge.with.needle")
+                .labelStyle(.iconOnly)
+                .accessibilityIdentifier("dashboard.statusItem")
+        }
+    }
+}
+
 private struct DashboardWindowContent: View {
     let model: DashboardModel
     @State private var contentMinimum = CGSize(width: 960, height: 600)
+    @State private var showsSetup = false
 
     var body: some View {
         MainWindow(model: model)
+            .environment(\.dashboardClockFormat, model.clockFormat)
             .frame(minWidth: contentMinimum.width, minHeight: contentMinimum.height)
             .background(WindowConfigurationView(identifier: "dashboardWindow", size: SyntheticLaunchOptions.current?.windowSize,
                                                 minimumOuterSize: CGSize(width: 960, height: 600),
                                                 contentMinimum: contentMinimum,
                                                 updateContentMinimum: { contentMinimum = $0 }))
             .task { await model.load() }
+            .onChange(of: model.onboardingRequired, initial: true) { _, required in
+                if required { showsSetup = true }
+            }
+            .sheet(isPresented: $showsSetup) {
+                SourceOnboardingView(model: model)
+            }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    #if AGENTDASH_SYNTHETIC_ONLY
+    static var syntheticLaunchType: AppDelegate.Type {
+        // Evaluate the argument check before SwiftUI creates the delegate or model.
+        guard CommandLine.arguments.dropFirst().contains("--synthetic") else {
+            let message = "AgentDashboard SyntheticQA refuses to start without --synthetic."
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            Darwin.exit(EX_USAGE)
+        }
+        if CommandLine.arguments.contains("--synthetic-live-update-writer") {
+            Darwin.exit(SyntheticLiveUpdateFixture.runWriter())
+        }
+        if CommandLine.arguments.contains("--synthetic-resource-cleanup") {
+            Darwin.exit(SyntheticResourceFixture.runCleanup())
+        }
+        if CommandLine.arguments.contains("--synthetic-long-transcript-fixture") {
+            Darwin.exit(SyntheticLongTranscript.runFixtureCommand())
+        }
+        if CommandLine.arguments.contains("--synthetic-period-fixture") {
+            Darwin.exit(SyntheticUsagePeriod.runFixtureCommand())
+        }
+        if CommandLine.arguments.contains("--synthetic-reprice-fixture") {
+            Darwin.exit(SyntheticRepricing.runFixtureCommand())
+        }
+        if CommandLine.arguments.contains("--synthetic-native-search-fixture") {
+            Darwin.exit(SyntheticNativeSearch.runFixtureCommand())
+        }
+        return AppDelegate.self
+    }
+    #endif
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         if let appearance = SyntheticLaunchOptions.current?.appearance {
             NSApp.appearance = NSAppearance(named: appearance)
         }
+    }
+
+    let model = DashboardModel()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        #if AGENTDASH_SYNTHETIC_ONLY
+        DispatchQueue.main.async {
+            self.model.syntheticQALaunchReady = true
+        }
+        #endif
+        if model.showsMenuBarThroughput { Task { await model.load() } }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -89,12 +173,13 @@ private struct SyntheticLaunchOptions {
 
 /// SwiftUI frame minimums apply to content; SPEC minimums describe the outer window.
 /// Native chrome measurements translate between them without a fixed titlebar height.
-private struct WindowConfigurationView: NSViewRepresentable {
+struct WindowConfigurationView: NSViewRepresentable {
     let identifier: String
     var size: CGSize? = nil
     var minimumOuterSize: CGSize? = nil
     var contentMinimum: CGSize? = nil
     var updateContentMinimum: ((CGSize) -> Void)? = nil
+    var updateVisibility: ((Bool) -> Void)? = nil
 
     func makeNSView(context: Context) -> WindowView { WindowView(configuration: self) }
     func updateNSView(_ nsView: WindowView, context: Context) {
@@ -119,6 +204,12 @@ private struct WindowConfigurationView: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if window == nil {
+                let update = configuration.updateVisibility
+                DispatchQueue.main.async { [weak self] in
+                    if self?.window == nil { update?(false) }
+                }
+            }
             guard let window, configuredWindow !== window else { return }
             configuredWindow = window
             appliedSyntheticFrame = false
@@ -141,6 +232,7 @@ private struct WindowConfigurationView: NSViewRepresentable {
 
         private func configureWindow() {
             guard let window else { return }
+            configuration.updateVisibility?(window.isVisible)
             if window.accessibilityIdentifier() != configuration.identifier {
                 window.setAccessibilityIdentifier(configuration.identifier)
             }

@@ -17,14 +17,16 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
     private let file: SourceFile
     private let environment: String
     private let input: ClaudeInput
+    private let includeThinking: Bool
     private let fractionalDate = ISO8601DateFormatter()
     private let plainDate = ISO8601DateFormatter()
     private var cachedMetadata: (Data, Metadata)?
 
-    init(file: SourceFile, environment: String, input: ClaudeInput) {
+    init(file: SourceFile, environment: String, input: ClaudeInput, includeThinking: Bool) {
         self.file = file
         self.environment = environment
         self.input = input
+        self.includeThinking = includeThinking
         fractionalDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         plainDate.formatOptions = [.withInternetDateTime]
     }
@@ -79,21 +81,30 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
 
         func fileEventID() -> String { "file:\(file.sourceID):\(file.relativePath):\(frame.sequence)" }
         let eventID = Self.id(row["uuid"]) ?? fileEventID()
+        let confirmsCopy = ownership == .inherited && !frame.isTruncated &&
+            Self.id(row["uuid"]).flatMap(UUID.init(uuidString:)) != nil
+        let assistantCounts = !frame.isTruncated && type == "assistant"
+            ? (message["usage"] as? [String: Any]).flatMap(Self.counts) : nil
+        let contextInput = ownership != .inherited ? assistantCounts.flatMap(Self.contextInput) : nil
         var records: [NormalizedRecord] = [
             .session(.init(key: key, sourceID: file.sourceID, fileID: context.fileID, environment: environment,
                            cwd: metadata.cwd, startedAt: metadata.started, lastEventAt: metadata.last,
                            gitBranch: metadata.branch, cliVersion: metadata.version, model: metadata.model,
-                           parentNativeID: parent))
+                           parentNativeID: parent, contextUsed: contextInput,
+                           contextModel: contextInput == nil ? nil : Self.metadata(message["model"], maximum: 256)))
         ]
         if ownership == .inherited {
             records.append(.session(.init(key: owner, sourceID: file.sourceID, environment: environment,
                                           referenceOnly: true)))
         }
         func event(_ kind: EventKind, _ body: String, index: Int = 0, tool: String? = nil,
-                   metadata: String? = nil) -> NormalizedRecord {
+                   metadata: String? = nil, toolOutput: ToolOutputCapture? = nil,
+                   toolInput: ToolInputCapture? = nil, toolAction: ToolActionEvidence? = nil) -> NormalizedRecord {
             .event(.init(session: owner, sequence: frame.sequence, timestamp: time ?? 0, kind: kind,
                          toolName: tool, text: body, metadataJSON: metadata,
-                         dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership))
+                         dedupeKey: "claude:event:\(eventID):\(index)", recordedOwnership: ownership,
+                         inheritedLocation: confirmsCopy && kind != .unknown ? .init(child: key, block: index) : nil,
+                         toolOutput: toolOutput, toolInput: toolInput, toolAction: toolAction))
         }
 
         var unknown = false
@@ -102,10 +113,12 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         case "user", "assistant":
             let isUser = type == "user"
             let isMeta = (row["isMeta"] as? Bool) == true
-            let textMetadata = isUser || frame.isTruncated ? nil : Self.messageMetadata(message["id"])
+            let textMetadata = isUser || frame.isTruncated ? nil : Self.messageMetadata(message)
             if !frame.isTruncated, let text = message["content"] as? String {
                 if !isUser || !isMeta { records.append(event(isUser ? .user : .assistant, text, metadata: textMetadata)) }
             } else if let blocks = message["content"] as? [[String: Any]] {
+                let resultCount = blocks.lazy.filter { ($0["type"] as? String) == "tool_result" }.prefix(2).count
+                let envelope = !frame.isTruncated && resultCount == 1 ? row["toolUseResult"] as? [String: Any] : nil
                 for (index, block) in blocks.prefix(240).enumerated() {
                     let blockType = block["type"] as? String
                     if frame.isTruncated && blockType != "tool_result" { continue }
@@ -119,14 +132,28 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
                         let text = (input["command"] as? String) ?? (input["file_path"] as? String) ?? ""
                         records.append(event(.toolCall, Self.bounded(text, bytes: 2048), index: index,
                                              tool: Self.metadata(block["name"], maximum: 128),
-                                             metadata: Self.toolMetadata(block["id"])))
+                                             metadata: Self.toolMetadata(block["id"]),
+                                             toolInput: !isUser && block["input"] is [String: Any] ? .init(.claude(block: index)) : nil,
+                                             toolAction: isUser ? nil : ToolActionDecoder.claude(name: block["name"] as? String, input: input)))
                     case "tool_result":
                         recoveredToolResult = true
-                        records.append(event(.toolResult, Self.bounded(Self.contentText(block["content"]), bytes: 2048),
+                        let body = ToolOutputText.text(block["content"]) ?? ""
+                        let success = ToolActionDecoder.boolean(block["is_error"]).map { !$0 }
+                            ?? ToolActionDecoder.boolean(envelope?["success"])
+                        records.append(event(.toolResult, Self.bounded(body, bytes: ToolOutputCapture.searchableBytes),
                                              index: index, metadata: Self.toolMetadata(block["tool_use_id"],
-                                                 isError: (block["is_error"] as? Bool) == true)))
-                    case "thinking", "redacted_thinking":
-                        break
+                                                 isError: (block["is_error"] as? Bool) == true),
+                                             toolOutput: .init(format: .claude(block: index), text: body, complete: !frame.isTruncated),
+                                             toolAction: ToolActionDecoder.completion(durationMS: envelope?["durationMs"], success: success)))
+                    case "thinking":
+                        // Do not split a credential at a byte limit. Only keep
+                        // complete readable blocks, separately from replies.
+                        if includeThinking, !isUser, let text = block["thinking"] as? String,
+                           text.utf8.count <= EventKind.maximumThinkingBytes,
+                           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            records.append(event(.thinking, text, index: index))
+                        }
+                    case "redacted_thinking": break
                     default:
                         unknown = true
                     }
@@ -135,7 +162,7 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
             } else {
                 unknown = true
             }
-            if !frame.isTruncated, !isUser, let usage = message["usage"] as? [String: Any], let counts = Self.counts(usage),
+            if let counts = assistantCounts,
                let id = Self.id(message["id"]) ?? Self.id(row["requestId"]) ?? Self.id(row["uuid"]) {
                 records.append(.tokens(.init(session: owner, timestamp: time ?? 0,
                                              model: Self.metadata(message["model"], maximum: 256),
@@ -232,6 +259,16 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         return .init(inputFresh: input, cacheRead: read, cacheWrite: aggregate, output: output)
     }
 
+    private static func contextInput(_ counts: TokenCounts) -> Int64? {
+        var input: Int64 = 0
+        for part in [counts.inputFresh, counts.cacheRead, counts.cacheWrite, counts.cacheWrite1h] {
+            let next = input.addingReportingOverflow(part)
+            if next.overflow { return nil }
+            input = next.partialValue
+        }
+        return input
+    }
+
     private static func count(_ raw: Any?) -> Int64? {
         guard raw != nil else { return 0 }
         guard let value = integer(raw), value >= 0 else { return nil }
@@ -250,9 +287,12 @@ public struct ClaudeCodeDecoder: AgentFileDecoder {
         }.joined(separator: "\n")
     }
 
-    private static func messageMetadata(_ raw: Any?) -> String? {
-        guard let id = Self.id(raw),
-              let data = try? JSONSerialization.data(withJSONObject: ["claude_message_id": id]) else { return nil }
+    private static func messageMetadata(_ message: [String: Any]) -> String? {
+        var fields: [String: String] = [:]
+        if let id = Self.id(message["id"]) { fields["claude_message_id"] = id }
+        if message["stop_reason"] as? String == "end_turn" { fields["signal"] = "assistant.turn_end" }
+        guard !fields.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 

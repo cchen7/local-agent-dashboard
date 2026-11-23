@@ -4,10 +4,8 @@ import Foundation
 /// Project a large JSONL record without rebuilding it. Keep only the envelope,
 /// tool result identities, and one 2 KiB preview per retained result.
 enum ClaudeOversizedJSON {
-    private static let previewLimit = 2048
-    private static let rawPreviewLimit = 16 * 1024 // Enough even for JSON-escaped ASCII.
 
-    static func row(from frame: JSONLFrame) throws -> [String: Any]? {
+    static func row(from frame: JSONLFrame, textLimit: Int = 2048, onlyBlock: Int? = nil) throws -> [String: Any]? {
         guard let overflow = frame.readOverflow else { return nil }
         var input = JSONInput(prefix: frame.bytes, overflow: overflow)
         var row: [String: Any] = [:]
@@ -15,7 +13,7 @@ enum ClaudeOversizedJSON {
             try input.object(at: 0) { input, key in
                 switch key {
                 case "message":
-                    row["message"] = try message(&input)
+                    row["message"] = try message(&input, textLimit: textLimit, onlyBlock: onlyBlock)
                 case "timestamp":
                     row["timestamp"] = try input.scalar(at: 1)
                 case "cwd":
@@ -35,7 +33,7 @@ enum ClaudeOversizedJSON {
         }
     }
 
-    private static func message(_ input: inout JSONInput) throws -> [String: Any]? {
+    private static func message(_ input: inout JSONInput, textLimit: Int, onlyBlock: Int?) throws -> [String: Any]? {
         guard try input.has(0x7B) else { try input.skip(at: 1); return nil }
         var message: [String: Any] = [:]
         try input.object(at: 1) { input, key in
@@ -51,8 +49,10 @@ enum ClaudeOversizedJSON {
                 var blocks: [[String: Any]] = []
                 try input.array(at: 2) { input, index in
                     // Preserve block positions for the ordinary decoder's dedupe keys.
-                    if index < 240 { blocks.append(try toolResult(&input)) }
-                    else { try input.skip(at: 3) }
+                    if index < 240 {
+                        if onlyBlock == nil || onlyBlock == index { blocks.append(try toolResult(&input, textLimit: textLimit)) }
+                        else { try input.skip(at: 3); blocks.append([:]) }
+                    } else { try input.skip(at: 3) }
                 }
                 message["content"] = blocks
             default:
@@ -62,7 +62,7 @@ enum ClaudeOversizedJSON {
         return message
     }
 
-    private static func toolResult(_ input: inout JSONInput) throws -> [String: Any] {
+    private static func toolResult(_ input: inout JSONInput, textLimit: Int) throws -> [String: Any] {
         guard try input.has(0x7B) else { try input.skip(at: 3); return [:] }
         var type: String?
         var fields: [String: Any] = [:]
@@ -71,7 +71,7 @@ enum ClaudeOversizedJSON {
             case "type": type = try input.stringValue(at: 4, limit: 96)
             case "tool_use_id": fields["tool_use_id"] = try input.stringValue(at: 4, limit: 6 * 256)
             case "is_error": fields["is_error"] = try input.scalar(at: 4) as? Bool
-            case "content": fields["content"] = try toolText(&input)
+            case "content": fields["content"] = try toolText(&input, textLimit: textLimit)
             default: try input.skip(at: 4)
             }
         }
@@ -80,8 +80,9 @@ enum ClaudeOversizedJSON {
         return fields
     }
 
-    private static func toolText(_ input: inout JSONInput) throws -> String {
-        var preview = Preview()
+    private static func toolText(_ input: inout JSONInput, textLimit: Int) throws -> String {
+        let rawPreviewLimit = 6 * textLimit + 12
+        var preview = Preview(limit: textLimit)
         if try input.has(0x22) {
             if let text = try input.string(limit: rawPreviewLimit, allowPrefix: true) { preview.append(text) }
         } else if try input.has(0x5B) {
@@ -106,6 +107,7 @@ enum ClaudeOversizedJSON {
     }
 
     private struct Preview {
+        let limit: Int
         var bytes = Data()
         var full = false
         private var hasBlock = false
@@ -113,7 +115,7 @@ enum ClaudeOversizedJSON {
         mutating func append(_ text: String) {
             if hasBlock { bytes.append(0x0A) }
             hasBlock = true
-            let available = ClaudeOversizedJSON.previewLimit - bytes.count
+            let available = limit - bytes.count
             let prefix = text.utf8.prefix(available)
             if let valid = (0...min(3, prefix.count)).lazy.compactMap({
                 String(bytes: prefix.dropLast($0), encoding: .utf8)
@@ -121,7 +123,7 @@ enum ClaudeOversizedJSON {
                 bytes.append(contentsOf: valid.utf8)
             }
             // If the next scalar straddled the limit, avoid substituting any later text.
-            full = text.utf8.count > available || bytes.count == ClaudeOversizedJSON.previewLimit
+            full = text.utf8.count > available || bytes.count == limit
         }
     }
 }

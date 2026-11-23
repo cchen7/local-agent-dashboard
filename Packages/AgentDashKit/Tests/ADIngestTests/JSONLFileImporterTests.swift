@@ -261,3 +261,79 @@ private struct ImportFixture {
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
+
+@Test("SEC-8 / ADP-2: unsafe durable decoder state is discarded and replay preserves totals across batches")
+func unsafeCheckpointReplayKeepsEventAndTokenIdentity() throws {
+    let fixture = try ImportFixture()
+    defer { fixture.remove() }
+    _ = try fixture.store.setIndexSecretRedactionEnabled(true)
+    let body = Data(repeating: 0x0A, count: 510)
+    try body.write(to: fixture.input)
+    let state = Data(#"{"key":{"agent":"codex","nativeID":"synthetic-import"},"API_TOKEN":"synthetic-state-only"}"#.utf8)
+    let stamp: Int64 = 1_770_000_000_000
+    func run(_ store: AgentStore) throws -> JSONLImportResult {
+        try JSONLFileImporter.importFile(fixture.file, authorizedRoot: fixture.root, store: store) { line, context in
+            if line.sequence > 0 { #expect(context.state == state) }
+            else { #expect(context.state == nil) }
+            return .init(records: [
+                .session(fixture.session(context.fileID)),
+                .event(.init(session: fixture.key, sequence: line.sequence, timestamp: stamp, kind: .user,
+                             text: "API_TOKEN=synthetic-event-only", dedupeKey: "synthetic:line:\(line.sequence)")),
+                .tokens(.init(session: fixture.key, timestamp: stamp, model: "synthetic-model", counts: .init(output: 2),
+                              dedupeKey: "synthetic:usage:\(line.sequence)")),
+            ], timestamp: stamp, state: state)
+        }
+    }
+    let first = try run(fixture.store)
+    #expect(first.completeLines == 510 && first.checkpoint.decoderState == nil && first.checkpoint.parserVersion == 0)
+    #expect(try fixture.store.checkpoint(for: first.fileID) == first.checkpoint)
+    try fixture.append(Data([0x0A]))
+    let reopened = try AgentStore(databaseURL: fixture.index)
+    let replay = try run(reopened)
+    #expect(replay.bytesRead == 511 && replay.completeLines == 511)
+    #expect(try reopened.events(in: fixture.key).count == 511)
+    #expect(try reopened.events(in: fixture.key).allSatisfy { $0.text == "API_TOKEN=••••••" })
+    let window = try UsageWindow.make(.hour, now: stamp + 60_000, timeZone: .gmt)
+    #expect(try reopened.usage(window: window).totals.counts.total == 1022)
+    #expect(try Data(contentsOf: fixture.input) == body + Data([0x0A]))
+}
+
+@Test("SEC-7: late workspace evidence releases the retained prefix without duplicating usage", arguments: [true, false])
+func lateWorkspaceEvidenceReplaysOnlyWhenAdmitted(allowed: Bool) throws {
+    let fixture = try ImportFixture()
+    defer { fixture.remove() }
+    _ = try fixture.store.replaceSessionExclusions(["/work/private/**"], hostHome: nil)
+    let prefix = Data(repeating: 0x0A, count: 510)
+    try prefix.write(to: fixture.input)
+    let stamp: Int64 = 1_770_000_000_000
+    func ingest() throws -> JSONLImportResult {
+        try JSONLFileImporter.importFile(fixture.file, authorizedRoot: fixture.root, store: fixture.store) { line, context in
+            var session = fixture.session(context.fileID)
+            if line.sequence == 510 { session.cwd = allowed ? "/work/allowed" : "/work/private/secret" }
+            return .init(records: [
+                .session(session),
+                .event(.init(session: fixture.key, sequence: line.sequence, timestamp: stamp, kind: .assistant,
+                             text: "synthetic content", dedupeKey: "synthetic:workspace:event:\(line.sequence)")),
+                .tokens(.init(session: fixture.key, timestamp: stamp, counts: .init(output: 2),
+                              dedupeKey: "synthetic:workspace:usage:\(line.sequence)")),
+            ], timestamp: stamp, state: Data("{}".utf8))
+        }
+    }
+    let initial = try ingest()
+    #expect(initial.completeLines == 510 && initial.checkpoint.decoderState == nil)
+    #expect(try fixture.store.events(in: fixture.key).isEmpty)
+    try fixture.append(Data([0x0A]))
+    _ = try ingest()
+    let window = try UsageWindow.make(.hour, now: stamp + 60_000, timeZone: .gmt)
+    #expect(try fixture.store.events(in: fixture.key).count == (allowed ? 511 : 0))
+    #expect(try fixture.store.usage(window: window).totals.counts.total == (allowed ? 1022 : 0))
+    #expect(try Data(contentsOf: fixture.input) == prefix + Data([0x0A]))
+    _ = try ingest()
+    #expect(try fixture.store.usage(window: window).totals.counts.total == (allowed ? 1022 : 0))
+    if !allowed {
+        _ = try fixture.store.replaceSessionExclusions(["/work/different/**"], hostHome: nil)
+        _ = try ingest()
+        #expect(try fixture.store.events(in: fixture.key).count == 511)
+        #expect(try fixture.store.usage(window: window).totals.counts.total == 1022)
+    }
+}

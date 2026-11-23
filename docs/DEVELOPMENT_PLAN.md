@@ -70,6 +70,29 @@ wave from the accepted `main` after its contracts and prerequisites are availabl
 - Prefer squash merge for a scoped task PR after approval. Keep worktrees and
   branches while there is uncommitted work; do not force-push or delete them as cleanup.
 
+For any new or changed search field, editable form, shortcut or UI test, map the
+change to the [fixed input QA matrix](reports/FIXED-INPUT-QA.md) during review.
+Include the Dashboard and menu bar search fields, saved searches, source rules,
+thresholds, privacy rules, and any new settings input. Report actual Apple Pinyin
+and ABC results separately from prefilled functional tests; an unverified input
+case remains open for release.
+
+## Remaining development and acceptance review
+
+Use the exact integrated candidate for release checks. A feature passing on a
+previous branch is useful evidence but does not close the combined release gate.
+
+| Goal | Remaining acceptance and development work |
+|---|---|
+| G1 · discovery and ingest | Verify installed-source access, onboarding, permission recovery, re-scan, watcher latency and exact counts on the combined app. Grok capture and adapter support stay deferred until a real source is available (DEV-008). Source settings and path/environment rules follow the form tests in the input matrix. |
+| G2–G4 · search, sessions and projects | Verify the combined flow through search, filters, saved groups, grouping, transcript/tool navigation, archived search, Overview and Projects. Keep real Pinyin input and ABC shortcuts as separate acceptance cases. |
+| G5–G7 · usage, menu bar and cost | Verify period, metric and filters, exact cost spot checks, pricing fallback and re-quote, and native menu panel search and actions. Include General’s clock and optional menu readout in release checks. Treat any local approval notification according to §11.5; apply the input matrix to new fields and shortcuts. |
+| M5 · release | Verify archive and rebuild integrity, exclusion and retention behavior, both appearances and both UI languages, all §13 budgets, and the §15.5 checklist on the combined candidate. Track Developer ID signing and notarization separately from the local ad-hoc test build. |
+
+Include search-filter token edits next to a Chinese composition in the
+Apple Pinyin release checks, plus removal and focus shortcuts under ABC.
+Grok fork display still needs real format evidence.
+
 ## Known gates and questions
 
 | Item | Current disposition |

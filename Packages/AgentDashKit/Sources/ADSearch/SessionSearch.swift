@@ -20,23 +20,41 @@ public struct SessionSearchResults: Equatable, Sendable {
     public let hits: [SessionSearchHit]
     public let matchCount: Int
     public let sessionCount: Int
+
+    /// Select part of an already ranked result without changing its exact totals.
+    public func page(offset: Int, limit: Int) -> Self {
+        .init(hits: Array(hits.dropFirst(max(0, offset)).prefix(max(0, limit))),
+              matchCount: matchCount, sessionCount: sessionCount)
+    }
 }
 
 public enum SessionSearch {
     /// Search the raw index; mask complete display text before cutting or highlighting it.
     public static func run(_ raw: String, in store: AgentStore, scope: IndexedSearchScope,
-                           limit: Int = 50, offset: Int = 0) throws -> SessionSearchResults {
+                           order: SessionSearchOrder = .relevance, limit: Int = 50, offset: Int = 0,
+                           maskSecrets: Bool = true) throws -> SessionSearchResults {
         let query = try SearchQuery.parse(raw)
-        let snapshot = try store.searchIndex(query, scope: scope, limit: limit, offset: offset)
+        let snapshot = try store.searchIndex(query, scope: scope, order: order, limit: limit, offset: offset)
         let terms = query.groups.flatMap(\.positive).map(\.text)
+        var previous: (body: String, tool: String, parts: [SearchSnippetPart])?
         let hits = try snapshot.groups.map { group in
             try Task.checkCancellation()
-            let body = SecretMasker.mask(group.bestText ?? "")
-            let tool = SecretMasker.mask(group.bestTool ?? "")
-            let text = containsAny(body, terms: terms) || tool.isEmpty ? body :
-                ([tool, body].filter { !$0.isEmpty }.joined(separator: " · "))
+            let rawBody = group.bestText ?? ""
+            let rawTool = group.bestTool ?? ""
+            let parts: [SearchSnippetPart]
+            if let previous, previous.body.utf8.elementsEqual(rawBody.utf8),
+               previous.tool.utf8.elementsEqual(rawTool.utf8) {
+                parts = previous.parts
+            } else {
+                let body = maskSecrets ? SecretMasker.mask(rawBody) : rawBody
+                let tool = maskSecrets ? SecretMasker.mask(rawTool) : rawTool
+                let text = containsAny(body, terms: terms) || tool.isEmpty ? body :
+                    ([tool, body].filter { !$0.isEmpty }.joined(separator: " · "))
+                parts = snippet(text, terms: terms)
+                previous = (rawBody, rawTool, parts)
+            }
             return SessionSearchHit(id: group.session, firstMatchKey: group.firstMatchKey,
-                                    matchCount: group.matchCount, snippet: snippet(text, terms: terms))
+                                    matchCount: group.matchCount, snippet: parts)
         }
         return .init(hits: hits, matchCount: snapshot.matchCount, sessionCount: snapshot.sessionCount)
     }

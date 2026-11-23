@@ -1,11 +1,15 @@
 import Foundation
 import GRDB
 import ADCore
+import Synchronization
 
 /// Store errors deliberately omit paths, record contents, and bookmark bytes.
 public enum StoreError: Error, Equatable, Sendable {
+    case exclusionPolicyChanged
     case invalidLocation, invalidRelativePath, invalidCheckpoint, invalidTokenCounts, invalidCustomSource
-    case missingSession, missingFile, invalidStoredValue, missingMigration, staleCheckpoint
+    case missingSession, missingFile, missingSource, invalidStoredValue, missingMigration, staleCheckpoint
+    case invalidTranscriptChannel, invalidRateLimit
+    case pricingSuperseded, invalidUsageRedline
 }
 
 /// A duplicate choice leaves the existing source and all of its children intact.
@@ -24,13 +28,18 @@ public enum SourceAccessRenewal: Equatable, Sendable {
 /// All SQL and GRDB types stay inside ADStore; synchronous calls belong off the UI actor.
 public final class AgentStore: Sendable {
     let databasePool: DatabasePool
+    let tokenQuoter = Mutex<ActiveTokenQuoter?>(nil)
+    let usageChartIdentity = UUID()
 
     /// Open an app-owned database, register the tokenizer on every connection, then migrate.
     public init(databaseURL: URL) throws {
         guard databaseURL.isFileURL else { throw StoreError.invalidLocation }
         var config = Configuration()
         config.foreignKeysEnabled = true
-        config.prepareDatabase { db in db.add(tokenizer: AgentDashTokenizer.self) }
+        config.prepareDatabase { db in
+            db.add(tokenizer: AgentDashTokenizer.self)
+            db.add(function: SessionTitleRules.meaningfulPrompt)
+        }
         databasePool = try DatabasePool(path: databaseURL.path, configuration: config)
         guard let url = Bundle.module.url(forResource: "v1", withExtension: "sql") else {
             throw StoreError.missingMigration
@@ -51,6 +60,22 @@ public final class AgentStore: Sendable {
                 WHERE parent_native_id IS NOT NULL;
                 """)
         }
+        migrator.registerMigration("v4_codex_index") { db in
+            try db.execute(sql: """
+                ALTER TABLE sessions ADD COLUMN model_provider TEXT;
+                ALTER TABLE events ADD COLUMN transcript_channel TEXT
+                    CHECK (transcript_channel IN ('preferred','fallback'));
+                CREATE INDEX events_transcript_channel ON events(session_id, transcript_channel)
+                    WHERE transcript_channel IS NOT NULL;
+                """)
+        }
+        for name in ["v9_token_minutes", "v10_usage_readouts", "v11_token_quotes",
+                     "v12_cache_savings", "v13_usage_chart_changes", "status_inference", "copilot_accounting"] {
+            guard let resource = Bundle.module.url(forResource: name, withExtension: "sql")
+            else { throw StoreError.missingMigration }
+            let migrationSQL = try String(contentsOf: resource, encoding: .utf8)
+            migrator.registerMigration(name) { db in try db.execute(sql: migrationSQL) }
+        }
         migrator.registerMigration("source_root_identity") { db in
             try db.execute(sql: """
                 CREATE TABLE source_root_identities (
@@ -67,6 +92,143 @@ public final class AgentStore: Sendable {
                 END;
                 """)
         }
+        migrator.registerMigration("context_measurement_model") { db in
+            try db.execute(sql: "ALTER TABLE sessions ADD COLUMN context_model TEXT")
+        }
+        migrator.registerMigration("source_removal") { db in
+            try db.execute(sql: "ALTER TABLE sources ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+        }
+        migrator.registerMigration("saved_search_sidebar_filter") { db in
+            try db.execute(sql: """
+                ALTER TABLE saved_searches ADD COLUMN sidebar_field TEXT;
+                ALTER TABLE saved_searches ADD COLUMN sidebar_value TEXT;
+                """)
+        }
+        guard let exclusions = Bundle.module.url(forResource: "session_exclusions", withExtension: "sql")
+        else { throw StoreError.missingMigration }
+        let exclusionSQL = try String(contentsOf: exclusions, encoding: .utf8)
+        migrator.registerMigration("session_exclusions") { db in try db.execute(sql: exclusionSQL) }
+        guard let retention = Bundle.module.url(forResource: "archive_retention", withExtension: "sql")
+        else { throw StoreError.missingMigration }
+        let retentionSQL = try String(contentsOf: retention, encoding: .utf8)
+        migrator.registerMigration("archive_retention") { db in try db.execute(sql: retentionSQL) }
+        migrator.registerMigration("tool_output_archive") { db in
+            try db.execute(sql: """
+                ALTER TABLE events ADD COLUMN tool_output_origin TEXT;
+                CREATE INDEX events_blob_vacuum ON events(blob_id) WHERE blob_id IS NOT NULL;
+                CREATE TRIGGER events_release_replaced_blob AFTER UPDATE OF blob_id ON events
+                WHEN OLD.blob_id IS NOT NULL AND OLD.blob_id IS NOT NEW.blob_id BEGIN
+                    DELETE FROM blobs WHERE id=OLD.blob_id AND NOT EXISTS(SELECT 1 FROM events WHERE blob_id=OLD.blob_id);
+                END;
+                CREATE TRIGGER events_release_deleted_blob AFTER DELETE ON events WHEN OLD.blob_id IS NOT NULL BEGIN
+                    DELETE FROM blobs WHERE id=OLD.blob_id AND NOT EXISTS(SELECT 1 FROM events WHERE blob_id=OLD.blob_id);
+                END;
+                """)
+        }
+        migrator.registerMigration("session_record_identity") { db in
+            try db.execute(sql: """
+                ALTER TABLE sessions ADD COLUMN record_device INTEGER;
+                ALTER TABLE sessions ADD COLUMN record_inode INTEGER;
+                ALTER TABLE source_files ADD COLUMN confirm_session_identity INTEGER NOT NULL DEFAULT 0;
+                UPDATE source_files SET confirm_session_identity=1
+                WHERE state<>'gone' AND role IN ('session','subagent') AND id IN (
+                    SELECT file_id FROM sessions WHERE file_id IS NOT NULL AND source_deleted_at IS NULL
+                );
+                """)
+        }
+        migrator.registerMigration("running_session_activity") { db in
+            try db.execute(sql: """
+                ALTER TABLE sessions ADD COLUMN activity_action TEXT;
+                ALTER TABLE sessions ADD COLUMN activity_call_event_id INTEGER;
+                ALTER TABLE sessions ADD COLUMN activity_started_at INTEGER;
+                ALTER TABLE sessions ADD COLUMN activity_last_event_at INTEGER;
+                UPDATE sessions SET status_dirty=1,status_revision=status_revision+1 WHERE status='running';
+                """)
+        }
+        migrator.registerMigration("transcript_tool_pairs") { db in
+            // Reuse normalized metadata. The virtual key does not duplicate
+            // stored command/result text or require replaying source files.
+            try db.execute(sql: """
+                ALTER TABLE events ADD COLUMN transcript_tool_id TEXT GENERATED ALWAYS AS (
+                    CASE WHEN kind IN ('tool_call','tool_result')
+                        AND length(CAST(meta_json AS BLOB))<=16384 AND json_valid(meta_json)
+                    THEN CASE
+                        WHEN json_type(meta_json,'$.child_activity') IS 'true' THEN NULL
+                        WHEN json_type(meta_json,'$.call_id') NOT IN ('text','null') THEN NULL
+                        WHEN json_type(meta_json,'$.tool_use_id') NOT IN ('text','null') THEN NULL
+                        WHEN json_type(meta_json,'$.call_id')='text' AND json_type(meta_json,'$.tool_use_id')='text'
+                            AND (meta_json ->> '$.call_id') IS NOT (meta_json ->> '$.tool_use_id') THEN NULL
+                        WHEN length(CAST(coalesce(meta_json ->> '$.call_id',meta_json ->> '$.tool_use_id') AS BLOB)) BETWEEN 1 AND 512
+                            AND instr(coalesce(meta_json ->> '$.call_id',meta_json ->> '$.tool_use_id'),char(0))=0
+                        THEN coalesce(meta_json ->> '$.call_id',meta_json ->> '$.tool_use_id')
+                    END END
+                ) VIRTUAL;
+                CREATE INDEX events_transcript_tool_pair ON events(session_id,transcript_tool_id,kind,seq,id)
+                    WHERE transcript_tool_id IS NOT NULL;
+                """)
+        }
+        migrator.registerMigration("original_tool_input") { db in
+            try db.execute(sql: "ALTER TABLE events ADD COLUMN tool_input_origin TEXT")
+        }
+        migrator.registerMigration("structured_tool_actions") { db in
+            guard let file = Bundle.module.url(forResource: "structured_tool_actions", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: file, encoding: .utf8))
+        }
+        migrator.registerMigration("project_usage_scope_edges") { db in
+            try db.execute(sql: "CREATE INDEX retained_archive_usage_scope_time ON retained_archive_usage(scope_id,ts)")
+        }
+        migrator.registerMigration("project_pin_preferences") { db in
+            try ProjectPinPreferences.migrate(db)
+        }
+        migrator.registerMigration("live_topic_index") { db in
+            guard let resource = Bundle.module.url(forResource: "live_topics", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
+        migrator.registerMigration("session_usage_rollup") { db in
+            guard let resource = Bundle.module.url(forResource: "session_usage_rollup", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
+        migrator.registerMigration("inherited_transcript") { db in
+            guard let resource = Bundle.module.url(forResource: "inherited_transcript", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
+        migrator.registerMigration("session_titles") { db in
+            guard let resource = Bundle.module.url(forResource: "session_titles", withExtension: "sql") else {
+                throw StoreError.missingMigration
+            }
+            try db.execute(sql: String(contentsOf: resource, encoding: .utf8))
+        }
+        migrator.registerMigration("usage_cost_peak_index") { db in
+            try db.execute(sql: """
+                CREATE INDEX token_usage_scope_peak_cost ON token_usage_scope(agent,cost_micro_usd DESC,bucket)
+                WHERE grain=1 AND precision='call' AND volume>unpriced_tokens
+                """)
+        }
+        migrator.registerMigration("exclusion_source_identity") { db in
+            try db.execute(sql: """
+                ALTER TABLE session_exclusion_keys ADD COLUMN source_id INTEGER;
+                """)
+        }
+        migrator.registerMigration("reapply_mapped_workspace_exclusions", foreignKeyChecks: .immediate) { db in
+            // Older versions could miss saved exclusions when a recorded
+            // workspace needed normalization before applying its mapping.
+            // Use the ordinary foreign-key cascades for these row deletions.
+            let policy = try SessionExclusionPolicy.read(db)
+            guard !policy.patterns.isEmpty else { return }
+            var gate = try SessionExclusionGate(policy: policy)
+            try gate.removeExistingMatches(db: db)
+            try gate.removeRetainedMatches(db: db)
+            try gate.finishRemovals(db: db)
+            try UsageChartChanges.publish(db)
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -77,6 +239,22 @@ public final class AgentStore: Sendable {
             throw StoreError.invalidStoredValue
         }
         return id
+    }
+
+    /// First-run discovery must not reactivate a previously removed source.
+    public func installDefaultSources(_ defaults: [Source]) throws {
+        guard defaults.allSatisfy({ $0.access == .defaultLocation && Source.isLocalRoot($0.rootURL) }) else {
+            throw StoreError.invalidLocation
+        }
+        try databasePool.write { db in
+            for source in defaults {
+                try db.execute(sql: """
+                    INSERT INTO sources(agent,label,root_path,environment,access_kind,enabled)
+                    VALUES(?,?,?,?,'default_location',?) ON CONFLICT(agent,root_path) DO NOTHING
+                    """, arguments: [source.agent.rawValue, source.label, source.rootURL.standardizedFileURL.path,
+                                      source.environment, source.enabled])
+            }
+        }
     }
 
     /// Register a selected local root. The caller supplies its observed identity
@@ -151,14 +329,18 @@ public final class AgentStore: Sendable {
         let conflict = registration == nil ? """
             DO UPDATE SET label=excluded.label, environment=excluded.environment, path_mappings_json=excluded.path_mappings_json,
             env_rules_json=excluded.env_rules_json, access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=excluded.enabled
-            """ : "DO NOTHING"
+            WHERE sources.removed=0
+            """ : """
+            DO UPDATE SET access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=1, removed=0
+            WHERE sources.removed=1
+            """
         return try databasePool.write { db in
             if let registration {
                 let identity = registration.identity
                 if let id = try Int64.fetchOne(db, sql: """
                     SELECT s.id FROM source_root_identities r JOIN sources s ON s.id=r.source_id
                     WHERE s.agent=? AND r.volume=? AND r.inode=? AND r.birth_seconds=? AND r.birth_nanoseconds=?
-                    ORDER BY s.id LIMIT 1
+                    AND s.removed=0 ORDER BY s.id LIMIT 1
                     """, arguments: [source.agent.rawValue, identity.volume.uuidString, identity.inode,
                                       identity.birthSeconds, identity.birthNanoseconds]) { return .alreadyRegistered(id) }
                 if let existing = registration.existing {
@@ -206,7 +388,7 @@ public final class AgentStore: Sendable {
         case .bookmark(let data): (kind, bookmark) = ("bookmark", data)
         }
         let valid = try Bool.fetchOne(db, sql: """
-            SELECT EXISTS(SELECT 1 FROM sources WHERE id=? AND agent=? AND root_path=? AND access_kind=? AND bookmark IS ?)
+            SELECT EXISTS(SELECT 1 FROM sources WHERE id=? AND agent=? AND root_path=? AND removed=0 AND access_kind=? AND bookmark IS ?)
             """, arguments: [id, agent.rawValue, source.rootURL.standardizedFileURL.path, kind, bookmark])
         guard valid == true else { throw StoreError.invalidCustomSource }
         return id
@@ -215,26 +397,43 @@ public final class AgentStore: Sendable {
     /// Load source settings/bookmarks. This does not resolve or access the source directories.
     public func sources() throws -> [Source] {
         try databasePool.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM sources ORDER BY id").map { row in
-                guard let agent = AgentKind(rawValue: row["agent"]) else { throw StoreError.invalidStoredValue }
-                let kind: String = row["access_kind"]
-                let access: AccessKind
-                switch kind {
-                case "default_location": access = .defaultLocation
-                case "bookmark":
-                    guard let data: Data = row["bookmark"] else { throw StoreError.invalidStoredValue }
-                    access = .bookmark(data)
-                default: throw StoreError.invalidStoredValue
-                }
-                let mappings: String = row["path_mappings_json"]
-                let rules: String = row["env_rules_json"]
-                return Source(id: row["id"], agent: agent, label: row["label"],
-                              rootURL: URL(fileURLWithPath: row["root_path"]), environment: row["environment"],
-                              pathMappings: try JSONDecoder().decode([PathMapping].self, from: Data(mappings.utf8)),
-                              environmentRules: try JSONDecoder().decode([EnvironmentRule].self, from: Data(rules.utf8)),
-                              access: access, enabled: row["enabled"])
-            }
+            try Row.fetchAll(db, sql: "SELECT * FROM sources WHERE removed=0 ORDER BY id").map(Self.decodeSource)
         }
+    }
+
+    /// Fetch identity only if the stored registration still matches this
+    /// permission snapshot. No bookmark resolution or source reads here.
+    public func registeredRootIdentity(for source: Source) throws -> SourceRootIdentity? {
+        try databasePool.read { db in
+            let id = try Self.validateObservedSource(source, for: source.agent, db: db)
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT volume,inode,birth_seconds,birth_nanoseconds
+                FROM source_root_identities WHERE source_id=?
+                """, arguments: [id]) else { return nil }
+            guard let volume = UUID(uuidString: row["volume"]) else { throw StoreError.invalidStoredValue }
+            return .init(volume: volume, inode: row["inode"], birthSeconds: row["birth_seconds"],
+                         birthNanoseconds: row["birth_nanoseconds"])
+        }
+    }
+
+    static func decodeSource(_ row: Row) throws -> Source {
+        guard let agent = AgentKind(rawValue: row["agent"]) else { throw StoreError.invalidStoredValue }
+        let kind: String = row["access_kind"]
+        let access: AccessKind
+        switch kind {
+        case "default_location": access = .defaultLocation
+        case "bookmark":
+            guard let data: Data = row["bookmark"] else { throw StoreError.invalidStoredValue }
+            access = .bookmark(data)
+        default: throw StoreError.invalidStoredValue
+        }
+        let mappings: String = row["path_mappings_json"]
+        let rules: String = row["env_rules_json"]
+        return Source(id: row["id"], agent: agent, label: row["label"],
+                      rootURL: URL(fileURLWithPath: row["root_path"]), environment: row["environment"],
+                      pathMappings: try JSONDecoder().decode([PathMapping].self, from: Data(mappings.utf8)),
+                      environmentRules: try JSONDecoder().decode([EnvironmentRule].self, from: Data(rules.utf8)),
+                      access: access, enabled: row["enabled"])
     }
 
     /// Register a relative file without opening it. A nil checkpoint preserves prior
@@ -244,6 +443,8 @@ public final class AgentStore: Sendable {
         guard !file.relativePath.isEmpty, !file.relativePath.hasPrefix("/"),
               !file.relativePath.split(separator: "/").contains("..") else { throw StoreError.invalidRelativePath }
         return try databasePool.write { db in
+            guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM sources WHERE id=? AND removed=0)",
+                                    arguments: [file.sourceID]) == true else { throw StoreError.missingSource }
             try db.execute(sql: """
                 INSERT INTO source_files(source_id,rel_path,role,parser_version,state) VALUES(?,?,?,?,'ok')
                 ON CONFLICT(source_id,rel_path) DO UPDATE SET role=excluded.role
@@ -262,46 +463,170 @@ public final class AgentStore: Sendable {
 
     /// Atomically persist ordered records and optional file progress. Dedupe-key conflicts
     /// update the same row within a session; copied history keeps its original owner.
-    /// This M0 primitive does not yet calculate rollups or insights.
+    /// Usage and its estimated prices update atomically with the normalized rows.
     public func write(_ records: [NormalizedRecord], fileID: Int64? = nil, checkpoint: Checkpoint? = nil) throws {
         try databasePool.write { db in
-            try Self.save(records, db: db)
+            let policy = try SessionExclusionPolicy.read(db)
+            let screened = try saveScreened(records, fileID: fileID, checkpoint: checkpoint, policy: policy, db: db)
             if let checkpoint {
                 guard let fileID else { throw StoreError.missingFile }
-                try Self.save(checkpoint, fileID: fileID, db: db)
+                try Self.save(checkpoint, fileID: fileID, db: db,
+                              replayWithoutDecoderState: screened.withheldInFile || screened.needsWorkspaceReplay)
             }
+            try UsageChartChanges.publish(db)
         }
     }
 
     /// Commit parsed records only if the read position is still the expected
     /// one. This check is in the writer transaction to reject concurrent scans.
+    @discardableResult
     public func commitFileBatch(_ records: [NormalizedRecord], for fileID: Int64,
-                                from expected: Checkpoint?, to next: Checkpoint) throws {
+                                from expected: Checkpoint?, to next: Checkpoint,
+                                exclusionRevision: Int64? = nil,
+                                startsAtBeginning: Bool = false) throws -> FileBatchCommit {
         try databasePool.write { db in
+            guard try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM source_files f JOIN sources s ON s.id=f.source_id
+                              WHERE f.id=? AND s.removed=0)
+                """, arguments: [fileID]) == true else { throw StoreError.missingSource }
             guard try Self.readCheckpoint(fileID, db: db) == expected else {
                 throw StoreError.staleCheckpoint
             }
-            try Self.save(records, db: db)
-            try Self.save(next, fileID: fileID, db: db)
+            let policy = try SessionExclusionPolicy.read(db)
+            if let exclusionRevision, exclusionRevision != policy.revision { throw StoreError.exclusionPolicyChanged }
+            if startsAtBeginning {
+                try db.cachedStatement(sql: "DELETE FROM inherited_transcript_items WHERE file_id=?")
+                    .execute(arguments: [fileID])
+            }
+            let screened = try saveScreened(records, fileID: fileID, checkpoint: next, policy: policy, db: db)
+            let persisted = try Self.save(next, fileID: fileID, db: db,
+                                          replayWithoutDecoderState: screened.withheldInFile || screened.needsWorkspaceReplay)
+            try UsageChartChanges.publish(db)
+            return .init(checkpoint: persisted, needsWorkspaceReplay: screened.needsWorkspaceReplay)
         }
     }
 
-    private static func readCheckpoint(_ fileID: Int64, db: Database) throws -> Checkpoint? {
+    /// Forget the stored authorization while retaining the library and future
+    /// same-path re-registration identity. Never operate on a source URL.
+    public func removeRegisteredSource(_ id: Int64) throws {
+        try databasePool.write { db in
+            try db.execute(sql: """
+                UPDATE sources SET removed=1,enabled=0,access_kind='default_location',bookmark=NULL
+                WHERE id=? AND removed=0
+                """, arguments: [id])
+            guard db.changesCount == 1 else { throw StoreError.missingSource }
+        }
+    }
+
+    static func readCheckpoint(_ fileID: Int64, db: Database) throws -> Checkpoint? {
         guard let row = try Row.fetchOne(db, sql: "SELECT * FROM source_files WHERE id=?", arguments: [fileID]),
-              let size: Int64 = row["size"] else { return nil }
-        return Checkpoint(inode: row["inode"], size: size, offset: row["read_offset"],
+              (row["size"] as Int64?) != nil else { return nil }
+        return decodeCheckpoint(row)
+    }
+
+    static func decodeCheckpoint(_ row: Row) -> Checkpoint {
+        Checkpoint(inode: row["inode"], size: row["size"], offset: row["read_offset"],
                           parserVersion: row["parser_version"], sequence: row["last_seq"],
                           previousTimestamp: row["previous_ts"], device: row["device"],
                           modificationTimeNS: row["mtime_ns"], decoderState: row["decoder_state"],
-                          unknownRecords: row["unknown_records"])
+                          unknownRecords: row["unknown_records"], sourceFileWasMissing: (row["state"] as String) == "gone")
     }
 
-    private static func save(_ records: [NormalizedRecord], db: Database) throws {
+    private func saveScreened(_ records: [NormalizedRecord], fileID: Int64?, checkpoint: Checkpoint?,
+                              policy: SessionExclusionPolicy, db: Database) throws -> SessionExclusionGate.Screened {
+        let retainedScreened = try ArchiveRetentionStore.screen(records, db: db)
+        let archiveWithheld = retainedScreened.count != records.count
+        let recordIdentity: RecordIdentity?
+        if let fileID, let device = checkpoint?.device, let inode = checkpoint?.inode {
+            recordIdentity = .init(fileID: fileID, device: device, inode: inode)
+        } else { recordIdentity = nil }
+        if policy.patterns.isEmpty {
+            try saveWithUsage(retainedScreened, fileID: fileID, recordIdentity: recordIdentity, db: db)
+            return .init(records: retainedScreened, withheldInFile: archiveWithheld, needsWorkspaceReplay: false)
+        }
+        var gate = try SessionExclusionGate(policy: policy)
+        let screened = try gate.screen(retainedScreened, fileID: fileID, db: db)
+        try saveWithUsage(screened.records, fileID: fileID, recordIdentity: recordIdentity, db: db)
+        try gate.finishRemovals(db: db)
+        return .init(records: screened.records, withheldInFile: screened.withheldInFile || archiveWithheld,
+                     needsWorkspaceReplay: screened.needsWorkspaceReplay)
+    }
+
+    private struct RecordIdentity {
+        let fileID: Int64
+        let device: Int64
+        let inode: Int64
+    }
+
+    private func saveWithUsage(_ records: [NormalizedRecord], fileID: Int64?,
+                               recordIdentity: RecordIdentity?, db: Database) throws {
+        let quote = tokenQuoter.withLock { $0?.quote }
+        var touchedUsage: Set<String> = []
+        var copilotKeys: Set<CopilotAccounting.Key> = []
+        var admittedClaudeFiles: Set<SessionKey> = []
+        let redact = try IndexSecretRedaction.enabled(db)
+        let includeThinking = try ThinkingPrivacy.enabled(db)
+        // Check the previous owner before saving any session rows from this
+        // batch. A replay must not take ownership and then remove another
+        // physical file's placeholder.
+        for case let .removeCopilotUsagePlaceholder(session, sourceFile, sequence, timestamp, dedupeKey) in records {
+            guard session.agent == .copilot, fileID == sourceFile,
+                  let identity = recordIdentity, identity.fileID == sourceFile else { continue }
+            try db.cachedStatement(sql: """
+                DELETE FROM events
+                WHERE dedupe_key=? AND seq=? AND ts=? AND kind='unknown' AND text IS NULL
+                    AND tool_name IS NULL AND meta_json='{"unrecognized":true}' AND blob_id IS NULL
+                    AND session_id IN (
+                        SELECT id FROM sessions WHERE agent='copilot' AND native_id=? AND file_id=?
+                            AND record_device=? AND record_inode=? AND source_deleted_at IS NULL
+                    )
+                """).execute(arguments: [dedupeKey, sequence, timestamp, session.nativeID, sourceFile,
+                                          identity.device, identity.inode])
+        }
         for record in records {
             switch record {
-            case .session(let session): try save(session, db: db)
-            case .event(let event): try save(event, db: db)
-            case .tokens(let event): try save(event, db: db)
+            case .session(let session):
+                let identity = recordIdentity.flatMap { $0.fileID == session.fileID ? $0 : nil }
+                try Self.save(redact ? IndexSecretRedaction.session(session) : session, recordIdentity: identity, db: db)
+                if let fileID, session.fileID == fileID, session.key.agent == .claudeCode, session.referenceOnly != true {
+                    admittedClaudeFiles.insert(session.key)
+                }
+            case .event(let event):
+                if event.kind == .thinking {
+                    guard includeThinking, event.session.agent == .claudeCode, let text = event.text,
+                          text.utf8.count <= EventKind.maximumThinkingBytes,
+                          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                }
+                let stored = redact ? IndexSecretRedaction.event(event) : event
+                try Self.save(stored, db: db)
+                if let fileID, let location = stored.inheritedLocation, admittedClaudeFiles.contains(location.child) {
+                    try Self.recordInheritedTranscript(stored, in: location, fileID: fileID, db: db)
+                }
+            case .tokens(let event):
+                try Self.save(event, db: db)
+                if db.changesCount != 0 {
+                    if quote != nil { touchedUsage.insert(event.dedupeKey) }
+                    if event.session.agent == .copilot, let order = event.sourceSequence {
+                        let sessionID = try Self.sessionID(event.session, db: db)
+                        if let model = event.model {
+                            let key = CopilotAccounting.Key(sessionID: sessionID, model: model)
+                            if try CopilotAccounting.coversCall(key, sequence: order, db: db) { copilotKeys.insert(key) }
+                        }
+                        if try event.model == nil || CopilotAccounting.hasModelLessCalls(sessionID: sessionID, db: db) {
+                            copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: sessionID, db: db))
+                        }
+                    }
+                }
+            case .copilotUsageSnapshot(let sample):
+                let sessionID = try Self.sessionID(sample.session, db: db)
+                if let key = try CopilotAccounting.record(sample, sessionID: sessionID, db: db) {
+                    copilotKeys.insert(key)
+                }
+                if try CopilotAccounting.hasModelLessCalls(sessionID: sessionID, db: db) {
+                    // Reconcile on replay too: a stored snapshot can already
+                    // exist with amounts calculated by an older parser.
+                    copilotKeys.formUnion(try CopilotAccounting.snapshotKeys(sessionID: sessionID, db: db))
+                }
             case let .removeEmptyPlaceholder(session, fileID, sequence, dedupeKey):
                 try db.cachedStatement(sql: """
                     DELETE FROM events
@@ -312,7 +637,19 @@ public final class AgentStore: Sendable {
                                 AND source_deleted_at IS NULL
                         )
                     """).execute(arguments: [dedupeKey, sequence, session.agent.rawValue, session.nativeID, fileID])
+            case .removeCopilotUsagePlaceholder: break // checked before updating the session owner
+            case .rateLimit(let sample): try Self.save(sample, db: db)
             }
+        }
+        for (sessionID, keys) in Dictionary(grouping: copilotKeys, by: \.sessionID) {
+            let covered = try CopilotAccounting.coveredCalls(sessionID: sessionID, db: db)
+            for key in keys {
+                try CopilotAccounting.reconcile(key, covered: covered[key] ?? [], touchedUsage: &touchedUsage, db: db)
+            }
+        }
+        if let quote, !touchedUsage.isEmpty {
+            var writer = try TokenQuoteStore.Writer(quote: quote, db: db)
+            try writer.apply(to: touchedUsage, db: db)
         }
     }
 
@@ -330,9 +667,10 @@ public final class AgentStore: Sendable {
 
     static func readTranscriptEvent(_ row: Row, in session: SessionKey) throws -> EventRecord {
         guard let kind = EventKind(rawValue: row["kind"]) else { throw StoreError.invalidStoredValue }
+        let channel: String? = row["transcript_channel"]
         return EventRecord(session: session, sequence: row["seq"], timestamp: row["ts"], kind: kind,
                            toolName: row["tool_name"], text: row["text"], metadataJSON: row["meta_json"],
-                           dedupeKey: row["dedupe_key"])
+                           dedupeKey: row["dedupe_key"], transcriptChannel: channel.flatMap(TranscriptChannel.init(rawValue:)))
     }
 
     private static func sessionID(_ key: SessionKey, db: Database) throws -> Int64 {
@@ -341,25 +679,41 @@ public final class AgentStore: Sendable {
         return id
     }
 
-    private static func save(_ value: SessionRecord, db: Database) throws {
+    private static func save(_ value: SessionRecord, recordIdentity: RecordIdentity?, db: Database) throws {
         try db.cachedStatement(sql: """
             INSERT INTO sessions(agent,native_id,source_id,file_id,environment,cwd,title,started_at,last_event_at,status,
-                git_branch,cli_version,model_primary,parent_native_id)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,native_id) DO UPDATE SET
+                git_branch,cli_version,model_primary,parent_native_id,entrypoint,model_provider,git_sha,context_window,context_used,context_model,
+                record_device,record_inode)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent,native_id) DO UPDATE SET
             source_id=excluded.source_id,file_id=coalesce(excluded.file_id,sessions.file_id),environment=excluded.environment,
+            source_deleted_at=CASE WHEN excluded.file_id IS NULL THEN sessions.source_deleted_at ELSE NULL END,
             cwd=coalesce(excluded.cwd,sessions.cwd),title=coalesce(excluded.title,sessions.title),
             started_at=min(coalesce(excluded.started_at,sessions.started_at),coalesce(sessions.started_at,excluded.started_at)),
             last_event_at=max(coalesce(excluded.last_event_at,sessions.last_event_at),coalesce(sessions.last_event_at,excluded.last_event_at)),
             status=CASE WHEN excluded.status='unknown' THEN sessions.status ELSE excluded.status END,
             git_branch=coalesce(excluded.git_branch,sessions.git_branch),cli_version=coalesce(excluded.cli_version,sessions.cli_version),
             model_primary=coalesce(excluded.model_primary,sessions.model_primary),
-            parent_native_id=coalesce(excluded.parent_native_id,sessions.parent_native_id)
+            parent_native_id=coalesce(excluded.parent_native_id,sessions.parent_native_id),
+            entrypoint=coalesce(excluded.entrypoint,sessions.entrypoint),
+            model_provider=coalesce(excluded.model_provider,sessions.model_provider),
+            git_sha=coalesce(excluded.git_sha,sessions.git_sha),
+            context_window=CASE WHEN excluded.context_used IS NULL THEN sessions.context_window ELSE excluded.context_window END,
+            context_used=coalesce(excluded.context_used,sessions.context_used),
+            context_model=CASE WHEN excluded.context_used IS NULL THEN sessions.context_model ELSE excluded.context_model END,
+            record_device=CASE WHEN excluded.record_device IS NOT NULL THEN excluded.record_device
+                WHEN sessions.source_id=excluded.source_id AND (excluded.file_id IS NULL OR sessions.file_id=excluded.file_id)
+                    THEN sessions.record_device END,
+            record_inode=CASE WHEN excluded.record_inode IS NOT NULL THEN excluded.record_inode
+                WHEN sessions.source_id=excluded.source_id AND (excluded.file_id IS NULL OR sessions.file_id=excluded.file_id)
+                    THEN sessions.record_inode END
             WHERE NOT ?
             """).execute(arguments: [value.key.agent.rawValue, value.key.nativeID, value.sourceID, value.fileID,
                                       value.environment, value.cwd, value.title, value.startedAt, value.lastEventAt, value.status.rawValue,
-                                      value.gitBranch, value.cliVersion, value.model, value.parentNativeID, value.referenceOnly == true])
+                                      value.gitBranch, value.cliVersion, value.model, value.parentNativeID,
+                                      value.entrypoint, value.modelProvider, value.gitSHA, value.contextWindow, value.contextUsed,
+                                      value.contextModel, recordIdentity?.device, recordIdentity?.inode, value.referenceOnly == true])
         // Resolve known children even if the parent is imported after them.
-        if value.key.agent == .claudeCode || value.parentNativeID != nil {
+        if value.key.agent == .claudeCode || value.key.agent == .codex || value.parentNativeID != nil {
             try db.cachedStatement(sql: """
                 UPDATE sessions AS child SET parent_session_id=(
                     SELECT parent.id FROM sessions AS parent
@@ -373,20 +727,92 @@ public final class AgentStore: Sendable {
     }
 
     private static func save(_ value: EventRecord, db: Database) throws {
-        let ownerID = try sessionID(value.session, db: db)
+        let session = try sessionID(value.session, db: db)
+        if let channel = value.transcriptChannel {
+            guard value.kind == .user || value.kind == .assistant,
+                  value.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            else { throw StoreError.invalidTranscriptChannel }
+            if channel == .fallback, try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM events WHERE session_id=? AND transcript_channel='preferred')
+                """, arguments: [session]) == true { return }
+        }
+        var blob: Int64?
+        var origin: String?
+        if value.kind == .toolResult, let capture = value.toolOutput {
+            if let address = capture.origin { origin = String(decoding: try JSONEncoder().encode(address), as: UTF8.self) }
+            if let text = capture.archiveText, let encoded = try ToolOutputArchive.encode(text, limit: ToolOutputArchive.limit(db)) {
+                try db.execute(sql: "INSERT INTO blobs(codec,raw_len,data) VALUES('lzfse',?,?)", arguments: [encoded.rawCount, encoded.bytes])
+                blob = db.lastInsertedRowID
+            }
+        }
+        let inputOrigin: String?
+        if value.kind == .toolCall, let address = value.toolInput?.origin {
+            inputOrigin = String(decoding: try JSONEncoder().encode(address), as: UTF8.self)
+        } else { inputOrigin = nil }
+        let toolAction = try encodedToolAction(value.toolAction)
         try db.cachedStatement(sql: """
-            INSERT INTO events(session_id,seq,ts,kind,tool_name,text,meta_json,dedupe_key) VALUES(?,?,?,?,?,?,?,?)
+            INSERT INTO events(session_id,seq,ts,kind,tool_name,text,meta_json,dedupe_key,transcript_channel,blob_id,
+                               tool_output_origin,tool_input_origin,tool_action)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(dedupe_key) DO UPDATE SET session_id=excluded.session_id,seq=excluded.seq,ts=excluded.ts,
-            kind=excluded.kind,tool_name=excluded.tool_name,text=excluded.text,meta_json=excluded.meta_json
-            WHERE (events.session_id=excluded.session_id AND NOT ?)
-                OR (events.session_id<>excluded.session_id AND ?)
-            """).execute(arguments: [ownerID, value.sequence, value.timestamp, value.kind.rawValue,
-                              value.toolName, value.text, value.metadataJSON, value.dedupeKey,
-                              value.recordedOwnership == .inherited, value.recordedOwnership != nil])
+            kind=excluded.kind,tool_name=excluded.tool_name,text=excluded.text,meta_json=excluded.meta_json,
+            transcript_channel=excluded.transcript_channel,blob_id=excluded.blob_id,tool_output_origin=excluded.tool_output_origin,
+            tool_input_origin=excluded.tool_input_origin,tool_action=excluded.tool_action
+            WHERE NOT ? AND ((events.session_id=excluded.session_id AND NOT ?)
+                OR (events.session_id<>excluded.session_id AND ?))
+            """).execute(arguments: [session, value.sequence, value.timestamp, value.kind.rawValue,
+                                      value.toolName, value.text, value.metadataJSON, value.dedupeKey,
+                                      value.transcriptChannel?.rawValue, blob, origin, inputOrigin, toolAction,
+                                      value.session.agent == .copilot, value.recordedOwnership == .inherited,
+                                      value.recordedOwnership != nil])
+        let accepted = db.changesCount == 1
+        let inheritedClaude = value.session.agent == .claudeCode && value.recordedOwnership == .inherited
+            && value.dedupeKey.hasPrefix("claude:event:") && !value.dedupeKey.hasPrefix("claude:event:file:")
+        if !accepted, value.session.agent == .copilot || inheritedClaude, let toolAction {
+            // Backfill only the same producer event and preview. A Claude
+            // resume copy need not have the original's physical file position;
+            // keep the existing timestamp, order and owner.
+            try db.cachedStatement(sql: """
+                UPDATE events SET tool_action=?
+                WHERE dedupe_key=? AND session_id=? AND (seq=? OR ?) AND kind=? AND text IS ?
+                    AND tool_name IS ? AND meta_json IS ? AND tool_action IS NULL
+                """).execute(arguments: [toolAction, value.dedupeKey, session, value.sequence, inheritedClaude,
+                                          value.kind.rawValue, value.text, value.toolName, value.metadataJSON])
+        }
+        if value.transcriptChannel == .preferred && accepted {
+            // FTS triggers remove the superseded copies in the same writer transaction.
+            try db.cachedStatement(sql: "DELETE FROM events WHERE session_id=? AND transcript_channel='fallback'")
+                .execute(arguments: [session])
+        }
+        if value.kind == .toolResult {
+            // Copilot display rows are immutable. Attach a missing archive only
+            // when this replay agrees with the indexed owner, sequence and preview.
+            if !accepted, value.session.agent == .copilot, origin != nil || blob != nil {
+                try db.cachedStatement(sql: """
+                    UPDATE events SET blob_id=?,tool_output_origin=coalesce(tool_output_origin,?)
+                    WHERE dedupe_key=? AND session_id=? AND seq=? AND kind='tool_result' AND text IS ?
+                        AND blob_id IS NULL AND (tool_output_origin IS NULL OR
+                            json_extract(tool_output_origin,'$.digest') IS json_extract(?,'$.digest'))
+                    """).execute(arguments: [blob, origin, value.dedupeKey, session, value.sequence, value.text, origin])
+            }
+            try ToolOutputArchive.removeUnreferenced(blob, db: db)
+            return
+        }
+        if value.kind == .toolCall, !accepted, value.session.agent == .copilot, let inputOrigin {
+            // Existing Copilot display rows are immutable. Backfill only the
+            // locator of the same event, owner, file position and preview.
+            try db.cachedStatement(sql: """
+                UPDATE events SET tool_input_origin=?
+                WHERE dedupe_key=? AND session_id=? AND seq=? AND kind='tool_call' AND text IS ?
+                    AND tool_name IS ? AND meta_json IS ? AND tool_input_origin IS NULL
+                """).execute(arguments: [inputOrigin, value.dedupeKey, session, value.sequence,
+                                          value.text, value.toolName, value.metadataJSON])
+            return
+        }
         // A same-owner Claude copy cannot replace an earlier event. It can
         // supply a missing message ID for the same producer record UUID.
         // The file/sequence fallback does not identify a stable producer record.
-        guard db.changesCount == 0, value.recordedOwnership == .inherited,
+        guard !accepted, value.recordedOwnership == .inherited,
               value.session.agent == .claudeCode, value.kind == .assistant,
               !value.dedupeKey.hasPrefix("claude:event:file:"), let metadata = value.metadataJSON,
               let fields = try? JSONDecoder().decode([String: String].self, from: Data(metadata.utf8)),
@@ -398,13 +824,48 @@ public final class AgentStore: Sendable {
                 WHEN length(CAST(meta_json AS BLOB))<=4096 AND json_valid(meta_json)
                 THEN json_type(meta_json)='object' AND json_type(meta_json,'$.claude_message_id') IS NULL
                 ELSE 0 END
-            """).execute(arguments: [messageID, value.dedupeKey, ownerID])
+            """).execute(arguments: [messageID, value.dedupeKey, session])
+    }
+
+    static func encodedToolAction(_ evidence: ToolActionEvidence?) throws -> String? {
+        guard let evidence, !evidence.isEmpty else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(evidence), as: UTF8.self)
+    }
+
+    private static func save(_ sample: RateLimitSnapshot, db: Database) throws {
+        if let percent = sample.usedPercent, !percent.isFinite || percent < 0 { throw StoreError.invalidRateLimit }
+        try db.cachedStatement(sql: """
+            INSERT INTO rate_limit_snapshots(ts,agent,limit_id,window,window_minutes,used_percent,resets_at,plan_type)
+            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent,limit_id,window,ts) DO UPDATE SET
+                window_minutes=excluded.window_minutes,used_percent=excluded.used_percent,
+                resets_at=excluded.resets_at,plan_type=excluded.plan_type
+            """).execute(arguments: [sample.timestamp, sample.agent.rawValue, sample.limitID, sample.window.rawValue,
+                                      sample.windowMinutes, sample.usedPercent, sample.resetsAt, sample.planType])
     }
 
     private static func save(_ value: TokenEvent, db: Database) throws {
         let c = value.counts
-        guard [c.inputFresh,c.cacheRead,c.cacheWrite,c.cacheWrite1h,c.output,c.reasoning].allSatisfy({ $0 >= 0 }),
-              c.reasoning <= c.output else { throw StoreError.invalidTokenCounts }
+        if let sequence = value.sourceSequence {
+            guard value.session.agent == .copilot, value.precision == .call, sequence >= 0 else {
+                throw StoreError.invalidTokenCounts
+            }
+        }
+        let parts = [c.inputFresh, c.cacheRead, c.cacheWrite, c.cacheWrite1h, c.output]
+        guard parts.allSatisfy({ $0 >= 0 }), c.reasoning >= 0 && c.reasoning <= c.output
+        else { throw StoreError.invalidTokenCounts }
+        var total: Int64 = 0
+        for part in parts {
+            let (next, overflow) = total.addingReportingOverflow(part)
+            guard !overflow else { throw StoreError.invalidTokenCounts }
+            total = next
+        }
+        guard let session = try Row.fetchOne(db, sql: "SELECT id,project_id FROM sessions WHERE agent=? AND native_id=?",
+                                             arguments: [value.session.agent.rawValue, value.session.nativeID])
+        else { throw StoreError.missingSession }
+        let sessionID: Int64 = session["id"]
+        let projectID: Int64? = session["project_id"]
         if value.session.agent == .claudeCode {
             // Replay can correct an owner recorded before sessionId was used.
             // Changing ownership alone must not replace compatible usage with
@@ -418,45 +879,56 @@ public final class AgentStore: Sendable {
                 """
             let canSetOwner = value.recordedOwnership != nil
             try db.cachedStatement(sql: """
-                INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,
+                INSERT INTO token_events(session_id,project_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,
                     output,reasoning,precision,dedupe_key)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
                     session_id=CASE WHEN ? THEN excluded.session_id ELSE token_events.session_id END,
+                    project_id=CASE WHEN ? THEN excluded.project_id ELSE token_events.project_id END,
                     output=CASE WHEN \(compatible) THEN excluded.output ELSE token_events.output END,
                     model=CASE WHEN \(compatible) THEN coalesce(token_events.model,excluded.model) ELSE token_events.model END
                 WHERE (token_events.agent=excluded.agent AND token_events.session_id<>excluded.session_id AND ?)
                     OR (\(compatible))
-                """).execute(arguments: [try sessionID(value.session, db: db), value.session.agent.rawValue, value.model,
+                """).execute(arguments: [sessionID, projectID, value.session.agent.rawValue, value.model,
                                           value.timestamp, c.inputFresh, c.cacheRead, c.cacheWrite, c.cacheWrite1h,
                                           c.output, c.reasoning, value.precision.rawValue, value.dedupeKey,
-                                          canSetOwner, canSetOwner])
+                                          canSetOwner, canSetOwner, canSetOwner])
             return
         }
         try db.cachedStatement(sql: """
-            INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,precision,dedupe_key)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
+            INSERT INTO token_events(session_id,project_id,agent,model,ts,input_fresh,cache_read,cache_write,cache_write_1h,output,reasoning,precision,dedupe_key,source_seq)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(dedupe_key) DO UPDATE SET
+            project_id=excluded.project_id,
             agent=excluded.agent,model=excluded.model,ts=excluded.ts,input_fresh=excluded.input_fresh,
             cache_read=excluded.cache_read,cache_write=excluded.cache_write,cache_write_1h=excluded.cache_write_1h,
             output=excluded.output,reasoning=excluded.reasoning,precision=excluded.precision
-            WHERE token_events.session_id=excluded.session_id
-            """).execute(arguments: [try sessionID(value.session, db: db), value.session.agent.rawValue, value.model, value.timestamp,
-                              c.inputFresh, c.cacheRead, c.cacheWrite, c.cacheWrite1h, c.output, c.reasoning, value.precision.rawValue, value.dedupeKey])
+            WHERE token_events.session_id=excluded.session_id AND excluded.agent<>'copilot'
+            """).execute(arguments: [sessionID, projectID, value.session.agent.rawValue, value.model, value.timestamp,
+                              c.inputFresh, c.cacheRead, c.cacheWrite, c.cacheWrite1h, c.output, c.reasoning, value.precision.rawValue,
+                              value.dedupeKey, value.sourceSequence])
     }
 
-    private static func save(_ checkpoint: Checkpoint, fileID: Int64, db: Database) throws {
-        guard checkpoint.size >= 0, checkpoint.offset >= 0, checkpoint.offset <= checkpoint.size,
+    @discardableResult
+    private static func save(_ checkpoint: Checkpoint, fileID: Int64, db: Database,
+                             replayWithoutDecoderState: Bool = false) throws -> Checkpoint {
+        guard !checkpoint.sourceFileWasMissing, checkpoint.size >= 0, checkpoint.offset >= 0, checkpoint.offset <= checkpoint.size,
               checkpoint.parserVersion > 0, checkpoint.sequence >= -1, checkpoint.unknownRecords >= 0,
               (checkpoint.decoderState?.count ?? 0) <= Checkpoint.maximumDecoderStateBytes
         else { throw StoreError.invalidCheckpoint }
+        var checkpoint = try IndexSecretRedaction.enabled(db) ? IndexSecretRedaction.checkpoint(checkpoint) : checkpoint
+        if replayWithoutDecoderState {
+            checkpoint.decoderState = nil
+            checkpoint.parserVersion = 0
+        }
         try db.execute(sql: """
             UPDATE source_files SET device=?,inode=?,size=?,mtime_ns=?,read_offset=?,parser_version=?,
                 last_seq=?,previous_ts=?,decoder_state=?,unknown_records=?,
-                state=CASE WHEN ? < ? THEN 'partial' ELSE 'ok' END,last_error=NULL
+                state=CASE WHEN ? < ? THEN 'partial' ELSE 'ok' END,last_error=NULL,confirm_session_identity=0
             WHERE id=?
             """, arguments: [checkpoint.device, checkpoint.inode, checkpoint.size, checkpoint.modificationTimeNS,
                               checkpoint.offset, checkpoint.parserVersion, checkpoint.sequence,
                               checkpoint.previousTimestamp, checkpoint.decoderState, checkpoint.unknownRecords,
                               checkpoint.offset, checkpoint.size, fileID])
         guard db.changesCount == 1 else { throw StoreError.missingFile }
+        return checkpoint
     }
 }

@@ -33,10 +33,12 @@ func freshAndReopened() throws {
             #expect(try String.fetchOne(db, sql: "PRAGMA journal_mode") == "wal")
             #expect(try Int.fetchOne(db, sql: "PRAGMA foreign_keys") == 1)
             #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY identifier") ==
-                ["source_root_identity", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint"])
+                ["archive_retention", "context_measurement_model", "copilot_accounting", "exclusion_source_identity", "inherited_transcript", "live_topic_index", "original_tool_input", "project_pin_preferences", "project_usage_scope_edges", "running_session_activity", "saved_search_sidebar_filter", "session_exclusions", "session_record_identity", "session_titles", "session_usage_rollup", "source_removal", "source_root_identity", "status_inference", "structured_tool_actions", "tool_output_archive", "transcript_tool_pairs", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint", "v4_codex_index", "v9_token_minutes",
+                 "v10_usage_readouts", "v11_token_quotes", "v12_cache_savings", "v13_usage_chart_changes",
+                 "usage_cost_peak_index", "reapply_mapped_workspace_exclusions"].sorted())
             for name in ["sources", "source_root_identities", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
                          "file_touches", "commands", "token_events", "token_minute", "rate_limit_snapshots",
-                         "session_keywords", "term_df", "saved_searches", "app_meta"] {
+                         "session_keywords", "term_df", "saved_searches", "app_meta", "copilot_usage_snapshots", "session_usage_rollup"] {
                 #expect(try db.tableExists(name))
             }
             #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?", arguments: ["登录"]) == 1)
@@ -45,7 +47,67 @@ func freshAndReopened() throws {
     }
 }
 
-@Test("ADP-2: upgrading an existing v1 database retains its source progress")
+@Test("SEC-7: upgrading reapplies saved mapped exclusions before exposing search and usage")
+func upgradesMissedMappedExclusions() throws {
+    try withStore { store, dir in
+        let sourceID = try store.upsertSource(.init(agent: .codex, label: "Synthetic", rootURL: dir,
+            pathMappings: [.init(from: "/recorded", to: "/host")]))
+        let time: Int64 = 1_792_000_000_000
+        let denied = SessionKey(agent: .codex, nativeID: "synthetic-legacy-hidden")
+        let allowed = SessionKey(agent: .codex, nativeID: "synthetic-legacy-public")
+        let historical = SessionKey(agent: .codex, nativeID: "synthetic-legacy-retained")
+        let file = try store.upsertFile(.init(sourceID: sourceID, relativePath: "generated.jsonl", role: .session),
+                                        checkpoint: nil)
+        let cursor = Checkpoint(inode: 1, size: 20, offset: 20, parserVersion: 6, sequence: 4, previousTimestamp: time)
+        try store.write([
+            .session(.init(key: denied, sourceID: sourceID, fileID: file, environment: "Synthetic", cwd: "/recorded//./private/live")),
+            .event(.init(session: denied, sequence: 0, timestamp: time, kind: .user, text: "synthetic legacy marker", dedupeKey: "legacy:hidden")),
+            .tokens(.init(session: denied, timestamp: time, counts: .init(output: 17), dedupeKey: "legacy:hidden:tokens")),
+            .session(.init(key: allowed, sourceID: sourceID, environment: "Synthetic", cwd: "/recorded//./public")),
+            .event(.init(session: allowed, sequence: 0, timestamp: time, kind: .user, text: "synthetic legacy marker", dedupeKey: "legacy:allowed")),
+            .tokens(.init(session: allowed, timestamp: time, counts: .init(output: 3), dedupeKey: "legacy:allowed:tokens")),
+            .session(.init(key: historical, sourceID: sourceID, environment: "Synthetic", cwd: "/recorded//./private/retained")),
+            .tokens(.init(session: historical, timestamp: time, counts: .init(output: 5), dedupeKey: "legacy:retained:tokens")),
+        ], fileID: file, checkpoint: cursor)
+        try store.databasePool.write { db in
+            try db.execute(sql: "UPDATE sessions SET source_deleted_at=? WHERE native_id=?",
+                           arguments: [Int64(1), historical.nativeID])
+        }
+        #expect(try store.setArchiveRetention(.quarterYear, now: time, hostHome: nil) == 1)
+
+        // Model the immediately preceding schema, with a saved policy whose
+        // mapped matches were missed by the old implementation.
+        let policy = SessionExclusionPolicy(patterns: ["/host/private/**"], hostHome: nil, revision: 1)
+        let bytes = try JSONEncoder().encode(policy)
+        try store.databasePool.write { db in
+            try db.execute(sql: "INSERT INTO app_meta(key,value) VALUES('session_exclusion_policy',?)",
+                           arguments: [String(decoding: bytes, as: UTF8.self)])
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier='reapply_mapped_workspace_exclusions'")
+        }
+        let scope = IndexedSearchScope(now: time + 1_000, timeZone: .gmt)
+        let query = try SearchQuery.parse("legacy")
+        let window = try UsageWindow.make(.hour, now: time + 1_000, timeZone: .gmt)
+        #expect(try store.searchIndex(query, scope: scope).sessionCount == 2)
+        #expect(try store.usage(window: window).totals.counts.total == 25)
+        try store.databasePool.close()
+
+        let migrated = try AgentStore(databaseURL: dir.appendingPathComponent("index.sqlite"))
+        #expect(try migrated.sessionExclusionPatterns() == ["/host/private/**"])
+        #expect(try migrated.events(in: denied).isEmpty)
+        #expect(try migrated.events(in: allowed).count == 1)
+        #expect(try migrated.searchIndex(query, scope: scope).groups.map(\.session) == [allowed])
+        #expect(try migrated.usage(window: window).totals.counts.total == 3)
+        #expect(try migrated.checkpoint(for: file)?.parserVersion == 0)
+        #expect(try migrated.databasePool.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM retained_archive_scopes")
+        } == 0)
+        #expect(try migrated.databasePool.read { db in
+            try Int.fetchOne(db, sql: "SELECT count(*) FROM session_exclusion_keys WHERE source_id=?", arguments: [sourceID])
+        } == 2)
+    }
+}
+
+@Test("ADP-2 / FR-TK: upgrading a v1 database retains its source progress and projects existing tokens")
 func upgradesLegacyCheckpoint() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jsonl-migration-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -69,6 +131,11 @@ func upgradesLegacyCheckpoint() throws {
                 INSERT INTO source_files(id,source_id,rel_path,role,inode,size,mtime_ns,read_offset,
                                          last_seq,previous_ts,parser_version,state,unknown_records)
                 VALUES(1,1,'file.jsonl','session',17,12,100,10,3,200,2,'partial',1);
+                INSERT INTO sessions(id,agent,native_id,source_id,environment,status)
+                VALUES(1,'codex','synthetic-legacy',1,'Test','completed');
+                INSERT INTO token_events(session_id,agent,model,ts,input_fresh,cache_read,output,reasoning,
+                    cost_micro_usd,price_status,price_ref,dedupe_key)
+                VALUES(1,'codex','synthetic',60001,5,4,3,2,17,'priced','synthetic-legacy','legacy-usage');
                 """)
         }
     }
@@ -77,6 +144,15 @@ func upgradesLegacyCheckpoint() throws {
     #expect(try upgraded.checkpoint(for: 1) == Checkpoint(inode: 17, size: 12, offset: 10, parserVersion: 2,
                                                          sequence: 3, previousTimestamp: 200,
                                                          modificationTimeNS: 100, unknownRecords: 1))
+    let window = try UsageWindow.make(.hour, now: 90_000, timeZone: .gmt)
+    let report = try upgraded.usage(window: window)
+    #expect(report.totals.counts.total == 12)
+    #expect(report.totals.costMicroUSD == 17 && report.totals.unpricedTokens == 0)
+    try upgraded.databasePool.read { db throws -> Void in
+        let row = try #require(try Row.fetchOne(db, sql: "SELECT * FROM session_usage_rollup WHERE session_id=1"))
+        let facts = IndexedSessionUsageSummary(row)
+        #expect(facts.totals == report.totals && !facts.hasApproximateQuote)
+    }
 }
 
 @Test("ADP-2/3: a stale batch cannot write records or overwrite the winning checkpoint")

@@ -1,14 +1,21 @@
 import Darwin
 import Foundation
+import ADAdapters
 import ADCore
 
 enum SourceAccessStatus: Equatable, Sendable {
-    case notChecked, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
+    case notChecked, verifiedBookmark, readable(entries: Int), missing, denied, staleBookmark, wrongDirectory, pathConflict
+}
+
+enum SourceFilePreview: Equatable, Sendable {
+    case available(Int), unsupported, unavailable
 }
 
 /// M0 access verification reads directory entry metadata only, never file contents.
 /// Top-level entry counts establish access, not session discovery or parser coverage.
 enum SourceAccessProbe {
+    private static let bookmarkResolutionOptions: URL.BookmarkResolutionOptions = [.withSecurityScope, .withoutUI, .withoutMounting]
+
     static func defaultSources() throws -> [Source] {
         // NSHomeDirectory is the container home under App Sandbox. Resolve the real
         // local account home using the read-only POSIX account lookup instead.
@@ -29,21 +36,87 @@ enum SourceAccessProbe {
         ]
     }
 
-    static func check(_ source: Source) -> SourceAccessStatus {
+    static func check(_ source: Source, expectedIdentity: SourceRootIdentity? = nil,
+                      bookmarkOnly: Bool = false) -> SourceAccessStatus {
         do {
             switch source.access {
-            case .defaultLocation: return try countEntries(at: source.rootURL)
+            case .defaultLocation:
+                if bookmarkOnly { return .notChecked }
+                return try countEntries(at: source.rootURL)
             case .bookmark(let data):
                 var stale = false
-                let url = try URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI],
+                let url = try URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
                                   relativeTo: nil, bookmarkDataIsStale: &stale)
                 guard !stale else { return .staleBookmark }
                 guard url.startAccessingSecurityScopedResource() else { return .denied }
                 defer { url.stopAccessingSecurityScopedResource() }
+                guard matchesRegistration(url, source: source, expectedIdentity: expectedIdentity) else { return .wrongDirectory }
+                if bookmarkOnly { return .verifiedBookmark }
                 return try countEntries(at: url)
             }
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return .missing }
         catch { return .denied }
+    }
+
+    /// Keep a read-only bookmark active until scanning and watching have both stopped.
+    static func withIndexingAccess<Value: Sendable>(to source: Source, expectedIdentity: SourceRootIdentity? = nil,
+                                                   _ run: @Sendable (URL) async throws -> Value)
+        async throws -> Value {
+        switch source.access {
+        case .defaultLocation:
+            if let expectedIdentity,
+               (try? SourceFileReader.registrationIdentity(root: source.rootURL)) != expectedIdentity {
+                throw IndexAccessFailure.rootChanged
+            }
+            return try await run(source.rootURL)
+        case .bookmark(let data):
+            var stale = false
+            let root: URL
+            do {
+                root = try URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
+                               relativeTo: nil, bookmarkDataIsStale: &stale)
+            } catch {
+                throw IndexAccessFailure.denied
+            }
+            guard !stale else { throw IndexAccessFailure.staleBookmark }
+            guard root.startAccessingSecurityScopedResource() else { throw IndexAccessFailure.denied }
+            defer { root.stopAccessingSecurityScopedResource() }
+            guard matchesRegistration(root, source: source, expectedIdentity: expectedIdentity) else {
+                throw IndexAccessFailure.rootChanged
+            }
+            return try await run(root)
+        }
+    }
+
+    /// Run while the resolved bookmark's read-only scope is active. APFS
+    /// aliases may spell the same root differently. A moved bookmark must
+    /// not silently follow the old root when its saved path was replaced.
+    private static func matchesRegistration(_ root: URL, source: Source, expectedIdentity: SourceRootIdentity?) -> Bool {
+        guard let resolved = try? SourceFileReader.registrationIdentity(root: root),
+              expectedIdentity == nil || resolved == expectedIdentity
+        else { return false }
+        if root.standardizedFileURL.path.utf8.elementsEqual(source.rootURL.standardizedFileURL.path.utf8) { return true }
+        return (try? SourceFileReader.registrationIdentity(root: source.rootURL)) == resolved
+    }
+
+    /// Count discovered session files without opening any session content.
+    static func preview(_ source: Source) async -> SourceFilePreview {
+        if source.agent == .grokBuild { return .unsupported }
+        do {
+            return try await withIndexingAccess(to: source) { root in
+                try Task.checkCancellation()
+                let identity = try SourceFileReader.directoryIdentity(root: root)
+                let files: [SourceFile]
+                switch source.agent {
+                case .claudeCode: files = try ClaudeCodeAdapter().discover(in: source, authorizedRoot: root)
+                case .codex: files = try CodexAdapter().discover(in: source, authorizedRoot: root)
+                case .copilot: files = try CopilotAdapter().discover(in: source, authorizedRoot: root)
+                case .grokBuild: return .unsupported
+                }
+                guard try SourceFileReader.directoryIdentity(root: root) == identity else { return .unavailable }
+                return .available(files.lazy.filter { $0.role == .session || $0.role == .subagent }.count)
+            }
+        } catch { return .unavailable }
     }
 
     /// Match older rows without an identity, using only their existing
@@ -51,14 +124,14 @@ enum SourceAccessProbe {
     static func directoryIdentity(_ source: Source) -> SourceRootIdentity? {
         switch source.access {
         case .defaultLocation:
-            return try? SourceFileReader.directoryIdentity(root: source.rootURL)
+            return try? SourceFileReader.registrationIdentity(root: source.rootURL)
         case .bookmark(let data):
             var stale = false
-            guard let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope, .withoutUI, .withoutMounting],
+            guard let url = try? URL(resolvingBookmarkData: data, options: bookmarkResolutionOptions,
                                      relativeTo: nil, bookmarkDataIsStale: &stale),
                   !stale, url.startAccessingSecurityScopedResource() else { return nil }
             defer { url.stopAccessingSecurityScopedResource() }
-            return try? SourceFileReader.directoryIdentity(root: url)
+            return try? SourceFileReader.registrationIdentity(root: url)
         }
     }
 

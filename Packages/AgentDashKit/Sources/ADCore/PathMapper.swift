@@ -1,6 +1,20 @@
 /// FR-SRC-1: pure, one-pass mapping for display and future copy-resume paths.
 /// Never use the result to open a source or infer permission to access it.
 public enum PathMapper {
+    /// Normalize a recorded absolute workspace without consulting the
+    /// filesystem or changing its Unicode spelling. Ambiguous forms fail.
+    public static func normalizedWorkspace(_ path: String) -> String? {
+        let bytes = path.utf8
+        let slash: UInt8 = 0x2F
+        guard bytes.first == slash, !bytes.contains(0),
+              !bytes.starts(with: [slash, slash]) || bytes.starts(with: [slash, slash, slash])
+        else { return nil }
+        let parts = bytes.split(separator: slash)
+        guard !parts.contains(where: { $0.elementsEqual([0x2E, 0x2E]) }) else { return nil }
+        return "/" + parts.filter { !$0.elementsEqual([0x2E]) }
+            .map { String(decoding: $0, as: UTF8.self) }.joined(separator: "/")
+    }
+
     /// Categories and zero-based rule indices only; no paths or underlying errors.
     public enum Failure: Error, Equatable, Sendable {
         case invalidPath

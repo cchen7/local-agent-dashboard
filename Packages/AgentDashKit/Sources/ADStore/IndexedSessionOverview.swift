@@ -11,6 +11,8 @@ public struct IndexedSessionOverview: Equatable, Sendable {
     public let recentActions: [IndexedOverviewAction]
     public let files: [IndexedOverviewFile]
     public let commands: [IndexedOverviewCommand]
+    /// These terms came from a current, fully masked corpus, not legacy labels.
+    public internal(set) var topicsVerified = false
 }
 
 public struct IndexedOverviewFile: Equatable, Sendable {
@@ -27,6 +29,15 @@ public struct IndexedOverviewCommand: Equatable, Sendable {
     public let timestamp: Int64
     public let exitCode: Int64?
     public let durationMS: Int64?
+    public let success: Bool?
+
+    public init(text: String, timestamp: Int64, exitCode: Int64?, durationMS: Int64?, success: Bool? = nil) {
+        self.text = text
+        self.timestamp = timestamp
+        self.exitCode = exitCode
+        self.durationMS = durationMS
+        self.success = success
+    }
 }
 
 public enum IndexedOverviewAction: Equatable, Sendable {
@@ -67,26 +78,26 @@ public extension AgentStore {
         }
         let summary: String? = header["summary"]
         let files = try overviewFiles(in: id, order: "count DESC,last_ts DESC,path,op", limit: 10, db: db)
-        let commands = try Row.fetchAll(db, sql: """
-            SELECT command,ts,exit_code,duration_ms FROM commands
-            WHERE session_id=? AND length(CAST(command AS BLOB))<=1048576
-            ORDER BY ts DESC,id DESC LIMIT 10
-            """, arguments: [id]).map { row in
-                IndexedOverviewCommand(text: row["command"], timestamp: row["ts"],
-                                       exitCode: row["exit_code"], durationMS: row["duration_ms"])
-            }
-        let recentFiles = try overviewFiles(in: id, order: "last_ts DESC,path,op", limit: 5, db: db)
+        let commands = try StructuredActionProjection.commands(in: id, db: db)
+        let recentFiles = try overviewRecentFiles(in: id, db: db)
         let structured = recentFiles.map(IndexedOverviewAction.file) + commands.prefix(5).map(IndexedOverviewAction.command)
         let actions = try overviewActions(in: id, structured: structured, db: db)
-        let candidates = try String.fetchAll(db, sql: """
-            SELECT term FROM session_keywords WHERE session_id=? AND length(CAST(term AS BLOB))<=512
-            ORDER BY weight DESC,term LIMIT 20
-            """, arguments: [id])
-        let topics = try overviewSearchableTopics(candidates, in: id, db: db)
+        let observedTopics = try TopicRanking.sessionTopics(id, db: db)
+        let topics: [String]
+        if let observedTopics {
+            topics = observedTopics
+        } else {
+            let candidates = try String.fetchAll(db, sql: """
+                SELECT term FROM session_keywords WHERE session_id=? AND length(CAST(term AS BLOB))<=512
+                ORDER BY weight DESC,term LIMIT 20
+                """, arguments: [id])
+            topics = try overviewSearchableTopics(candidates, in: id, db: db)
+        }
 
         return try .init(summary: summary.flatMap { $0.isEmpty ? nil : $0 } ?? latestText(.summary),
                          lastPrompt: latestText(.user), lastReply: latestText(.assistant),
-                         topics: topics, recentActions: actions, files: files, commands: commands)
+                         topics: topics, recentActions: actions, files: files, commands: commands,
+                         topicsVerified: observedTopics != nil)
     }
 
     private static func overviewActions(in id: Int64, structured: [IndexedOverviewAction], db: Database)
@@ -96,8 +107,10 @@ public extension AgentStore {
         let rows = try Row.fetchCursor(db, sql: """
             SELECT kind,ts,CASE WHEN length(CAST(tool_name AS BLOB))<=16384 THEN tool_name END AS tool_name,
                    CASE WHEN length(CAST(text AS BLOB))<=1048576 THEN text END AS preview
-            FROM events WHERE session_id=? AND kind IN ('tool_call','tool_result')
-            ORDER BY ts DESC,seq DESC,id DESC LIMIT ?
+            FROM events e WHERE e.session_id=? AND e.kind IN ('tool_call','tool_result')
+                AND (e.kind<>'tool_call' OR e.tool_action IS NULL)
+                AND NOT (\(StructuredActionProjection.hasStructuredCall(chronological: false)))
+            ORDER BY e.ts DESC,e.seq DESC,e.id DESC LIMIT ?
             """, arguments: [id, 5 + structured.count])
         var unpaired = structured
         var tools: [IndexedOverviewAction] = []
@@ -196,9 +209,24 @@ public extension AgentStore {
         return (String(key[...colon]), index)
     }
 
+    private static func overviewRecentFiles(in id: Int64, db: Database) throws -> [IndexedOverviewFile] {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT path,op,added,removed,ts FROM action_file_events
+            WHERE session_id=? ORDER BY ts DESC,event_id DESC,path,op LIMIT 5
+            """, arguments: [id])
+        if rows.isEmpty {
+            // Older app-owned projections, if present, have no per-event detail.
+            return try overviewFiles(in: id, order: "last_ts DESC,path,op", limit: 5, db: db)
+        }
+        return rows.map {
+            .init(path: $0["path"], operation: $0["op"], count: 1, added: $0["added"], removed: $0["removed"], timestamp: $0["ts"])
+        }
+    }
+
     private static func overviewFiles(in id: Int64, order: String, limit: Int, db: Database) throws -> [IndexedOverviewFile] {
         try Row.fetchAll(db, sql: """
-            SELECT path,op,count,lines_added,lines_removed,last_ts FROM file_touches
+            SELECT path,op,count,CASE WHEN unknown_added=0 THEN lines_added END AS lines_added,
+                CASE WHEN unknown_removed=0 THEN lines_removed END AS lines_removed,last_ts FROM file_touches
             WHERE session_id=? AND length(CAST(path AS BLOB))<=16384
             ORDER BY \(order) LIMIT ?
             """, arguments: [id, limit]).map { row in

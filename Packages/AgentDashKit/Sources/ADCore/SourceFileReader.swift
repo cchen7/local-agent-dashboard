@@ -8,7 +8,7 @@ public final class SourceFileReader: Sendable {
     /// Categories only: never attach a path, source content or underlying error.
     public enum Failure: Error, Equatable, Sendable {
         case invalidRoot, invalidRelativePath, openFailed, notRegularFile
-        case invalidReadRange, readFailed, metadataFailed
+        case invalidReadRange, readFailed, metadataFailed, rootChanged
     }
 
     /// Metadata from the open descriptor, even after its original path is replaced.
@@ -27,9 +27,15 @@ public final class SourceFileReader: Sendable {
         public let kind: Kind
     }
 
+    /// The directory actually opened for an authorized URL.
+    public struct DirectoryIdentity: Equatable, Sendable {
+        public let device: Int64
+        public let inode: Int64
+    }
+
     /// Read the selected root's identity without listing or reading entries.
     /// Stable local volume UUIDs survive changes to the path and device number.
-    public static func directoryIdentity(root: URL) throws -> SourceRootIdentity {
+    public static func registrationIdentity(root: URL) throws -> SourceRootIdentity {
         guard Source.isLocalRoot(root) else { throw Failure.invalidRoot }
         let descriptor = try openDirectory(root: root.standardizedFileURL, components: [])
         defer { close(descriptor) }
@@ -63,9 +69,10 @@ public final class SourceFileReader: Sendable {
     /// Open an explicit relative path without following any relative symlink.
     /// Each directory is pinned before opening the next component with openat.
     /// The authorized root itself must be a directory, not a symlink.
-    public init(root: URL, relativePath: String) throws {
+    public init(root: URL, relativePath: String, expectedRoot: DirectoryIdentity? = nil) throws {
         let components = try Self.components(relativePath)
-        let directory = try Self.openDirectory(root: root, components: Array(components.dropLast()))
+        let directory = try Self.openDirectory(root: root, components: Array(components.dropLast()),
+                                               expectedRoot: expectedRoot)
         defer { close(directory) }
 
         // Nonblocking open is essential: a FIFO must reach fstat without waiting
@@ -80,6 +87,27 @@ public final class SourceFileReader: Sendable {
             throw error
         }
         descriptor = file
+    }
+
+    public static func directoryIdentity(root: URL) throws -> DirectoryIdentity {
+        let descriptor = try openDirectory(root: root, components: [])
+        defer { close(descriptor) }
+        return try directoryIdentity(descriptor: descriptor)
+    }
+
+    /// Confirm only an absent leaf under an accessible, authorized parent.
+    /// Never follow a symlink or treat an unavailable directory as a deletion.
+    public static func isMissing(root: URL, relativePath: String, expectedRoot: DirectoryIdentity) throws -> Bool {
+        let parts = try components(relativePath)
+        let parent = try openDirectory(root: root, components: Array(parts.dropLast()), expectedRoot: expectedRoot)
+        defer { close(parent) }
+        var value = stat()
+        var result: Int32
+        repeat { result = fstatat(parent, parts[parts.count - 1], &value, AT_SYMLINK_NOFOLLOW) }
+        while result < 0 && errno == EINTR
+        if result == 0 { return false }
+        if errno == ENOENT { return true }
+        throw Failure.metadataFailed
     }
 
     /// List direct regular files/directories by a pinned descriptor. Symlinks,
@@ -122,7 +150,8 @@ public final class SourceFileReader: Sendable {
         return result
     }
 
-    private static func openDirectory(root: URL, components: [String]) throws -> Int32 {
+    private static func openDirectory(root: URL, components: [String],
+                                      expectedRoot: DirectoryIdentity? = nil) throws -> Int32 {
         let rootPath = root.path(percentEncoded: false)
         let localHost = root.host(percentEncoded: false)?.lowercased()
         guard root.isFileURL, localHost == nil || localHost == "" || localHost == "localhost",
@@ -135,6 +164,14 @@ public final class SourceFileReader: Sendable {
         while rootBytes.count > 1 && rootBytes.last == 0x2F { rootBytes.removeLast() }
         var directory = open(String(decoding: rootBytes, as: UTF8.self), Self.directoryFlags)
         guard directory >= 0 else { throw Failure.openFailed }
+        if let expectedRoot {
+            do {
+                guard try directoryIdentity(descriptor: directory) == expectedRoot else { throw Failure.rootChanged }
+            } catch {
+                close(directory)
+                throw error
+            }
+        }
         for component in components {
             let next = openat(directory, component, Self.directoryFlags)
             close(directory)
@@ -142,6 +179,11 @@ public final class SourceFileReader: Sendable {
             directory = next
         }
         return directory
+    }
+
+    private static func directoryIdentity(descriptor: Int32) throws -> DirectoryIdentity {
+        let value = try status(of: descriptor)
+        return .init(device: Int64(value.st_dev), inode: Int64(bitPattern: value.st_ino))
     }
 
     private static func components(_ relativePath: String) throws -> [String] {

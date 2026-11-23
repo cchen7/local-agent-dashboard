@@ -482,3 +482,147 @@ private struct ClaudeFixture {
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
+
+@Test("ADP-CC / SEC-7: thinking is opt-in, bounded, independent of billing, and purged when disabled")
+func claudeThinkingPreferenceReplaysAndPurgesIndex() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("thinking-\(UUID())")
+    let root = folder.appendingPathComponent("synthetic-source")
+    let projects = root.appendingPathComponent("projects/synthetic")
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let id = "00000000-0000-0000-0000-000000000035"
+    let input = projects.appendingPathComponent(id + ".jsonl")
+    let word = "visiblethinkingfixture"
+    let opaque = "opaquethinkingfixture"
+    let overLimit = "oversizethinkingfixture" + String(repeating: "x", count: 8_192)
+    let workspace = "/synthetic/allowed"
+    let stamp: Int64 = 1_770_000_000_000
+    let usage: [String: Int] = ["input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 4]
+    func line(_ suffix: String, content: [[String: String]]) throws -> Data {
+        let object: [String: Any] = ["type": "assistant", "uuid": "synthetic-" + suffix, "sessionId": id, "cwd": workspace,
+             "timestamp": stamp, "message": ["id": "synthetic-response", "model": "synthetic-model", "usage": usage, "content": content]]
+        return try JSONSerialization.data(withJSONObject: object) + Data([0x0A])
+    }
+    let bytes = try line("thinking", content: [
+        ["type": "thinking", "thinking": "Checked " + word, "signature": "synthetic-signature"],
+        ["type": "thinking", "thinking": " \n"],
+        ["type": "redacted_thinking", "data": opaque],
+        ["type": "thinking", "thinking": overLimit],
+    ]) + line("reply", content: [["type": "text", "text": "synthetic reply"]])
+    try bytes.write(to: input)
+    let index = folder.appendingPathComponent("index.sqlite")
+    let store = try AgentStore(databaseURL: index)
+    var source = Source(agent: .claudeCode, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let key = SessionKey(agent: .claudeCode, nativeID: id)
+    let file = try #require(try ClaudeCodeAdapter().discover(in: source, authorizedRoot: root).first)
+    let scope = IndexedSearchScope(now: stamp + 60_000, timeZone: .gmt)
+    let window = try UsageWindow.make(.hour, now: stamp + 60_000, timeZone: .gmt)
+    func importWith(_ adapter: ClaudeCodeAdapter, into store: AgentStore) throws -> JSONLImportResult {
+        try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, store: store, adapter: adapter)
+    }
+    #expect(try !store.indexThinkingBlocksEnabled())
+    // An opt-in decoder is insufficient to bypass the persisted writer policy.
+    _ = try importWith(ClaudeCodeAdapter(includeThinking: true), into: store)
+    #expect(try store.events(in: key).map(\.kind) == [.assistant])
+    #expect(try store.usage(window: window).totals.counts.total == 9)
+
+    #expect(try store.setIndexThinkingBlocksEnabled(true))
+    let reopened = try AgentStore(databaseURL: index)
+    #expect(try reopened.indexThinkingBlocksEnabled())
+    let run = try importWith(ClaudeCodeAdapter(includeThinking: true), into: reopened)
+    #expect(run.bytesRead == bytes.count)
+    #expect(try reopened.events(in: key).map(\.kind) == [.thinking, .assistant])
+    #expect(try reopened.events(in: key).first?.text == "Checked " + word)
+    #expect(try reopened.searchIndex(SearchQuery.parse(word), scope: scope).matchCount == 1)
+    #expect(try reopened.searchIndex(SearchQuery.parse(opaque), scope: scope).matchCount == 0)
+    #expect(try reopened.statusWork(at: stamp).flatMap(\.events).allSatisfy { $0.kind != .thinking })
+    #expect(try reopened.usage(window: window).totals.counts.total == 9)
+
+    try reopened.databasePool.write { db in
+        try db.execute(sql: "UPDATE sessions SET source_deleted_at=? WHERE native_id=?", arguments: [stamp + 1, id])
+    }
+    #expect(try reopened.setIndexThinkingBlocksEnabled(false))
+    #expect(try reopened.searchIndex(SearchQuery.parse(word), scope: scope).matchCount == 0)
+    #expect(try reopened.events(in: key).map(\.text) == ["synthetic reply"])
+    #expect(try reopened.usage(window: window).totals.counts.total == 9)
+    #expect(try Data(contentsOf: input) == bytes)
+}
+
+@Test("ADP-CC: copied history follows the destination file order without taking the original's later events",
+      .timeLimit(.minutes(1)), arguments: [true, false])
+func claudeInheritedTranscriptIsProvenAndPaged(copyFirst: Bool) async throws {
+    let box = try ClaudeFixture()
+    defer { box.remove() }
+    let child = SessionKey(agent: .claudeCode, nativeID: copyID)
+    let firstID = "00000000-0000-4000-8000-000000000101"
+    let secondID = "00000000-0000-4000-8000-000000000102"
+    let laterID = "00000000-0000-4000-8000-000000000103"
+    func row(_ id: String, _ session: String, _ body: String) -> [String: Any] {
+        ["type": "user", "uuid": id, "sessionId": session, "cwd": "/synthetic/work", "message": ["content": body]]
+    }
+    let first = row(firstID, mainID, "Copied first")
+    let second = row(secondID, mainID, "Copied second")
+    let later = row(laterID, mainID, "Original only")
+    let own = row("00000000-0000-4000-8000-000000000104", copyID, "New child turn")
+    let fallback = row("missing-stable-id", mainID, "Ambiguous copy")
+    try box.write([second, first, later], to: box.main)
+    try box.write([first, fallback, second, own], to: box.copy)
+    if copyFirst { _ = try box.importPath(box.copy, role: .session) }
+    _ = try box.importPath(box.main, role: .session)
+    if !copyFirst { _ = try box.importPath(box.copy, role: .session) }
+    try box.store.write([.session(.init(key: box.key, sourceID: try #require(box.source.id),
+                                       environment: "Synthetic", title: "Indexed original"))])
+
+    var summaries = box.store.inheritedTranscriptSummary(in: child).makeAsyncIterator()
+    let available = try #require(try await summaries.next() ?? nil)
+    #expect(available.originalTitle == "Indexed original")
+    #expect(try box.store.events(in: child).map(\.text) == ["New child turn"])
+    #expect(try box.store.events(in: box.key).filter { $0.text == "Copied second" }.count == 1)
+    let search = try box.store.searchIndex(SearchQuery.parse("Copied second"),
+                                           scope: .init(now: 0, timeZone: .gmt))
+    #expect(search.groups.map(\.session) == [box.key] && search.matchCount == 1)
+
+    var pages = try box.store.inheritedTranscriptPages(in: child, limit: 1).makeAsyncIterator()
+    let firstPage = try #require(try await pages.next())
+    #expect(firstPage.events.map(\.text) == ["Copied first"])
+    #expect(firstPage.older == nil)
+    let forward = try #require(firstPage.newer)
+    var laterPages = try box.store.inheritedTranscriptPages(in: child, request: .after(forward), limit: 1).makeAsyncIterator()
+    let secondPage = try #require(try await laterPages.next())
+    #expect(secondPage.events.map(\.text) == ["Copied second"])
+    #expect(secondPage.newer == nil)
+    let backward = try #require(secondPage.older)
+    var earlierPages = try box.store.inheritedTranscriptPages(in: child, request: .before(backward), limit: 1).makeAsyncIterator()
+    #expect(try await earlierPages.next()?.events.map(\.text) == ["Copied first"])
+    var foreign = try box.store.inheritedTranscriptPages(in: box.key, request: .after(forward)).makeAsyncIterator()
+    await #expect(throws: TranscriptPagingError.foreignCursor) { _ = try await foreign.next() }
+
+    // A checkpoint from before copy indexing is replayed even without an append.
+    try await box.store.databasePool.write { db in
+        try db.execute(sql: "DELETE FROM inherited_transcript_items")
+        try db.execute(sql: "UPDATE source_files SET parser_version=10 WHERE rel_path=?", arguments: [box.copy])
+    }
+    let replay = try box.importPath(box.copy, role: .session)
+    #expect(replay.completeLines == 4)
+    var restored = try box.store.inheritedTranscriptPages(in: child).makeAsyncIterator()
+    #expect(try await restored.next()?.events.map(\.text) == ["Copied first", "Copied second"])
+
+    // A change to the original's body is not evidence of a newer copied body.
+    let original = try #require(try box.store.events(in: box.key).first { $0.text == "Copied first" })
+    var changed = original
+    changed.text = "New original-only body"
+    try box.store.write([.event(changed)])
+    var edited = try box.store.inheritedTranscriptPages(in: child).makeAsyncIterator()
+    #expect(try await edited.next()?.events.map(\.text) == ["Copied second"])
+
+    // Replacing the destination's bytes drops old copy references even though
+    // the normalized owner's events are deliberately still archived in the index.
+    try box.write([own], to: box.copy)
+    _ = try box.importPath(box.copy, role: .session)
+    var rewritten = try box.store.inheritedTranscriptPages(in: child).makeAsyncIterator()
+    #expect(try await rewritten.next()?.events.isEmpty == true)
+    var stale = try box.store.inheritedTranscriptPages(in: child, request: .after(forward)).makeAsyncIterator()
+    await #expect(throws: TranscriptPagingError.staleCursor) { _ = try await stale.next() }
+    #expect(try box.store.events(in: box.key).contains { $0.text == "Original only" })
+}

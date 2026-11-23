@@ -11,6 +11,8 @@ import sys
 
 REPO = Path(__file__).resolve().parents[1]
 CODESIGN = "/usr/bin/codesign"
+QA_BUNDLE_ID = "com.chenxin.AgentDashboard.SyntheticQA"
+QA_REFUSAL = b"AgentDashboard SyntheticQA refuses to start without --synthetic."
 CACHE_DIRS = {".git", ".worktrees", ".build", ".swiftpm", "DerivedData", "build", "__pycache__", "node_modules"}
 SOURCE_SUFFIXES = {".swift", ".m", ".mm", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"}
 GRDB_URLS = {"https://github.com/groue/GRDB.swift", "https://github.com/groue/GRDB.swift.git"}
@@ -82,6 +84,48 @@ def check_artifact(app):
         raise Violation("signed artifact does not have the Hardened Runtime flag")
 
 
+def check_synthetic_launch(app):
+    """Verify the isolated build before executing the negative launch case."""
+    app = Path(app)
+    contents = app / "Contents"
+    macos = contents / "MacOS"
+    info_path = contents / "Info.plist"
+    binary = macos / "AgentDashboard"
+    if app.suffix != ".app" or not app.is_dir() or any(
+        path.is_symlink() for path in (app, contents, macos, info_path, binary)
+    ):
+        raise PrerequisiteError("a real isolated SyntheticQA app bundle is required")
+    try:
+        info = plistlib.loads(info_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError, TypeError):
+        raise Violation("the app bundle Info.plist could not be read") from None
+    if (
+        not isinstance(info, dict)
+        or info.get("CFBundleIdentifier") != QA_BUNDLE_ID
+        or info.get("CFBundleExecutable") != "AgentDashboard"
+    ):
+        raise Violation("expected the isolated SyntheticQA bundle; no executable started")
+    check_artifact(app)
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise Violation("the SyntheticQA executable is missing")
+    try:
+        compiled_guard = QA_REFUSAL in binary.read_bytes()
+    except OSError:
+        raise Violation("could not inspect the compiled SyntheticQA executable") from None
+    if not compiled_guard:
+        raise Violation("the compiled launch guard is missing; no executable started")
+
+    try:
+        result = subprocess.run(
+            [str(binary.resolve())], capture_output=True, stdin=subprocess.DEVNULL,
+            timeout=5, check=False, env={"PATH": "/usr/bin:/bin", "LANG": "C"}
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise Violation("could not verify the early refusal of a no-argument launch") from None
+    if result.returncode != 64 or result.stderr != QA_REFUSAL + b"\n" or result.stdout:
+        raise Violation("the SyntheticQA executable did not refuse the no-argument launch")
+
+
 def strip_comments(source, *, nested=True, mask_strings=False):
     """Remove comments without changing offsets; Swift block comments can nest.
 
@@ -147,6 +191,19 @@ FORBIDDEN = [
     ("SEC-6 AI", re.compile(r"\b(?:FoundationModels|LanguageModelSession|SystemLanguageModel|NLEmbedding|NLContextualEmbedding\w*|NLModel\w*|NLClassifier\w*|CoreML|CreateML|MLModel\w*)\b")),
     ("SEC-7 shared index/cloud", re.compile(r"\b(?:CoreSpotlight|CSSearchableIndex|CloudKit|NSUbiquitousKeyValueStore)\b")),
 ]
+
+INPUT_AUTOMATION = re.compile(
+    r"\b(?:typeText|typeKey|TIS(?:CreateInputSourceList|CopyInputSourceForLanguage|"
+    r"CopyCurrent(?!KeyboardInputSource\b)\w*InputSource|SelectInputSource|DeselectInputSource|"
+    r"EnableInputSource|DisableInputSource|RegisterInputSource|SetInputMethodKeyboardLayoutOverride)|"
+    r"CGRequest(?:Post|Listen)EventAccess|AXIsProcessTrustedWithOptions|"
+    r"CGEventKeyboardSetUnicodeString|keyboardSetUnicodeString|CGEventPost|"
+    r"cghidEventTap|cgSessionEventTap|cgAnnotatedSessionEventTap)\b|\bperform\s*\(\s*withKeyModifiers\s*:"
+)
+FIXED_KEYBOARD_APIS = re.compile(
+    r"\b(?:TISCopyCurrentKeyboardInputSource|TISGetInputSourceProperty|CGPreflightPostEventAccess|"
+    r"CGEventCreateKeyboardEvent|CGEventPostToPid|postToPid|keyboardEventSource)\b|\bNSEvent\s*\.\s*keyEvent\b"
+)
 
 
 def production_files(root):
@@ -232,10 +289,34 @@ def check_forbidden(root):
                 line = lines[match.start()]
                 violations.append(f"{path.relative_to(root)}:{line}: {label}")
                 break
+        if root / "App/Tests" not in path.parents:
+            if bad := INPUT_AUTOMATION.search(source) or FIXED_KEYBOARD_APIS.search(source):
+                violations.append(f"{path.relative_to(root)}:{lines[bad.start()]}: keyboard automation is test-only")
     if violations:
         raise Violation("forbidden APIs found:\n" + "\n".join(violations))
     return len(files)
 
+
+def check_ui_keyboard(root):
+    """Keep automatic input-source selection and all raw posting out of smoke cases."""
+    root = Path(root).resolve()
+    driver = Path("App/Tests/FixedKeyboardTests.swift")
+    paths = sorted((root / "App/Tests").rglob("*.swift"))
+    for path in paths:
+        if path.is_symlink():
+            raise PrerequisiteError("UI test inputs must not be symlinks")
+        try:
+            code = strip_comments(path.read_text(encoding="utf-8"), mask_strings=True)
+        except (UnicodeError, OSError):
+            raise PrerequisiteError("a UI test file could not be read as UTF-8") from None
+        relative = path.relative_to(root)
+        bad = INPUT_AUTOMATION.search(code)
+        if not bad and relative != driver:
+            bad = FIXED_KEYBOARD_APIS.search(code)
+        if bad:
+            line = code.count("\n", 0, bad.start()) + 1
+            raise Violation(f"{relative}:{line}: input-source automation or unguarded keyboard events")
+    return len(paths)
 
 def load_json(path):
     def unique_keys(pairs):
@@ -355,17 +436,22 @@ def main():
         command.add_argument("--root", type=Path, default=REPO,
                              help="repository root (synthetic repositories are supported)")
     commands.add_parser("entitlements").add_argument("app", type=Path)
+    commands.add_parser("synthetic-launch").add_argument("app", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "forbid":
             count = check_forbidden(args.root)
-            print(f"forbid-apis: passed ({count} production source files inspected)")
+            ui_count = check_ui_keyboard(args.root)
+            print(f"forbid-apis: passed ({count} production and {ui_count} UI test source files inspected)")
         elif args.command == "dependencies":
             version = check_dependencies(args.root)
             print(f"check-dependencies: passed (GRDB.swift exact {version}, lockfiles consistent)")
-        else:
+        elif args.command == "entitlements":
             check_artifact(args.app)
             print("check-entitlements: passed (signature, exact signed entitlements, Hardened Runtime)")
+        else:
+            check_synthetic_launch(args.app)
+            print("check-synthetic-launch: passed (isolated signed artifact refused launch without --synthetic)")
     except PrerequisiteError as error:
         print(f"{args.command}: unmet prerequisite: {error}", file=sys.stderr)
         return 2

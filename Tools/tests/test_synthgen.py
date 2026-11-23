@@ -79,6 +79,21 @@ class SyntheticCorpusTests(unittest.TestCase):
         with self.assertRaises(synthgen.CorpusError):
             synthgen.plan(synthgen.Profile(4, 32, 1), 0, "impossible")
 
+    def test_native_benchmark_counts_only_importable_sources(self):
+        native = synthgen.PROFILES["benchmark-native"]
+        layout = synthgen.session_layout(native, 27)
+        self.assertEqual((len(layout), sum(item.records for item in layout), native.raw_bytes),
+                         (2_000, 1_000_000, 5_000_000_000))
+        self.assertEqual([sum(item.agent == agent for item in layout) for agent in
+                          ("claude_code", "codex", "copilot", "grok_build")], [667, 667, 666, 0])
+        with tempfile.TemporaryDirectory() as scratch:
+            small = synthgen.Profile(6, 216, 1_000_000, native.agents)
+            output = synthgen.generate(synthgen.plan(small, 27, "native-test"), Path(scratch), [])
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertEqual(set(manifest["agents"]), {"claude_code", "codex", "copilot"})
+            self.assertFalse((output / "grok_build").exists())
+            self.assertEqual(sum(p.stat().st_size for p in output.rglob("*.jsonl")), 1_000_000)
+
     def test_protects_registered_source_and_protected_names(self):
         with tempfile.TemporaryDirectory() as scratch:
             parent = Path(scratch).resolve()

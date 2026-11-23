@@ -35,6 +35,10 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 
 ### 1.2 Goals (v1)
 
+These are product goals. The [0.1.0 release scope](RELEASE-SCOPE.md)
+includes Claude Code, Codex and GitHub Copilot CLI. Grok Build support
+remains a goal for a later release, after format capture and validation.
+
 - G1 Auto-discover each agent's local sessions and usage data; index incrementally and in near real time.
 - G2 **Unified full-text search** across agents, directories and environments; must work well for both Chinese and English.
 - G3 **Read-only** session view: directory, branch, environment, main topics, latest progress, full transcript.
@@ -124,7 +128,7 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 |---|---|---|
 | `ADCore` | Domain models (`Source`, `Session`, `Event`, `TokenEvent`, `AgentKind`, `SessionStatus`, …), time and path utilities | — |
 | `ADAdapters` | Discovery rules and parsers per agent; emit normalized records | ADCore |
-| `ADStore` | Database, migrations, writes, queries, rollups, archive | ADCore, GRDB |
+| `ADStore` | Database, migrations, writes, queries, rollups, archive | ADCore, ADPrivacy, GRDB |
 | `ADIngest` | Source lifecycle, FSEvents, tailer, checkpoints, scheduling | ADCore, ADAdapters, ADStore |
 | `ADSearch` | Grouped search and masked, highlighted snippets | ADCore, ADStore, ADPrivacy |
 | `ADInsights` | Titles, keywords, latest progress, status inference | ADCore, ADStore |
@@ -173,6 +177,7 @@ Scenarios covered (FR-SRC-1):
 4. **Desktop apps / other entry points:** Codex desktop app and Copilot App share the CLI's directory. The record's origin field (Codex `originator`, Copilot `producer`) distinguishes them; the UI shows them as entry points of the same agent.
 5. **Data not on this Mac** (remote servers, cloud sandboxes): not supported in v1 (no network). The user may sync the directory locally and use scenario 3.
 6. **Several environments mixed in one directory:** e.g. several Codex profiles sharing `~/.codex`. `environmentRules` tag sessions by record fields (such as `model_provider` or `originator`); rules are editable in Settings.
+   Sources settings can edit path mappings and Codex rules for model provider and originator. Saving configuration preserves source permissions and does not rebuild indexed sessions.
 
 #### 5.1.1 Exploration task EXP-1: the user's two Codex environments (do this on the developer machine before M1)
 
@@ -201,6 +206,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 - If a different directory occupies a registered pathname, adding it reports a path conflict (including equivalent path spellings) and preserves the original source and its history.
 - Grant access again matches the same physical directory as Add Source. If the original moved, update its path and bookmark on the same source ID; choosing a replacement keeps the existing access and history. Selecting another spelling of the same directory preserves its saved path. Older bookmark sources without an identity need a live match from their existing bookmark. A default source's first bookmark may be granted for its configured path.
 - The first-run onboarding (§11.7) lists the detected locations and their session-file counts.
+- Removing a source stops its worker and forgets the stored bookmark without deleting indexed sessions or original files. Default discovery does not re-add it. Explicitly choosing the same directory path again restores the existing registration and checkpoint with a fresh read-only grant.
 
 ### 5.3 General parsing rules (all adapters)
 
@@ -212,7 +218,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | ADP-4 | **Parser versions:** each adapter has `parserVersion`. When it changes, files that still exist are re-parsed automatically. |
 | ADP-5 | **Time:** store UTC epoch milliseconds as integers. Records without a timestamp inherit the previous record's. Transcript order follows file order (`seq`); statistics use timestamps. |
 | ADP-6 | **Performance:** skip large useless records with a substring check before JSON decoding (e.g. Claude `file-history-snapshot`). Decode only the fields you need; ignore the rest. |
-| ADP-7 | **Truncation:** searchable text keeps at most 2 KB per tool output across all text blocks. An oversized line with a successfully recovered result does not count as unknown. Replay replaces an obsolete empty marker for that same indexed record in the write transaction. The archive keeps up to 64 KB compressed (configurable); anything beyond is read from the original file on demand while it still exists. |
+| ADP-7 | **Truncation:** searchable text keeps at most 2 KB per tool output across all text blocks. An oversized line with a successfully recovered result does not count as unknown. Replay replaces an obsolete empty marker for that same indexed record in the write transaction. Complete results that fit the configurable LZFSE archive limit (64 KiB by default) are stored separately from search. Storage can retain 64/32/16 KiB compressed or preview only. Larger results can be read on demand from a verified original record when available; displayed source reads are bounded and labeled if truncated. |
 
 ### 5.4 Adapter: Claude Code (ADP-CC)
 
@@ -230,7 +236,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | ⚠️ Trap 2 | **Resuming a session copies the whole previous conversation into the new file.** Dedupe events globally by `uuid` and tokens by `message.id`. Use a valid recorded `sessionId` in primary transcripts to assign copied rows to the original, independent of scan order. Mark the new session "continued from <original>" and collapse the inherited part in the transcript. |
 | ⚠️ Trap 3 | Timestamps are not guaranteed to be in order (see ADP-5). |
 | ⚠️ Trap 4 | **Claude Code deletes transcripts older than 30 days by default** (`cleanupPeriodDays`). The app must archive (§6.4). |
-| Thinking | Not indexed by default (Settings toggle). |
+| Thinking | Default off. Privacy can opt into complete nonempty Claude plaintext `thinking` blocks of at most 8 KiB on the next scan. Opaque or oversized blocks are omitted. Thinking is distinct from replies and never changes token accounting, status, topics or latest progress. Turning the option off removes all indexed thinking, including archived copies. |
 | Status signals | `stop_reason = tool_use` with no later matching `tool_result` → tool running or waiting for approval; `end_turn` → turn finished; API-error records → failed. |
 | Resume command | `cd "<cwd>" && claude --resume <sessionId>` |
 
@@ -244,7 +250,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | Envelope | `{ "timestamp", "type", "payload" }` |
 | `session_meta` | `payload.id` (session id), `cwd`, `originator` (CLI vs desktop app etc.), `cli_version`, `source`, `model_provider`, and git info when present (commit, branch, repository URL). |
 | `turn_context` | `model`, `effort`, `approval_policy`, `sandbox_policy`, `cwd`: the model used per turn. |
-| Transcript text | **Use `event_msg`:** `user_message` (`payload.message`) and `agent_message` (`payload.message`). `response_item` records with `type = message` are model-facing copies (assistant ones duplicate `agent_message`; user ones are mostly injected environment context). **Never index both channels or every reply appears twice.** Fall back to `response_item` only for sessions that have no `event_msg` at all. |
+| Transcript text | **Use `event_msg`:** `user_message` (`payload.message`) and `agent_message` (`payload.message`). `response_item` records with `type = message` are model-facing copies (assistant ones duplicate `agent_message`; user ones are mostly injected environment context). **Never index both channels.** Fall back to usable `response_item` text until the session has a usable `event_msg` transcript message; token and task records alone do not pick the transcript channel. |
 | Tools | `response_item` `function_call` / `custom_tool_call` (`name`, `arguments` as a JSON string, `call_id`) paired with `*_output` by `call_id`. `exec_command` → command; `apply_patch` → file changes (parse patch headers for paths and +/- line counts). MCP calls: join `namespace` and `name` into `mcp__<server>__<tool>`. |
 | Other events | `task_started`, `task_complete` (`last_agent_message`, `duration_ms`), `exec_command_end`, `patch_apply_end`, error events, `compacted` (compaction summary). |
 | Tokens | `event_msg` with `payload.type = token_count`: **use only `info.last_token_usage`** (this response); `info.total_token_usage` is for reconciliation only. `input_tokens` **includes** cached input: `input_fresh = input_tokens − cached_input_tokens`, `cache_read = cached_input_tokens`, `output = output_tokens`, `reasoning = reasoning_output_tokens` (part of output — do not add it again). |
@@ -281,7 +287,7 @@ Steps (in a terminal on the developer machine, not inside the app):
 | Metadata DB | `session-store.db` (SQLite): **optional**, snapshot read for enrichment. |
 | Envelope | `{ "type", "data", "id", "timestamp", "parentId", "agentId"? }` |
 | Main events | `session.start` (`sessionId`, `copilotVersion`, `startTime`, `context.cwd`, …), `session.resume`, `session.context_changed`, `user.message` (`content` is what the user typed; `transformedContent` includes injected context — **index `content` only**), `assistant.message`, `assistant.turn_start` / `turn_end`, `tool.execution_start` (`toolName`, `arguments`) / `tool.execution_complete` (success), `session.task_complete` (`summary`, `success` — the agent's own completion summary, used directly as "latest progress"), `session.compaction_complete`, `session.model_change`, `subagent.started` / `completed`, `skill.invoked`, `session.shutdown`. |
-| Tokens (preferred) | Per-call `session.usage_record` events (field names as found locally); dedupe by event `id`. |
+| Tokens (preferred) | Per-call `session.usage_record` events; dedupe by event `id`. Use the explicit model in the event data, including `data.usage.model`, before falling back to the session model. A valid call without a model remains in exact token totals and is unpriced. Reconcile it only when one model's remainder covers all its counters after subtracting named calls and usage already accounted for before the call. Recheck pending calls when a unique match consumes that model's capacity. A batch can also be reconciled when a complete assignment accounts for each model's remaining usage in every component and leaves previously credited history intact. This proof never assigns a model or price to a call. Later checkpoints may establish coverage that an earlier sample did not. |
 | Tokens (fallback) | `data.modelMetrics` on `session.shutdown` (and `session.usage_checkpoint`): per model `usage.inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens / reasoningTokens`. **These are cumulative:** a resumed session appends more shutdown events, so diff consecutive events per model and keep only increases; ignore repeated event ids and decreasing values. Fallback data has session-level time precision; record it at the shutdown time with `precision = checkpoint` (drawn with hatching, §11.4). |
 | ⚠️ Accounting | `inputTokens` **includes** cache reads and writes: `input_fresh = inputTokens − cacheReadTokens − cacheWriteTokens`; `reasoningTokens` is part of `outputTokens`. Records stamped with `agentId` (subagents) are already included in the parent totals — **do not count them twice**. |
 | Resume command | `cd "<cwd>" && copilot --resume <sessionId>` |
@@ -502,15 +508,35 @@ CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT);   -- incl. pricing_has
 ### 6.4 Archive and retention (FR-STO-1)
 
 - When an agent deletes a raw file (file gone, parent folder still present), mark the session `source_deleted_at`, **keep its content in the database**, and show an "Archived" marker in the UI.
+  Confirm absence below the pinned, accessible source parent. An unavailable parent or a symlink is insufficient. If the file returns, replay it and clear the archive marker only for sessions found in that file.
 - Retention setting: forever (default) / 365 / 180 / 90 days. Expired sessions are deleted with their events and token records; rollup tables are kept so long-range charts stay continuous.
+  Count days from confirmed archival and apply the policy at launch and periodically
+  while the app is open. Preserve numeric usage by source and workspace, including
+  precise time-range boundaries and stored costs, separate from expired transcripts.
+  Session counts describe the surviving indexed sessions. Fingerprints prevent
+  explicit rescans from duplicating expired content or usage. A confirmed manual
+  clear or matching privacy exclusion also removes the affected retained totals.
 - Settings shows the database size and offers: "Clear a project's data", "Clear a source's data", "Clear everything".
+  Each clear previews a scope and requires confirmation with active indexing stopped.
+  Project scope uses the current Projects membership. Clear removes selected
+  transcripts and attributable usage; unrelated records and source grants,
+  saved searches, prices and settings remain. Clear everything also removes
+  agent-wide readouts and aggregate-only legacy usage. The next independently
+  requested scan may restore data from original files that are still present.
+  Archived sessions without an original file cannot be restored.
 
 ### 6.5 Two kinds of rebuild
 
 | Action | What it does | Data loss? |
 |---|---|---|
-| Rebuild index | Rebuild `events_fts`, `token_minute` and keywords from the `events` / `token_events` tables | No |
+| Rebuild index | Rebuild `events_fts`, `token_minute` and keywords from the `events` / `token_events` tables and detached archive rollups | No |
 | Full rescan | Re-parse raw files (idempotent upserts); archived sessions are kept | No |
+
+Rebuild runs in one app-index transaction, uses stored quotes and masked
+topic inputs, and refuses replacement when historical usage is unbacked.
+Full rescan replays files in enabled Claude, Codex and Copilot sources using their current
+read-only authorization. A watched source replays in its existing worker;
+a stopped source runs one pass and stays stopped afterward.
 
 ### 6.6 Reading other apps' SQLite (Codex `state.sqlite`, Copilot `session-store.db`)
 
@@ -572,7 +598,7 @@ Target: **≤ 2 s** from an agent writing a file to the UI updating (NFR-2).
 - Tiers: if a call's prompt tokens (`input_fresh + cache_read + cache_write + cache_write_1h`) exceed a tier's `whenPromptTokensAbove`, the whole call uses that tier. Data with non-`call` precision can only use base prices and is marked `approx`.
 - No matching model → `unpriced`: cost 0, tokens counted as "unpriced tokens"; the UI warns and Settings lists those models.
 - Copilot: sessions record the underlying model (claude-*, gpt-*, …); price them at that vendor's list price as an "API-equivalent cost". If records contain Copilot's own billing units (e.g. premium request counts), show them separately; never mix them into USD.
-- When the price table changes (file hash differs), recompute the cost of all `token_events` and rollups in the background; the UI shows "Recalculating with new prices".
+- When the verified price table changes, apply it to new records immediately and backfill previously unpriced `token_events` in the background. Commit each quote and its rollups together. Preserve the original rates of records with an existing quote (§8.5). Settings shows when estimates are updating.
 - Display currency: USD by default; may switch to a currency that the price table lists with a static rate (e.g. CNY), showing the rate date. **Exchange rates are never fetched.**
 
 ### 8.5 Price table interface (static file, updated periodically by an agent)
@@ -584,7 +610,7 @@ names before decoding prices or aliases.
 
 1. External file `~/.config/agent-dashboard/pricing.json` (preferred). Read through a read-only sandbox exception (§12.1) and watched with FSEvents; edits apply immediately.
 2. The bundled `pricing.json` (copied from the repository's `pricing/pricing.json` at build time), used when the external file is missing or invalid.
-3. If validation fails, keep using the last valid table and show the errors in Settings → Pricing.
+3. If validation fails, keep using the last valid table when available and show the errors in Settings → Pricing. With no last valid table, fall back to a valid bundled table. If the watched directory does not exist yet or watching fails, Settings offers a manual reload.
 
 **Files in the repository:**
 
@@ -595,8 +621,8 @@ pricing/
 └── UPDATE_PLAYBOOK.md     # instructions for the agent that updates prices
 Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 ├── validate               # schema, effective dates, match conflicts; prints the impact on historical cost
-├── models-seen            # scan local agent records; list model IDs seen, their token volume, priced or not
-└── install                # after validation, copy to ~/.config/agent-dashboard/pricing.json
+├── models-seen            # list model IDs and priced/unpriced volume from an approved standalone app index copy
+└── install                # with --apply, validate and atomically set ~/.config/agent-dashboard/pricing.json
 ```
 
 **Format** (all prices in the example are 0 — **not real prices; do not copy**):
@@ -646,7 +672,7 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 
 **`UPDATE_PLAYBOOK.md` must describe these steps** (for the agent that updates prices):
 
-1. Run `Tools/pricing/models-seen` to get the models actually used on this Mac.
+1. Run `Tools/pricing/models-seen --index-snapshot COPY` on an approved standalone app index copy to get the models actually indexed on this Mac. The developer tool reads only accounting columns; it does not read a live WAL database.
 2. Take prices only from official vendor pricing pages (Anthropic, OpenAI, xAI; for Copilot, the underlying model's vendor). No third-party aggregators.
 3. Price changed → append a new `prices` entry (`effectiveFrom` = the vendor's effective date, or today if unknown). New model → add a `models` entry.
 4. Update `updatedAt`; update `displayCurrencies` static rates and dates if needed.
@@ -665,7 +691,11 @@ Tools/pricing/             # command-line tools (Swift, reuse ADPricing)
 - Compute exact totals before limiting the displayed groups. Mask the complete snippet candidate before highlighting or taking an excerpt.
 - Opening a session scrolls the transcript to the first match. The up/down buttons move between matching events in that session using transcript order and show the current position. Only a bounded transcript page is loaded at each match. When the index changes, keep the current event if it still matches; otherwise restart at the first match.
 - Sort: relevance (default) / most recent / token volume.
+  Sort matching sessions before paging. Token volume includes cached input and output; changing sort does not change match order inside a transcript.
+- Keep the result list in place while a new query loads. Hide stale rows while waiting.
+  Adjacent pages can share a ranked snapshot; continue checking the displayed page against new commits.
 - A query can be saved as a "Smart Group" in the sidebar.
+  Save the validated query as entered with its sort order, then run it against the current index whenever the group is opened. Removing a group removes only the saved query.
 
 ### 9.2 Chinese tokenization (must be done right)
 
@@ -678,7 +708,12 @@ FTS5's built-in `unicode61` treats a run of Chinese characters as one token, so 
 
 ### 9.3 Query syntax (full table in Appendix B)
 
-Free text plus filters; filters render as tokens in the search field (`.searchable(text:tokens:)`):
+Free text plus filters; filters render as native tokens in the search field
+(`.searchable(text:tokens:)`). Opening or submitting a valid query renders
+recognized filter clauses as removable tokens, without changing the active
+query. Leave draft text alone while the input method is composing. A mouse
+can remove a single filter from Search Filters; quoted phrases, literal
+words, repeated filters and a Smart Group’s sidebar scope retain their meaning.
 
 `agent:claude` `project:payments-api` `dir:~/code/x` `env:work` `status:running` `role:user|assistant|tool` `tool:Bash` `file:auth.ts` `model:opus` `after:2026-11-01` `before:2026-11-15` `in:7d` `"exact phrase"` `-exclude` `A OR B`
 
@@ -694,6 +729,13 @@ Free text plus filters; filters render as tokens in the search field (`.searchab
 
 Priority: title set by the user in this app → title/summary provided by the agent (Codex metadata DB title, Copilot `workspace.yaml` title, Claude `summary` record, Grok Build `summary.json` title) → first meaningful user prompt (skip slash commands, injected context, empty messages), truncated to 80 characters. `title_source` records the origin; the UI notes "from agent" or "from first prompt" in small text.
 
+Manual titles live in the app index and are not overwritten by source replay.
+Reset the override to use the indexed agent title or, if available, a Claude
+summary; otherwise use the first eligible indexed user prompt in file order.
+Only bounded title fields are read for display. Mask the whole field before
+flattening or shortening it. Use the same resolved title in session,
+project and menu views.
+
 ### 10.2 Main topics (keywords)
 
 - Corpus: user prompts (weight 2), assistant text (weight 1), touched file names (weight 1.5).
@@ -701,6 +743,11 @@ Priority: title set by the user in this app → title/summary provided by the ag
 - Scoring: TF-IDF with `tf = ln(1 + count)`, `idf = ln(N / (1 + df))`, N = number of sessions, `df` kept in `term_df`.
 - Keep the top 5; skip a term that is a substring of a higher-ranked term.
 - Shown as chips; clicking a chip searches for it.
+- Refresh weights from the app-owned index after relevant writes, off the ingest
+  writer, without waiting for a manual rebuild. A stale calculation cannot
+  overwrite newer text. Keep the existing whole-message and file-name masking
+  before counting. Session and project chips must match the existing literal
+  search in at least one member session.
 
 ### 10.3 Latest progress ("what are the latest updates")
 
@@ -745,13 +792,30 @@ becomes `unknown`. At exactly 15 s the silence-based approval inference does not
 an explicit "needs approval" signal, or "waiting for your reply"; preserve the
 inference qualification in the displayed evidence.
 
+Settings → Thresholds applies validated whole-second values to both
+existing and new indexed sessions. The default thresholds above remain
+in effect until changes are saved.
+
 ### 10.5 Files and commands
 
 Extracted from tool calls: Claude `Read`/`Edit`/`Write`/`MultiEdit`/`Bash`, Codex `exec_command`/`apply_patch`, Grok Build tool calls in `updates.jsonl`, Copilot `tool.execution_*`. Line counts: Claude `Edit` diffs `old_string` vs `new_string` by line; Codex `apply_patch` counts `+`/`-` lines in the patch.
 
+File entries describe logged tool targets, including requests whose disk outcome
+cannot be verified. Repeated scans and resume copies do not add counts. Show
+line totals only when all contributing counts are known. A command result
+requires an explicit, unique call and completion with the same ID in the same
+session and in file order. Missing or ambiguous outcome fields remain blank.
+Render only recorded command text and metadata; never run the command or read
+a target path named in its arguments.
+
 ### 10.6 Context usage
 
 Shown only when determinable: "latest request's total input ÷ model context window". Codex provides `model_context_window`; for other agents use the local "model → context window" table in Settings (user-editable, prefix match on model name). Otherwise show "—".
+
+Use cache-inclusive input for the measured request, excluding output.
+Source-reported capacity takes priority. Otherwise use the longest
+case-sensitive prefix for the model attached to that request. A newer
+request for another model cannot reuse the older model's reported capacity.
 
 ---
 
@@ -779,36 +843,50 @@ Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Fig
   - **Environments:** only when there is more than one
   - **Status:** Running / Waiting / Completed / Failed
   - **Smart Groups:** saved searches
+  - Sidebar filters narrow the Sessions list even when a session has no
+    transcript. A typed query stays within the chosen sidebar filter;
+    Smart Groups also save that scope.
 - Window default 1120×720, minimum 960×600, no maximum; remember last size and position.
 
 ### 11.2 Sessions page
 
-**List:** each row = agent avatar (initials + agent color), title, relative time, `project · branch`, matching snippet (when searching), status badge, tokens and estimated cost. Archived sessions show a small archive icon. A "Group by project" toggle.
+**List:** each row = agent avatar (initials + agent color), title, relative time, `project · branch`, matching snippet (when searching), status badge, tokens and estimated cost. Archived sessions show a small archive icon. A "Group by project" toggle. Use canonical Projects membership, not a path label; sessions without a proven project remain in Ungrouped. Group the current visible page in first-occurrence order and preserve the existing order within each section, selected session, filters and search pagination.
+
+List rows and detail read the same committed, cache-inclusive usage summary. Show the current display currency, label partial or unpriced usage and approximate quotes, and use an empty indicator when no usage was recorded. Search order, pagination and selection are independent of the row's display currency.
 
 **Detail:**
 
 - Header: avatar, title, `agent · full path · branch · environment`, status badge (hover shows inference evidence).
-- Meta grid: Started, Turns, Tokens · Cost (two lines in one cell: total tokens including cache / list-price cost estimate; hover shows the breakdown), Context window.
-- Live activity bar (running only): current action + command + elapsed time + "last event 3s ago". **No process ID** (the sandbox cannot see it).
+- Meta grid: Started, Turns, Tokens · Cost, Context window. Show both cache-inclusive tokens and the estimated amount as primary values, with the estimate label next to or below the amount. Hover shows the breakdown. Show full context usage and capacity with the percent used on its own line.
+  Count each user record once by file sequence. Use stored event quotes and label a subset of priced tokens as a partial estimate.
+- Live activity bar (running only): show the latest eligible unanswered tool, its masked command when available, time since that call and time since the latest indexed activity. If no call is known, show the most recent kind of activity and its age. Omit times that cannot be determined. **No process ID** (the sandbox cannot see it).
 - Two tabs: **Overview** | **Transcript**.
   - Overview: main-topic chips, latest progress (§10.3), touched files (top 10, with +/-), commands run (top 10), mini token chart for this session.
-  - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to full input/output; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
-    Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Seek straight to a selected match without reading intervening pages. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor or empties the current older/newer page.
+    Plot up to 72 buckets for the selected session; distinguish session-level estimates. Records without a timestamp still count in the total.
+  - Transcript: as in the prototype — user / assistant messages; tool calls collapsed into one row (icon + name + argument summary + result on the right), expandable to indexed input/output, with explicit access to a verified original when the index only has a preview; inherited parts collapsed; match highlighting and navigation. Render Markdown with `AttributedString(markdown:)`, code blocks in monospace; never load external images.
+    Keep one 128-entry page in file order, with the event row ID breaking sequence ties. Place a folded tool at its call, with at most one matching result preview. A search hit on the result seeks directly to the call and expands it. Original tool inputs require an unchanged recorded line and a current source grant. They are read only on request, are never added to search or archives, and are shown only if the complete input fits within 256 KiB. Only pair a unique call and following result with the same explicit ID in the same session; keep ambiguous or unscoped child records separate. Pages are scoped to one session; restart from the beginning when a rewrite invalidates the cursor or empties the current older/newer page.
+
+    Show confirmed Claude copies in a separate collapsed section. Page only the
+    canonical events that the destination transcript actually recorded, in its
+    physical order. No title, relationship or parent timestamp alone establishes
+    a copied range. Indexing an available pre-v11 file rebuilds its copy
+    references; do not infer missing copy evidence for an already archived
+    destination file. Search matches and token accounting remain with the original.
 - Bottom buttons:
-  - **Copy Resume Command** (primary; replaces the prototype's old "Open in Terminal"): copies the command from §5 / Appendix C.
-  - **Show in Finder** (reveals the session's record file).
+  - **Copy Resume Command** (primary; ⇧⌘C): copies the shell-quoted command from §5 / Appendix C for a live, resumable session. Use its indexed workspace and current source mapping. Disable the action when the command cannot be formed.
+  - **Show in Finder**: asks Finder to select the original record. Use the current registered source grant and verify the indexed regular file's identity, without following symlinks. Disable it for archived sessions and records without a known file; report if the original cannot be verified on click.
   - MAY: "Open folder in Terminal" using only `NSWorkspace.shared.open(_:withApplicationAt:configuration:)`, no Apple Events. If the sandbox does not allow it, skip it and record the decision in `docs/DECISIONS.md`.
 
 ### 11.3 Projects page (answers "which directory, and what is going on there")
 
-- List: project name, path, agents used (icons), session count, last activity, tokens and cost for the selected period, latest session title. Projects can be pinned.
+- List: project name, path, agents used (icons), session count, last activity, tokens and cost for the selected period, latest session title. Projects can be pinned. Pins sort before other projects, preserve activity order within each section, and persist by project identity across restarts and archive expiry.
 - Detail:
   - Header: project name, full path, repository URL (if known), branches.
-  - Meta grid: Sessions, Agents, Tokens · Cost, Last activity. Main-topics line below it.
-  - **Latest updates timeline**: recent actions from **all agents** in this project merged by time (who, which session, what was done).
-  - Tabs: Sessions | Latest updates. The Sessions tab lists this project's sessions (filter by agent / status).
-  - Token chart for this project (reuse the Token Usage components with a project filter).
-  - Buttons: Show in Finder, Open Latest Session.
+  - Meta grid: Sessions, Agents, Tokens · Cost, Last activity. Main-topics line below it, ranked from the project’s member-session counts and the same document-frequency ledger. Clicking a chip starts a literal library search.
+  - **Latest updates timeline**: recent actions from **all agents** in this project merged by time (who, which session, what was done). Show structured commands with their recorded outcomes, and up to three affected paths with known line counts per tool action. Indicate additional targets. Keep the original call time and open its session on click. Only suppress an empty wrapper whose same-session action or outcome is already represented; keep genuine output, unpaired records and ambiguous completions.
+  - Tabs: Sessions | Latest updates | Usage. The Sessions tab lists this project's sessions (filter by agent / status). The Usage tab reuses the token chart without crowding the timeline at small window sizes.
+  - The project period picker uses the same rolling or custom boundaries as Token Usage. List totals, detail totals and the selected chart share one index snapshot. Resolve current sessions through project membership and retained numbers through the exact saved project fingerprint; never mix unclassified catalog rows into a workspace project. Retained-only projects remain visible without transcripts. Undated records contribute to All totals but are not plotted. Show partial or unavailable prices explicitly.
+  - Buttons: Show in Finder, Open Latest Session. Finder requires a current index-proven host directory (including explicit path mappings), a locally verifiable directory and an explicit click. Do not offer a directory target for an unmapped environment or from retained-only records.
 - Project identity: if a repository URL is known, the normalized URL is the key (worktrees of the same repository group together, with the worktree name as a tag); otherwise `cwd`. Claude worktree paths look like `<repo>/.claude/worktrees/<name>` and belong to the main repository.
   Resolve workspace groups from the owned index. For a registered default local root and local environment, re-granting access does not change project identity. Normalize unambiguous path spellings before applying mappings. An explicit mapping can join the same host project, including a unique catalog root; keep unmapped environments separate and do not infer which catalog project an ambiguous root belongs to. Prompt-history buckets remain searchable and do not count as project sessions or latest-session targets. The recent timeline uses normalized event time and a stable tie break.
 
@@ -849,7 +927,7 @@ The page subtitle states the range explicitly, e.g. "Today 00:00–15:12 · all 
 - NOW vertical line + current combined value + current cumulative value.
 - Hover: values of every agent at that time (`chartOverlay`).
 - Non-`call` precision data is drawn as hatched bars, with a legend note "session-level precision".
-- Live updates on new data or every 5 s; append only, never recompute the whole chart.
+- Move the live NOW axis every 5 s without reading the index. Refresh data on a committed change or when a record enters or leaves a displayed interval; reuse unchanged chart buckets.
 
 **Metric switch:** Tokens (default) / Output only / Cost (§8.2). With Cost, the Y axis is $/h ($/day for 30D and longer) and the dashed line is cumulative cost. **Filters:** agent menu (in the prototype) and a new project menu.
 
@@ -864,8 +942,10 @@ Per prototype `31:847`:
 - Three readouts: Now (tok/min + active agents), Today (total + estimated cost), Headroom.
 - Today's mini chart + legend.
 - Active sessions (max 6, then scroll): title, project, status and duration, current rate or "Needs input". Clicking opens the main window on that session.
-- Footer: Open Dashboard ⌘D, Settings… ⌘,, Quit ⌘Q.
-- MAY: option to show current tok/min next to the menu bar icon.
+- Footer: one compact row with Open Dashboard on the left and Settings and Quit on the right. Keep ⌘D, ⌘, and ⌘Q, and show them in the button help.
+- Read the full menu snapshot only while the panel is visible. “Now” is rolling 60-second call-level throughput; “Today” starts at local midnight and includes all recorded precision levels.
+- While the panel is visible, refresh on relevant commits or at the next time a displayed value changes (trailing-minute boundary, quota expiration, displayed session age, or local midnight). An unchanged idle panel does not query the index on a fixed interval.
+- General can show the same tok/min next to the menu bar icon; default off. When enabled, read only the trailing minute of call-level usage for the icon, even with the panel closed. An idle reading waits for usage changes instead of polling the index.
 - SHOULD: local notification (UserNotifications, local only) when a session starts needing approval; off by default.
 
 ### 11.6 Settings window
@@ -873,16 +953,30 @@ Per prototype `31:847`:
 | Tab | Content |
 |---|---|
 | General | Launch at login, menu bar display, time format |
-| Sources | Source list (agent, path, environment, status, files, sessions, last scan, unknown records, errors); add / remove / rescan; edit path mappings and environment rules |
+| Sources | Source list (agent, path, environment, status, files, sessions, last scan, unknown records, errors); start / stop indexing, add / remove / rescan; edit path mappings and environment rules |
 | Thresholds | Per-agent redline (tok/min); status-inference thresholds; model → context-window table |
 | Storage | Database size; archive retention; tool-output size limit; rebuild index; full rescan; clear by project / source / all |
 | Privacy | Secret masking (default on); index thinking blocks (default off); excluded paths or projects (globs) |
 | Pricing | Active file (external / bundled), `updatedAt`, number of model entries, validation errors; unpriced models with token volume (one-click copy, to hand to an agent); display currency |
-| About | Version; statement that the app has no network permission, listing the entitlements actually present in the signature |
+| About | Running bundle version/build; read-only display of entitlements in the running app’s signature and whether those establish no network permission |
+
+General applies the system-default, 12-hour or 24-hour clock to absolute
+times and period-entry controls. The override changes the hour cycle without
+changing the time zone, calendar boundaries, ranges or relative durations.
+Both presentation settings are kept in local app preferences.
+
+About validates its own running code offline and reads the signed entitlement
+values. An absent, unreadable or unrecognized signature does not verify the
+absence of network permission. This display does not replace the release check
+in §12.4.
 
 The Sources index counts come from committed checkpoints and session rows,
 separate from checking directory access. Show a scan time only when the
 index contains one, and report errors without exposing raw source details.
+
+An empty redline in Thresholds disables the manual limit for that agent.
+Use positive whole tokens per minute; apply saved values to the menu and
+Token Usage without rebuilding indexed usage.
 
 Launch at login is off until the user requests it in General. Use
 `SMAppService.mainApp` and show the observed macOS registration status,
@@ -894,13 +988,17 @@ and requests no new entitlement for this feature.
 
 Three steps: ① privacy promise (zero network, read-only, data stays on this Mac) → ② detected agent directories with file counts; add other directories (containers, VMs, other `CODEX_HOME`s) with environment labels → ③ start indexing with progress; recent sessions appear first and the user can enter the main window immediately.
 
+Preview counts enumerate authorized directories without opening session
+contents. Start only the selected sources, or continue without indexing.
+Keep this decision in the app index; an existing indexed library skips setup.
+
 ### 11.8 Responsive rules (final in Figma `46:2400`)
 
 - Window default 1120×720, minimum 960×600, no maximum, remember last size.
 - Sidebar 240 default, draggable 200–300, collapsible.
 - Toolbar search field fills the remaining width, minimum ≈ 200.
 - Session list width: 300 at minimum window / 356 default / 420 large (interpolated with window width; remember user drags).
-- Session detail narrower than 480: meta grid becomes 2×2 instead of 1×4.
+- Session detail narrower than 480, or without room for the four full-width readouts: meta grid becomes 2×2 instead of 1×4. On one row, the facts use their content widths rather than four equal cells.
 - Token page content narrower than 760: readout captions hidden.
 - Main chart minimum height 220; if it does not fit, the whole page scrolls.
 - Detail table: name and share columns split the free width; narrow windows hide columns as in §11.4.
@@ -954,14 +1052,19 @@ All user-facing strings go through a String Catalog (`Localizable.xcstrings`). S
 
 ### 12.2 Secret masking (default on)
 
-Mask common secret formats at display time (e.g. `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox[bp]-…`, `-----BEGIN … PRIVATE KEY-----`, and `.env`-style assignments to variables whose names end in KEY, TOKEN, SECRET or PASSWORD) as `••••••`; click to reveal temporarily. Rules live in `ADPrivacy` with unit tests. v1 masks only in the UI and keeps the original text in the index (so users can still search their own config keys); "also strip at index time" is a setting.
+Mask common secret formats at display time (e.g. `sk-…`, `ghp_…`, `github_pat_…`, `AKIA…`, `xox[bp]-…`, `-----BEGIN … PRIVATE KEY-----`, and `.env`-style assignments to variables whose names end in KEY, TOKEN, SECRET or PASSWORD) as `••••••`; click to reveal temporarily. Rules live in `ADPrivacy` with unit tests. By default only the display is masked and the index remains searchable by its original text. A separate default-off control removes recognized credentials from current and newly indexed text.
 
 Apply the display projection to raw text before rendering Markdown or snippets.
 Keep dotenv names and trailing comments visible. Single quotes, double
 quotes and backticks can enclose multiline values and embedded hashes. When a
 quoted secret or private-key block is truncated, hide its remaining content.
-The projection leaves the stored transcript untouched and is not a data
-sanitization tool.
+Display masking leaves the stored transcript untouched. Opt-in index redaction
+updates stored session text, free-form metadata, and search in a single
+transaction. It keeps routing identities and token accounting intact. If
+opaque decoder state contains a recognized credential, omit it and replay the
+file at the next open. Turning off index redaction does not restore removed
+values; an explicit future import can read the original files again. This
+cleans the live index; it is not physical erasure of historical disk bytes.
 Reveal applies to one entry and ends after ten seconds, when the entry leaves
 the view, or when the app loses focus.
 
@@ -983,10 +1086,25 @@ an implementation-defined `//` prefix, NUL or a `..` component is indeterminate.
 Defer indexing when the workspace is indeterminate; only a confirmed match
 triggers removal. With no exclusion rules, no path is excluded.
 
+Match both recorded and mapped workspaces. Stop active indexing before
+applying a new rule set. Applying rules atomically removes matches from the
+local library, including derived search and usage, without touching original
+files. Affected files are reconsidered on their next scan. A previously
+withheld prefix with missing workspace metadata is replayed when the same
+session supplies a trustworthy path. A malformed path alone does not prove
+admission or removal. Clearing rules can recover only available source files.
+Apply mappings to the same byte-preserving normalized workspaces used by
+Projects. A byte-only mapping change applies existing exclusions immediately;
+previously excluded sessions can be reconsidered from an authoritative
+workspace in the affected source on its next scan.
+An upgrade that corrects exclusion matching reapplies existing rules before
+opening the index to search and usage, without reading the original files.
+
 ### 12.4 Proving zero network
 
 - CI: entitlement check (§14.4).
 - Manual check before each release: watch the app for 30 minutes with Activity Monitor or a network monitor — no connections. In Console, filter `subsystem:com.apple.sandbox.reporting`; there must be no network violations from this app (any violation means some code tried to connect and must be removed).
+- 0.1.0 exception: the product owner deferred the 30-minute observation as a release gate. The no-network constraints and entitlements still apply; record the observation as deferred rather than passed.
 
 ---
 
@@ -997,7 +1115,7 @@ triggers removal. With no exclusion rules, no path is excluded.
 | NFR-1 | Cold start to showing existing data | < 1 s |
 | NFR-2 | File write → UI update | ≤ 2 s |
 | NFR-3 | First full index | ≥ 50 MB/s of raw logs on Apple silicon; 5 GB of raw logs in < 3 min |
-| NFR-4 | Search latency at 1M events | P95 < 150 ms |
+| NFR-4 | Search latency at 1M events | P95 < 150 ms after excluding only §9.1's 150 ms typing debounce. Report full edit-to-result timing too; page changes have no typing debounce. |
 | NFR-5 | Switching Token Usage periods | < 100 ms |
 | NFR-6 | Memory with 1M events | < 400 MB with the window open; < 150 MB menu-bar only |
 | NFR-7 | Idle CPU | < 1% average (no polling when nothing changes) |
@@ -1095,15 +1213,30 @@ actually imports. Synthetic Grok samples do not replace real format capture.
 
 Launch → onboarding → sessions appear → search a Chinese word → open a session → jump to a match → Projects page → Token Usage → switch periods and metric → open the menu bar panel.
 
+The UI test scheme uses the isolated SyntheticQA bundle. It must reject a
+launch without `--synthetic` before constructing the app delegate or loading
+preferences and indexes. Verify the signed test artifact's launch guard before
+desktop QA.
+
+Unattended search and navigation smoke tests use the actual search field and
+index with prefilled synthetic text and UI controls. Also type and commit a
+Chinese query in the Dashboard and menu bar search fields with the already
+selected Apple Pinyin – Simplified, then verify the indexed result. Run ASCII
+entry and shortcut acceptance separately with ABC already selected. The same
+built-in source stays fixed throughout each run; tests never enumerate or change
+sources or request input permissions. See the [input QA matrix](reports/FIXED-INPUT-QA.md).
+
 ### 15.5 Release checklist
 
 - [ ] All §14.4 checks pass
-- [ ] Manual zero-network check (§12.4) passes
-- [ ] On the user's real data for all four agents: session counts and token totals match each CLI's own statistics on spot checks (within 1%; record reasons for differences in FORMATS.md)
+- [ ] §15.4 smoke tests pass; real Apple Pinyin search and applicable ABC form and shortcut cases are verified separately
+- [ ] Manual zero-network check (§12.4) passes, except where explicitly deferred for 0.1.0
+- [ ] On the user's real data for each agent supported by the [release scope](RELEASE-SCOPE.md): session counts and token totals match each CLI's own statistics on spot checks (within 1%; record reasons for differences in FORMATS.md)
 - [ ] Sessions remain viewable and searchable after their raw files are deleted
 - [ ] Minimum / default / large window screenshots match Figma
 - [ ] Light mode works
-- [ ] Cost: for each agent, 3 sessions hand-priced from the price table match the app
+- [ ] Cost: for each supported agent, 3 sessions hand-priced from the price table match the app
+- [ ] The exact final Developer ID ZIP matches the approved revision and digest, passes notarization and distribution checks, and first launch/reopen is verified on a clean account. See [Release verification](RELEASE-VERIFY.md).
 
 ---
 
@@ -1213,7 +1346,7 @@ Figma sync status (2026-11-17): items 1, 2, 4, 5, 6, 7 and 9 are in the prototyp
 |---|---|
 | Claude Code | `cd "<cwd>" && claude --resume <sessionId>` |
 | Codex | `cd "<cwd>" && codex resume <id>` |
-| Grok Build | `cd "<cwd>" && grok --resume <session-id>` |
+| Grok Build | Deferred pending local adapter and CLI verification (DEV-008). |
 | Copilot CLI | `cd "<cwd>" && copilot --resume <sessionId>` |
 
-`<cwd>` is the host path after path mapping. For sessions from a container or VM, prepend a comment reminding the user to run it inside that environment. Verify each CLI's resume flags against its local `--help` output during M1/M2.
+`<cwd>` is the host path after path mapping. Shell-quote each substituted argument as needed. For any non-default source or non-Local environment, prepend a fixed comment reminding the user to use the same environment and agent configuration. Do not start a shell or agent. Verify each CLI's resume flags against its local `--help` output during M1/M2.
