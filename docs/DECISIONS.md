@@ -975,6 +975,12 @@ The accepted coverage is measured in file order. Earlier credited fallback
 cannot cover a later call. A match can shrink one model's remainder enough
 to make a pending call unique, so retry until no further unique match is
 available. Replaying a v7 file recalculates its checkpoint and session totals.
+When no first match is unique, compare the total for each counter and try a
+complete allocation of whole calls to the remaining per-model counters. This
+can establish coverage without identifying the actual models. Only apply a
+complete proof; earlier credited volume remains credited. Bound the work per
+session and leave the separate counters if a proof cannot be completed. Parser
+v9 replays older sources to recalculate the same app-owned projections.
 
 The owner deferred the 30-minute offline observation as a gate for 0.1.0.
 The no-network restrictions and static verification are unchanged.

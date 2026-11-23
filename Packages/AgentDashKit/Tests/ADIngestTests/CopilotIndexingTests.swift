@@ -348,6 +348,127 @@ func copilotUsesUncreditedSnapshotCapacity(example: CopilotCoverageCase) throws 
     }
 }
 
+struct CopilotCompleteCoverageCase: Sendable, CustomTestStringConvertible {
+    let calls: [Int]
+    let a: Int
+    let b: Int
+    let complete: Bool
+    var priorCredit = 0
+    var earlierPartial = false
+
+    var testDescription: String {
+        "calls=\(calls), snapshot=[\(a), \(b)], covered=\(complete), priorCredit=\(priorCredit), earlierPartial=\(earlierPartial)"
+    }
+
+    static let reviewMatrix: [Self] = {
+        let sizes = [10, 20, 30, 40, 50, 60]
+        var cases: [Self] = []
+        for i in sizes.indices {
+            for j in sizes.indices where j > i {
+                for k in sizes.indices where k > j {
+                    let calls = [sizes[i], sizes[j], sizes[k]]
+                    let total = calls.reduce(0, +)
+                    var lowerSides: [Int: Int] = [:]
+                    for mask in 1..<7 {
+                        let a = calls.enumerated().filter { mask & (1 << $0.offset) != 0 }.map(\.element).reduce(0, +)
+                        if a * 2 < total { lowerSides[a, default: 0] += 1 }
+                    }
+                    for (a, count) in lowerSides.sorted(by: { $0.key < $1.key }) where count == 1 {
+                        cases.append(.init(calls: calls, a: a, b: total - a, complete: true))
+                    }
+                }
+            }
+        }
+        return cases
+    }()
+
+    static let additional: [Self] = [
+        .init(calls: [10, 10], a: 10, b: 10, complete: true), // more than one assignment, same whole-batch usage
+        .init(calls: [30, 35, 40], a: 50, b: 55, complete: false), // same component totals, impossible assignment
+        .init(calls: [40, 50, 60], a: 60, b: 90, complete: true, priorCredit: 5),
+        .init(calls: [40, 50, 60], a: 60, b: 90, complete: true, earlierPartial: true),
+    ]
+}
+
+@Test("ADP-CP: prove whole snapshot coverage without requiring a uniquely matchable first call",
+      arguments: CopilotCompleteCoverageCase.reviewMatrix + CopilotCompleteCoverageCase.additional)
+func copilotReconcilesWholeSnapshot(example: CopilotCompleteCoverageCase) throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID())")
+    let root = temp.appendingPathComponent("source")
+    let folder = root.appendingPathComponent("session-state/synthetic")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let url = folder.appendingPathComponent("events.jsonl")
+    let index = temp.appendingPathComponent("index.sqlite")
+    let start = #"{"type":"session.start","id":"start","timestamp":"2020-01-01T00:00:00Z","data":{"sessionId":"synthetic"}}"#
+    let calls = example.calls.enumerated().map { i, tokens in
+        #"{"type":"session.usage_record","id":"call-\#(i)","timestamp":"2020-01-01T00:00:0\#(i+1)Z","data":{"usage":{"inputTokens":\#(4*tokens/5),"outputTokens":\#(tokens/5)}}}"#
+    }
+    func snapshot(_ type: String, _ id: String, _ seconds: Int, _ a: Int, _ b: Int) -> String {
+        #"{"type":"\#(type)","id":"\#(id)","timestamp":"2020-01-01T00:00:0\#(seconds)Z","data":{"modelMetrics":{"a":{"usage":{"inputTokens":\#(4*a/5),"outputTokens":\#(a/5)}},"b":{"usage":{"inputTokens":\#(4*b/5),"outputTokens":\#(b/5)}}}}}"#
+    }
+    let credit = example.priorCredit
+    let a = example.a
+    let end = snapshot("session.shutdown", "end", 5, a + credit, example.b)
+    let before = credit > 0 ? [snapshot("session.usage_checkpoint", "opening", 0, credit, 0)] : []
+    let partial = example.earlierPartial ? [snapshot("session.usage_checkpoint", "partial", 4, 5, 5)] : []
+    try Data(([start] + before + calls + partial).joined(separator: "\n").appending("\n").utf8).write(to: url)
+    let store = try AgentStore(databaseURL: index)
+    var source = Source(agent: .copilot, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let adapter = CopilotAdapter()
+    let file = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    @discardableResult
+    func importNow(replay: Bool = false) throws -> JSONLImportResult {
+        try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, replay: replay, store: store, adapter: adapter)
+    }
+    let sum = Int64(example.calls.reduce(0, +))
+    let expected = (example.complete ? sum : 2 * sum) + Int64(credit)
+    try importNow()
+    #expect(try totals(in: store, session: key).total == sum + Int64(credit) + (example.earlierPartial ? 10 : 0))
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((end + "\n").utf8))
+    try handle.close()
+    try importNow()
+    let checkRows: (AgentStore) throws -> Void = { dbStore in
+        try dbStore.databasePool.read { db in
+            let total = try Int64.fetchOne(db, sql: "SELECT input_fresh+cache_read+cache_write+cache_write_1h+output FROM session_usage_rollup")
+            #expect(total == expected)
+            let calls = try Int64.fetchAll(db, sql: """
+                SELECT ts FROM token_events WHERE model IS NULL AND precision='call' AND price_status='unpriced' ORDER BY ts
+                """)
+            #expect(calls == example.calls.indices.map { 1_577_836_800_000 + 1_000 * Int64($0+1) })
+        }
+    }
+    try checkRows(store)
+    guard example.calls == [40, 50, 60], a == 60, credit == 0, !example.earlierPartial else { return }
+    try importNow(replay: true)
+    try checkRows(store)
+
+    let fresh = try AgentStore(databaseURL: temp.appendingPathComponent("fresh.sqlite"))
+    var freshSource = source
+    freshSource.id = try fresh.upsertSource(freshSource)
+    let freshFile = try #require(try adapter.discover(in: freshSource, authorizedRoot: root).first)
+    try JSONLFileImporter.importFile(freshFile, from: freshSource, authorizedRoot: root, store: fresh, adapter: adapter)
+    try checkRows(fresh)
+
+    // Seed v8's duplicate checkpoint rows and verify upgrading an unchanged file repairs them.
+    try store.databasePool.write { db in
+        try db.execute(sql: """
+            INSERT INTO token_events(session_id,agent,model,ts,input_fresh,output,precision,dedupe_key)
+            SELECT session_id,'copilot',model,ts,input_fresh,output,'checkpoint',dedupe_key FROM copilot_usage_snapshots
+            WHERE ts=1577836805000 ON CONFLICT(dedupe_key) DO NOTHING
+            """)
+        try db.execute(sql: "UPDATE source_files SET parser_version=8 WHERE rel_path=?", arguments: [file.relativePath])
+    }
+    #expect(try totals(in: store, session: key).total == 300)
+    let upgraded = try importNow()
+    #expect(upgraded.checkpoint.parserVersion == CopilotAdapter.parserVersion)
+    try checkRows(store)
+}
+
 @Test("ADP-CP: replay v5/v6 removes only a recovered same-file anonymous usage placeholder",
       arguments: [5, 6])
 func replayCopilotRecoveredUsageMatchesFreshTranscript(oldVersion: Int) throws {

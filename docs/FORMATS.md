@@ -327,8 +327,12 @@ model. During verified v5/v6 prefix replay, only the matching old unknown
 stub is removed after decoding the same call successfully. Parser v8 also
 replays v7 files: a candidate model's remaining usage excludes checkpoint
 volume credited before the call's file position. After reserving a unique
-match, retry pending calls against the smaller remainder. These synthetic
-regressions do not resolve the separate comparison with CLI statistics.
+match, retry pending calls against the smaller remainder. With parser v9,
+an unchanged v8 source also replays. The store can subtract an entire batch
+when its components exactly match the models' free counters and there is a
+complete allocation of whole calls after accounting for earlier snapshots.
+The allocation is only a coverage check; calls still have no model or price.
+If the limited search cannot prove coverage, keep the separate counts.
 Event-backed Copilot workspaces expose the native title as top-level
 `name`, with an optional top-level `summary`. The observed strings used
 plain scalars, single or double quotes, and literal `|-` blocks. The

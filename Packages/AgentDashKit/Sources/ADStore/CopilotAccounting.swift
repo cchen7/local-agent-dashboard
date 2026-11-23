@@ -57,18 +57,22 @@ enum CopilotAccounting {
         var unclaimed: [Int64]
         var earlierCredits: [CoveredCall] = []
 
-        func fits(_ call: CoveredCall) -> Bool {
-            // A call can replace fallback from its own position onward. It
-            // cannot explain fallback already credited earlier in the file.
+        // A call can replace fallback from its own position onward. It
+        // cannot explain fallback already credited earlier in the file.
+        func credit(before sequence: Int64) -> [Int64] {
             var lo = 0
             var hi = earlierCredits.count
             while lo < hi {
                 let mid = lo + (hi - lo) / 2
-                if earlierCredits[mid].sequence < call.sequence { lo = mid + 1 }
+                if earlierCredits[mid].sequence < sequence { lo = mid + 1 }
                 else { hi = mid }
             }
-            let floor = lo > 0 ? earlierCredits[lo - 1].counts : nil
-            return unclaimed.indices.allSatisfy { call.counts[$0] <= max(0, unclaimed[$0] - (floor?[$0] ?? 0)) }
+            return lo > 0 ? earlierCredits[lo - 1].counts : CopilotAccounting.zero
+        }
+
+        func fits(_ call: CoveredCall) -> Bool {
+            let floor = credit(before: call.sequence)
+            return unclaimed.indices.allSatisfy { call.counts[$0] <= max(0, unclaimed[$0] - floor[$0]) }
         }
     }
 
@@ -102,9 +106,85 @@ enum CopilotAccounting {
         return result
     }
 
-    /// Find a checkpoint that fully covers each anonymous call in exactly one
-    /// model's remaining cumulative usage. Use that result only to subtract
-    /// already counted volume. Never set or price the call's model.
+    private static let completeBatchCallLimit = 24
+    private static let completeBatchModelLimit = 8
+    private static let completeBatchWorkLimit = 8_192
+
+    private struct BatchModel {
+        let key: Key
+        let sample: Sample
+        let history: [Sample]
+        let baseline: [Int64]
+        var space: Capacity
+        var calls: [CoveredCall]
+        var callTotal: [Int64]
+    }
+
+    /// Check for complete coverage before greedy selection. Equal aggregates
+    /// alone are insufficient: each call must fit whole in a single model,
+    /// with all previously credited history still accounted for. A feasible
+    /// allocation here is evidence of overlap only, never evidence of price.
+    private static func matchCompleteBatch(_ calls: [CoveredCall], group: [Key: Sample], history: [Key: [Sample]],
+                                           remaining: [Key: Capacity], assigned: [Key: [CoveredCall]],
+                                           assignedTotals: [Key: [Int64]], work: inout Int) throws -> [Key]? {
+        guard work > 0, calls.count >= 2, calls.count <= completeBatchCallLimit,
+              group.count >= 2, group.count <= completeBatchModelLimit, let first = calls.first else { return nil }
+        var unmatched = zero
+        for call in calls { unmatched = try add(unmatched, call.counts) }
+        var models: [BatchModel] = []
+        for (key, sample) in group {
+            guard let space = remaining[key] else { return nil }
+            let baseline = space.credit(before: first.sequence)
+            let total = assignedTotals[key] ?? zero
+            let known = try add(sample.named, total)
+            for i in unmatched.indices {
+                guard known[i] <= sample.counts[i], baseline[i] <= space.unclaimed[i] else { return nil }
+                let available = space.unclaimed[i] - baseline[i]
+                guard available <= unmatched[i] else { return nil }
+                unmatched[i] -= available
+            }
+            models.append(.init(key: key, sample: sample, history: history[key] ?? [], baseline: baseline,
+                                space: space, calls: assigned[key] ?? [], callTotal: total))
+        }
+        guard unmatched.allSatisfy({ $0 == 0 }) else { return nil }
+        models.sort { $0.key.model.utf8.lexicographicallyPrecedes($1.key.model.utf8) }
+        var choices: [Key] = []
+        func search(_ index: Int) throws -> Bool {
+            if index == calls.count {
+                return models.allSatisfy { model in
+                    model.space.unclaimed == model.baseline && model.space.credit(before: model.sample.sequence) == model.baseline
+                }
+            }
+            let call = calls[index]
+            for m in models.indices where models[m].space.fits(call) {
+                try Task.checkCancellation()
+                let prior = models[m]
+                let rederive = prior.space.earlierCredits.last.map { $0.sequence >= call.sequence } == true
+                let cost = rederive ? 1 + prior.history.count + prior.calls.count : 1
+                guard cost <= work else { work = 0; return false }
+                work -= cost
+                models[m].calls.append(call)
+                models[m].callTotal = try add(prior.callTotal, call.counts)
+                if rederive {
+                    models[m].space = try capacity(through: prior.sample, history: prior.history,
+                                                   assigned: models[m].calls, assignedTotal: models[m].callTotal)
+                } else {
+                    models[m].space.unclaimed = zip(prior.space.unclaimed, call.counts).map { $0.0 - $0.1 }
+                }
+                choices.append(prior.key)
+                if try search(index + 1) { return true }
+                choices.removeLast()
+                models[m] = prior
+            }
+            return false
+        }
+        return try search(0) ? choices : nil
+    }
+
+    /// Find a checkpoint where a call's coverage can be shown either by a
+    /// complete batch or by a unique model's full remaining capacity.
+    /// Use the result only to subtract already counted volume. Never set or
+    /// price the call's model.
     static func coveredCalls(sessionID: Int64, db: Database) throws -> [Key: [CoveredCall]] {
         let anonymous: [CoveredCall] = try Row.fetchAll(db, sql: """
             SELECT source_seq,input_fresh,cache_read,cache_write,output,reasoning
@@ -123,6 +203,7 @@ enum CopilotAccounting {
         var assignedTotals: [Key: [Int64]] = [:]
         var result: [Key: [CoveredCall]] = [:]
         var matched = Set<Int>()
+        var batchWork = completeBatchWorkLimit
         var next = try snapshots.next()
         while let first = next {
             try Task.checkCancellation()
@@ -148,6 +229,24 @@ enum CopilotAccounting {
             for (key, sample) in group {
                 remaining[key] = try capacity(through: sample, history: history[key] ?? [],
                                               assigned: result[key] ?? [], assignedTotal: assignedTotals[key] ?? zero)
+            }
+            if batchWork > 0, group.count > 1, group.count <= completeBatchModelLimit {
+                let pending = Array(anonymous.indices.lazy.prefix { anonymous[$0].sequence <= sequence }
+                    .filter { !matched.contains($0) && anonymous[$0].counts.contains(where: { $0 > 0 }) }
+                    .prefix(completeBatchCallLimit + 1))
+                if pending.count <= completeBatchCallLimit,
+                   let keys = try matchCompleteBatch(pending.map { anonymous[$0] }, group: group, history: history,
+                                                     remaining: remaining, assigned: result, assignedTotals: assignedTotals,
+                                                     work: &batchWork) {
+                    for (i, key) in zip(pending, keys) {
+                        let call = anonymous[i]
+                        assignedTotals[key] = try add(assignedTotals[key] ?? zero, call.counts)
+                        result[key, default: []].append(call)
+                        matched.insert(i)
+                    }
+                    if matched.count == anonymous.count { break }
+                    continue
+                }
             }
             // Assigning a unique match can disqualify one model for a call
             // earlier in the file. Revisit pending calls until nothing matches.
