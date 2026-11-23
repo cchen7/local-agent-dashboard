@@ -971,6 +971,11 @@ call's position. No timestamp, model or price is assigned to the exact
 call. Replay rederives already stored fallback and clears only a verified
 same-file old usage placeholder, leaving genuinely unknown events intact.
 
+The accepted coverage is measured in file order. Earlier credited fallback
+cannot cover a later call. A match can shrink one model's remainder enough
+to make a pending call unique, so retry until no further unique match is
+available. Replaying a v7 file recalculates its checkpoint and session totals.
+
 The owner deferred the 30-minute offline observation as a gate for 0.1.0.
 The no-network restrictions and static verification are unchanged.
 

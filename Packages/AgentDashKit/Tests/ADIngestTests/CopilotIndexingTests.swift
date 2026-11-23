@@ -247,6 +247,107 @@ func reconcileCopilotAnonymousOverlappingCheckpoints(later: Bool) throws {
     #expect(try totals(in: reopened, session: key).total == (later ? 156 : 130))
 }
 
+enum CopilotCoverageCase: CaseIterable, Sendable {
+    case priorSnapshot, priorSnapshotWithNamedCalls, smallFirst, largeFirst
+
+    var stream: (prefix: [String], shutdown: String, expected: Int64, anonymous: Int64) {
+        let early = #"{"type":"session.usage_checkpoint","id":"early","timestamp":"2020-01-01T00:00:01Z","data":{"modelMetrics":{"a":{"usage":{"inputTokens":80,"outputTokens":20}},"b":{"usage":{"inputTokens":0,"outputTokens":0}}}}}"#
+        let named = #"{"type":"session.usage_record","id":"named","timestamp":"2020-01-01T00:00:02Z","data":{"modelId":"a","usage":{"inputTokens":16,"outputTokens":4}}}"#
+        let flat = #"{"type":"session.usage_checkpoint","id":"flat","timestamp":"2020-01-01T00:00:03Z","data":{"modelMetrics":{"a":{"usage":{"inputTokens":80,"outputTokens":20}}}}}"#
+        func call(_ id: String, at seconds: Int, input: Int, output: Int) -> String {
+            #"{"type":"session.usage_record","id":"\#(id)","timestamp":"2020-01-01T00:00:0\#(seconds)Z","data":{"usage":{"inputTokens":\#(input),"outputTokens":\#(output)}}}"#
+        }
+        func shutdown(a: Int, aOut: Int, b: Int, bOut: Int) -> String {
+            #"{"type":"session.shutdown","id":"end","timestamp":"2020-01-01T00:00:05Z","data":{"modelMetrics":{"a":{"usage":{"inputTokens":\#(a),"outputTokens":\#(aOut)}},"b":{"usage":{"inputTokens":\#(b),"outputTokens":\#(bOut)}}}}}"#
+        }
+        switch self {
+        case .priorSnapshot:
+            return ([early, call("large", at: 4, input: 80, output: 20)], shutdown(a: 80, aOut: 20, b: 80, bOut: 20), 200, 100)
+        case .priorSnapshotWithNamedCalls:
+            return ([early, named, flat, call("small", at: 4, input: 8, output: 2)], shutdown(a: 96, aOut: 24, b: 8, bOut: 2), 130, 10)
+        case .smallFirst:
+            return ([call("small", at: 3, input: 8, output: 2), call("large", at: 4, input: 80, output: 20)],
+                    shutdown(a: 8, aOut: 2, b: 80, bOut: 20), 110, 110)
+        case .largeFirst:
+            return ([call("large", at: 3, input: 80, output: 20), call("small", at: 4, input: 8, output: 2)],
+                    shutdown(a: 8, aOut: 2, b: 80, bOut: 20), 110, 110)
+        }
+    }
+}
+
+@Test("ADP-CP: use only uncredited snapshot capacity and retry ambiguous calls after a match",
+      arguments: CopilotCoverageCase.allCases)
+func copilotUsesUncreditedSnapshotCapacity(example: CopilotCoverageCase) throws {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("agentdash-copilot-\(UUID())")
+    let root = temp.appendingPathComponent("source")
+    let folder = root.appendingPathComponent("session-state/synthetic")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let url = folder.appendingPathComponent("events.jsonl")
+    let start = #"{"type":"session.start","id":"start","timestamp":"2020-01-01T00:00:00Z","data":{"sessionId":"synthetic"}}"#
+    let (prefix, shutdown, expected, unpricedCalls) = example.stream
+    try Data(([start] + prefix).joined(separator: "\n").appending("\n").utf8).write(to: url)
+    let store = try AgentStore(databaseURL: temp.appendingPathComponent("index.sqlite"))
+    var source = Source(agent: .copilot, label: "Synthetic", rootURL: root)
+    source.id = try store.upsertSource(source)
+    let adapter = CopilotAdapter()
+    let file = try #require(try adapter.discover(in: source, authorizedRoot: root).first)
+    let key = SessionKey(agent: .copilot, nativeID: "synthetic")
+    @discardableResult
+    func importNow(replay: Bool = false) throws -> JSONLImportResult {
+        try JSONLFileImporter.importFile(file, from: source, authorizedRoot: root, replay: replay,
+                                         store: store, adapter: adapter)
+    }
+    func checkUsage(in store: AgentStore) throws {
+        #expect(try totals(in: store, session: key).total == expected)
+        try store.databasePool.read { db in
+            let total = try Int64.fetchOne(db, sql: "SELECT input_fresh+cache_read+cache_write+cache_write_1h+output FROM session_usage_rollup")
+            #expect(total == expected)
+            let calls = try Int64.fetchOne(db, sql: """
+                SELECT sum(input_fresh+output) FROM token_events WHERE model IS NULL AND precision='call'
+                  AND price_status='unpriced' AND ts IN (1577836803000,1577836804000)
+                """)
+            #expect(calls == unpricedCalls)
+        }
+    }
+    try importNow()
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((shutdown + "\n").utf8))
+    try handle.close()
+    try importNow()
+    try checkUsage(in: store)
+    try importNow(replay: true)
+    try checkUsage(in: store)
+
+    let fresh = try AgentStore(databaseURL: temp.appendingPathComponent("fresh.sqlite"))
+    var freshSource = source
+    freshSource.id = try fresh.upsertSource(freshSource)
+    let freshFile = try #require(try adapter.discover(in: freshSource, authorizedRoot: root).first)
+    try JSONLFileImporter.importFile(freshFile, from: freshSource, authorizedRoot: root, store: fresh, adapter: adapter)
+    try checkUsage(in: fresh)
+
+    // Seed the surplus that was written by v7 before rederiving its stored snapshots.
+    if example == .priorSnapshot || example == .smallFirst {
+        let oldModel = example == .priorSnapshot ? "b" : "a"
+        let input = example == .priorSnapshot ? 80 : 8
+        let output = example == .priorSnapshot ? 20 : 2
+        try store.databasePool.write { db in
+            try db.execute(sql: """
+                INSERT INTO token_events(session_id,agent,model,ts,input_fresh,output,precision,dedupe_key)
+                SELECT session_id,'copilot',model,ts,?,?,'checkpoint',dedupe_key
+                FROM copilot_usage_snapshots WHERE model=? AND ts=1577836805000
+                ON CONFLICT(dedupe_key) DO UPDATE SET input_fresh=excluded.input_fresh,output=excluded.output
+                """, arguments: [input, output, oldModel])
+            try db.execute(sql: "UPDATE source_files SET parser_version=7 WHERE rel_path=?", arguments: [file.relativePath])
+        }
+        #expect(try totals(in: store, session: key).total == expected + Int64(input + output))
+        let upgraded = try importNow()
+        #expect(upgraded.checkpoint.parserVersion == CopilotAdapter.parserVersion)
+        try checkUsage(in: store)
+    }
+}
+
 @Test("ADP-CP: replay v5/v6 removes only a recovered same-file anonymous usage placeholder",
       arguments: [5, 6])
 func replayCopilotRecoveredUsageMatchesFreshTranscript(oldVersion: Int) throws {

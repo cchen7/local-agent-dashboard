@@ -324,8 +324,11 @@ exactly one model's cumulative remainder covers all its counters. Later
 covering checkpoints can reconcile an earlier partial sample. The call
 stays unpriced at its original time; ambiguous coverage does not set a
 model. During verified v5/v6 prefix replay, only the matching old unknown
-stub is removed after decoding the same call successfully. This does not
-change the separate comparison with CLI statistics.
+stub is removed after decoding the same call successfully. Parser v8 also
+replays v7 files: a candidate model's remaining usage excludes checkpoint
+volume credited before the call's file position. After reserving a unique
+match, retry pending calls against the smaller remainder. These synthetic
+regressions do not resolve the separate comparison with CLI statistics.
 Event-backed Copilot workspaces expose the native title as top-level
 `name`, with an optional top-level `summary`. The observed strings used
 plain scalars, single or double quotes, and literal `|-` blocks. The

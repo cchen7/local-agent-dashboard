@@ -5,7 +5,7 @@ import Foundation
 /// GitHub Copilot CLI's append-only event stream (ADP-CP).
 public struct CopilotAdapter: AgentAdapter {
     public static let kind: AgentKind = .copilot
-    public static let parserVersion = 7
+    public static let parserVersion = 8
     public enum Failure: Error, Equatable, Sendable { case invalidSource, unsupportedFile }
 
     public init() {}

@@ -47,11 +47,66 @@ enum CopilotAccounting {
 
     typealias CoveredCall = (sequence: Int64, counts: [Int64])
 
+    private struct Sample {
+        let sequence: Int64
+        let counts: [Int64]
+        let named: [Int64]
+    }
+
+    private struct Capacity {
+        var unclaimed: [Int64]
+        var earlierCredits: [CoveredCall] = []
+
+        func fits(_ call: CoveredCall) -> Bool {
+            // A call can replace fallback from its own position onward. It
+            // cannot explain fallback already credited earlier in the file.
+            var lo = 0
+            var hi = earlierCredits.count
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2
+                if earlierCredits[mid].sequence < call.sequence { lo = mid + 1 }
+                else { hi = mid }
+            }
+            let floor = lo > 0 ? earlierCredits[lo - 1].counts : nil
+            return unclaimed.indices.allSatisfy { call.counts[$0] <= max(0, unclaimed[$0] - (floor?[$0] ?? 0)) }
+        }
+    }
+
+    private static let zero = [Int64](repeating: 0, count: 5)
+
+    /// Compute the free cumulative volume and preserve the time at which
+    /// earlier snapshots credited fallback, using the same rules as reconcile.
+    private static func capacity(through sample: Sample, history: [Sample], assigned: [CoveredCall],
+                                 assignedTotal: [Int64]) throws -> Capacity {
+        let accounted = try add(sample.named, assignedTotal)
+        var result = Capacity(unclaimed: zip(sample.counts, accounted).map { max(0, $0.0 - $0.1) })
+        guard history.first.map({ $0.sequence < sample.sequence }) == true else { return result }
+        let calls = assigned.sorted { $0.sequence < $1.sequence }
+        var index = 0
+        var matched = zero
+        var credited = zero
+        for prior in history {
+            guard prior.sequence < sample.sequence else { break }
+            try Task.checkCancellation()
+            while index < calls.count, calls[index].sequence <= prior.sequence {
+                matched = try add(matched, calls[index].counts)
+                index += 1
+            }
+            let accounted = try add(prior.named, matched)
+            let delta = checkpointDelta(prior.counts, calls: accounted, checkpointed: credited)
+            if delta.contains(where: { $0 > 0 }) {
+                credited = try add(credited, delta)
+                result.earlierCredits.append((prior.sequence, credited))
+            }
+        }
+        return result
+    }
+
     /// Find a checkpoint that fully covers each anonymous call in exactly one
     /// model's remaining cumulative usage. Use that result only to subtract
     /// already counted volume. Never set or price the call's model.
     static func coveredCalls(sessionID: Int64, db: Database) throws -> [Key: [CoveredCall]] {
-        let anonymous = try Row.fetchAll(db, sql: """
+        let anonymous: [CoveredCall] = try Row.fetchAll(db, sql: """
             SELECT source_seq,input_fresh,cache_read,cache_write,output,reasoning
             FROM token_events WHERE session_id=? AND model IS NULL AND agent='copilot'
               AND precision='call' AND source_seq IS NOT NULL AND cache_write_1h=0
@@ -64,44 +119,65 @@ enum CopilotAccounting {
             SELECT model,seq,input_fresh,cache_read,cache_write,output,reasoning
             FROM copilot_usage_snapshots WHERE session_id=? ORDER BY seq,dedupe_key
             """, arguments: [sessionID])
-        var highWater: [Key: [Int64]] = [:]
-        var assigned: [Key: [Int64]] = [:]
+        var history: [Key: [Sample]] = [:]
+        var assignedTotals: [Key: [Int64]] = [:]
         var result: [Key: [CoveredCall]] = [:]
         var matched = Set<Int>()
         var next = try snapshots.next()
         while let first = next {
             try Task.checkCancellation()
             let sequence: Int64 = first["seq"]
-            var group: [Key: [Int64]] = [:]
+            var group: [Key: Sample] = [:]
             var coherent = true
             while let row = next, (row["seq"] as Int64) == sequence {
                 let key = Key(sessionID: sessionID, model: row["model"])
                 let counts = parts(readCounts(row))
-                if group.updateValue(counts, forKey: key) != nil ||
-                    highWater[key].map({ !zip(counts, $0).allSatisfy { $0.0 >= $0.1 } }) == true {
-                    coherent = false
-                }
                 next = try snapshots.next()
+                let prior = history[key]?.last
+                if prior.map({ !zip(counts, $0.counts).allSatisfy { $0.0 >= $0.1 } }) == true {
+                    coherent = false
+                    continue
+                }
+                let named = try namedCalls(key, after: prior?.sequence ?? -1, through: sequence, db: db)
+                let sample = Sample(sequence: sequence, counts: counts, named: try add(prior?.named ?? zero, named))
+                history[key, default: []].append(sample)
+                if group.updateValue(sample, forKey: key) != nil { coherent = false }
             }
             guard coherent else { continue }
-            highWater.merge(group) { _, latest in latest }
-            var remaining: [Key: [Int64]] = [:]
-            for (key, counts) in group {
-                let named = try namedCalls(key, after: -1, through: sequence, db: db)
-                let alreadyAssigned = assigned[key] ?? Array(repeating: 0, count: counts.count)
-                remaining[key] = counts.indices.map { max(0, max(0, counts[$0] - named[$0]) - alreadyAssigned[$0]) }
+            var remaining: [Key: Capacity] = [:]
+            for (key, sample) in group {
+                remaining[key] = try capacity(through: sample, history: history[key] ?? [],
+                                              assigned: result[key] ?? [], assignedTotal: assignedTotals[key] ?? zero)
             }
-            for i in anonymous.indices where !matched.contains(i) {
-                let call = anonymous[i]
-                if call.sequence > sequence { break }
-                let candidates = remaining.filter { _, counts in
-                    zip(call.counts, counts).allSatisfy { $0.0 <= $0.1 }
+            // Assigning a unique match can disqualify one model for a call
+            // earlier in the file. Revisit pending calls until nothing matches.
+            var progressed = true
+            while progressed {
+                progressed = false
+                for i in anonymous.indices {
+                    let call = anonymous[i]
+                    if call.sequence > sequence { break }
+                    guard !matched.contains(i) else { continue }
+                    try Task.checkCancellation()
+                    var match: Key?
+                    for (key, candidate) in remaining where candidate.fits(call) {
+                        if match != nil { match = nil; break }
+                        match = key
+                    }
+                    guard let key = match, let sample = group[key], var candidate = remaining[key] else { continue }
+                    let total = try add(assignedTotals[key] ?? zero, call.counts)
+                    assignedTotals[key] = total
+                    result[key, default: []].append(call)
+                    matched.insert(i)
+                    progressed = true
+                    if candidate.earlierCredits.last.map({ $0.sequence >= call.sequence }) == true {
+                        candidate = try capacity(through: sample, history: history[key] ?? [],
+                                                 assigned: result[key] ?? [], assignedTotal: total)
+                    } else {
+                        candidate.unclaimed = zip(candidate.unclaimed, call.counts).map { $0.0 - $0.1 }
+                    }
+                    remaining[key] = candidate
                 }
-                guard candidates.count == 1, let (key, capacity) = candidates.first else { continue }
-                assigned[key] = try add(assigned[key] ?? Array(repeating: 0, count: capacity.count), call.counts)
-                remaining[key] = zip(capacity, call.counts).map { $0.0 - $0.1 }
-                result[key, default: []].append(call)
-                matched.insert(i)
             }
             if matched.count == anonymous.count { break }
         }
@@ -128,6 +204,12 @@ enum CopilotAccounting {
             guard !overflow else { throw StoreError.invalidTokenCounts }
             return total
         }
+    }
+
+    private static func checkpointDelta(_ counts: [Int64], calls: [Int64], checkpointed: [Int64]) -> [Int64] {
+        var delta = counts.indices.map { max(0, max(0, counts[$0] - calls[$0]) - checkpointed[$0]) }
+        delta[4] = min(delta[3], delta[4]) // reasoning is a subset of output
+        return delta
     }
 
     static func reconcile(_ key: Key, covered: [CoveredCall] = [], touchedUsage: inout Set<String>, db: Database) throws {
@@ -157,15 +239,8 @@ enum CopilotAccounting {
                 calls = try add(calls, covered[coveredIndex].counts)
                 coveredIndex += 1
             }
-            var delta = counts.indices.map { index in
-                max(0, max(0, counts[index] - calls[index]) - checkpointed[index])
-            }
-            delta[4] = min(delta[3], delta[4]) // reasoning is a subset of output
-            for index in delta.indices {
-                let (next, overflow) = checkpointed[index].addingReportingOverflow(delta[index])
-                guard !overflow else { throw StoreError.invalidTokenCounts }
-                checkpointed[index] = next
-            }
+            let delta = checkpointDelta(counts, calls: calls, checkpointed: checkpointed)
+            checkpointed = try add(checkpointed, delta)
             highWater = counts
             lastSequence = sequence
             if delta.allSatisfy({ $0 == 0 }) {
