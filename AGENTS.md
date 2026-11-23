@@ -2,6 +2,8 @@
 
 Instructions for coding agents (Codex, Claude Code, Copilot CLI, Grok Build, …) working in this repository.
 
+If present, read the owner's `AGENTS.local.md` for project-local operating instructions. Keep private authorizations and signing credentials out of the public repository.
+
 ## What we are building
 
 A native macOS app (macOS 27, Apple silicon only) that reads the local session records of the user's coding agents — Claude Code, Codex (CLI and desktop app), GitHub Copilot CLI and Grok Build — and turns them into a **read-only** dashboard:
@@ -16,7 +18,7 @@ The app is **fully local and never touches the network.**
 ## Read before you write code
 
 1. `docs/SPEC.md` is the single source of truth. Always read §0 (how to use the spec) and §2 (hard constraints), then the sections for your task.
-2. The design is in Figma: https://www.figma.com/design/X48cH7JgDwxYzOWtzhtJkw (frame and node IDs in SPEC §11). The spec wins when they disagree; SPEC §18 lists the adjustments.
+2. The design is in the project Figma file (request access from the maintainer; frame and node IDs are in SPEC §11). The spec wins when they disagree; SPEC §18 lists the adjustments.
 3. `docs/FORMATS.md` records what agent files really look like on this machine. It overrides SPEC §5 where they differ.
 4. `docs/DECISIONS.md` records decisions made during implementation. Read it so you don't re-decide.
 
@@ -41,7 +43,7 @@ Changing any of these needs explicit approval from the product owner. Do not imp
 
 1. Take the next task from the current milestone (SPEC §16). Keep changes small and focused.
 2. **Before writing or changing an adapter:** capture sanitized fixtures from real files with `Tools/fixture-capture` (SPEC §15.2), compare them with SPEC §5, and record differences in `docs/FORMATS.md`.
-3. **Before M1:** complete exploration task **EXP-1** (SPEC §5.1.1) on the user's two Codex environments. Report field values and counts only.
+3. **Before M1:** complete exploration task **EXP-1** (SPEC §5.1.1) on representative Codex environments. Report field values and counts only.
 4. Write or extend tests first for parsers and accounting. Golden token tests must match hand-computed totals **exactly**.
 5. Implement within the module boundaries in SPEC §4.2. Dependencies point downward only; the app target never runs SQL directly.
 6. Run the checks below. Fix everything before you commit.
@@ -110,7 +112,7 @@ the verified test app's windows and avoid tools that can auto-launch it.
 - SwiftUI first; AppKit only where SwiftUI cannot do it. Swift Charts for charts.
 - Parsers are tolerant: unknown records are kept and counted, never crash (SPEC ADP-1…ADP-7). No force unwraps or `try!` in parsers.
 - Every write is an idempotent upsert keyed by a deterministic dedupe key.
-- Times are stored as UTC milliseconds and shown in the user's local time zone (Asia/Shanghai).
+- Times are stored as UTC milliseconds and shown in the user's local time zone.
 - User-facing strings go through `Localizable.xcstrings` (English and Simplified Chinese).
 - Use semantic system colors and SF Symbols; agent colors are fixed in SPEC §11.9.
 

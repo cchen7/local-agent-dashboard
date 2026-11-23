@@ -1,6 +1,14 @@
 .DS_Store
 /.worktrees/
 /.env
+/.env.*
+/AGENTS.local.md
+/*.cer
+/*.certSigningRequest
+/*.p12
+/*.pfx
+/*.p8
+/*.key
 .build/
 DerivedData/
 xcuserdata/

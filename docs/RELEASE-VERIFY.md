@@ -1,5 +1,8 @@
 # Verify a Developer ID release ZIP
 
+The public 0.1.0 download is a read-only DMG. The ZIP described below is
+the intermediate used to check the signed app before packaging it.
+
 The check is for a final ZIP containing one ordinary arm64
 `AgentDashboard.app`. It is separate from the ad-hoc
 `Tools/check-entitlements.sh` preflight and from first launch on a clean
@@ -61,3 +64,20 @@ have been reviewed.
 Apple references: [Code signing requirements](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements),
 [Notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow),
 and [Diagnosing Gatekeeper issues](https://developer.apple.com/forums/thread/706442).
+
+## Verify the published disk image
+
+Download the DMG and `SHA256SUMS` from the same GitHub Release. In the download
+directory, run:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+hdiutil verify AgentDashboard-0.1.0-macOS-arm64.dmg
+codesign --verify --strict AgentDashboard-0.1.0-macOS-arm64.dmg
+xcrun stapler validate AgentDashboard-0.1.0-macOS-arm64.dmg
+```
+
+The mounted volume contains the app and an Applications shortcut. The signed
+`AgentDashboardSourceRevision` in the app's `Contents/Info.plist` must equal
+the commit targeted by the release tag. Check the mounted app's signature,
+ticket and distribution assessment as well as the outer image's ticket.

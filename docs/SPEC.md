@@ -5,7 +5,7 @@
 | Version | 1.1 (2026-11-17; status precedence clarified with product-owner approval; decisions D-1, D-2, D-4, D-5, D-6 confirmed, see §17 and DECISIONS.md) |
 | Product owner | Xin Chen |
 | Platform | macOS 27 only, Apple silicon (arm64) only |
-| Design | Figma "Agent Dashboard – macOS 原型": https://www.figma.com/design/X48cH7JgDwxYzOWtzhtJkw |
+| Design | Agent Dashboard macOS prototype (maintainer-shared Figma file; see §11) |
 | One-liner | A fully local, zero-network, read-only native macOS app that collects every local coding agent's sessions and token usage, gives one place to search and read them, draws a live token-usage chart, and estimates cost from vendor list prices. |
 
 ---
@@ -70,7 +70,7 @@ remains a goal for a later release, after format capture and validation.
 | SEC-3 | **Read-only** access to agent files. | Open with read-only APIs (`FileHandle(forReadingFrom:)` etc.). Read other apps' SQLite files only from a snapshot copy (§6.6). No file locks, no timestamp changes. |
 | SEC-4 | No third-party SDKs. Dependency allow-list: GRDB.swift (pinned). A zstd decoder (BSD, vendored as source) is allowed **only if** `.jsonl.zst` files actually exist on the machine. | `Package.resolved` committed; CI checks the dependency list. |
 | SEC-5 | No child processes (`Process`, `posix_spawn`), no Apple Events. | CI grep. Opening other apps only via `NSWorkspace` URLs (§11.2). |
-| SEC-6 | No embedded AI: no model calls of any kind, including the on-device Foundation Models framework (not needed here, and Apple Intelligence is not enabled on the user's China-region Mac) and NaturalLanguage embeddings/classifiers. "Main topics" and "latest progress" use deterministic rules (§10). | Code review; CI grep for `FoundationModels`, `NLEmbedding`, `CoreML`, `CreateML`. |
+| SEC-6 | No embedded AI: no model calls of any kind, including the on-device Foundation Models framework and NaturalLanguage embeddings/classifiers. "Main topics" and "latest progress" use deterministic rules (§10). | Code review; CI grep for `FoundationModels`, `NLEmbedding`, `CoreML`, `CreateML`. |
 | SEC-7 | Session content lives only in the app's own sandbox container. No Spotlight indexing, no iCloud/CloudKit, no shared locations. | No Core Spotlight; no iCloud entitlements. |
 | SEC-8 | No session content in logs. | `os.Logger` only; every content interpolation uses `privacy: .private`; no custom log files. |
 
@@ -179,9 +179,9 @@ Scenarios covered (FR-SRC-1):
 6. **Several environments mixed in one directory:** e.g. several Codex profiles sharing `~/.codex`. `environmentRules` tag sessions by record fields (such as `model_provider` or `originator`); rules are editable in Settings.
    Sources settings can edit path mappings and Codex rules for model provider and originator. Saving configuration preserves source permissions and does not rebuild indexed sessions.
 
-#### 5.1.1 Exploration task EXP-1: the user's two Codex environments (do this on the developer machine before M1)
+#### 5.1.1 Exploration task EXP-1: Codex profiles sharing a root (developer investigation)
 
-Background: the user's Codex has two environments. It is unclear whether they keep separate session storage; it looks like they share one. Codex supports several ways to separate environments:
+Background: Codex profiles may share one history root or store sessions separately. Codex supports several ways to separate environments:
 
 - A different `CODEX_HOME`: separate login, config and session history.
 - Profiles inside one `CODEX_HOME`: `~/.codex/<name>.config.toml`, selected with `--profile`; sessions go to the same `sessions/` folder.
@@ -821,7 +821,7 @@ request for another model cannot reuse the older model's reported capacity.
 
 ## 11. UI specification
 
-Design: Figma file `X48cH7JgDwxYzOWtzhtJkw`. Read node sizes and styles with Figma's design-context tooling.
+Design: maintainer-shared Figma prototype. Read node sizes and styles with Figma's design-context tooling.
 
 | Frame | Node |
 |---|---|
@@ -1023,7 +1023,7 @@ Every list and chart needs: first indexing in progress, no data, no search resul
 
 ### 11.12 Localization
 
-All user-facing strings go through a String Catalog (`Localizable.xcstrings`). Ship English and Simplified Chinese; macOS picks the language from the user's settings. Dates and numbers use the user's locale and time zone (the user is in Asia/Shanghai); "today" starts at local midnight.
+All user-facing strings go through a String Catalog (`Localizable.xcstrings`). Ship English and Simplified Chinese; macOS picks the language from the user's settings. Dates and numbers use the user's locale and time zone; "today" starts at local midnight.
 
 ---
 
@@ -1259,11 +1259,11 @@ sources or request input permissions. See the [input QA matrix](reports/FIXED-IN
 
 | ID | Question | Decision |
 |---|---|---|
-| D-1 | What are the "separate environments"? | The user's Codex has two environments that appear to share one session directory (unconfirmed). Complete EXP-1 (§5.1.1) first and implement according to its findings. |
+| D-1 | What are the "separate environments"? | Use the observed storage layout and record fields to distinguish profiles; see EXP-1 (§5.1.1) and FORMATS.md. |
 | D-2 | Which agents in v1? | Claude Code, Codex (CLI and desktop app), GitHub Copilot CLI (including the Copilot App), Grok Build. Not Gemini CLI / Antigravity, not Cursor. |
 | D-4 | Token accounting | Totals include cache reads and writes. Add cost estimates from vendor list prices; the price table is a static file an agent updates periodically (§8.4–8.5). |
 | D-5 | Telemetry | Ignore telemetry; read only session data agents keep locally; open no ports. |
-| D-6 | On-device models | Not used: not needed for this project, and the user's China-region Mac does not have on-device AI enabled. |
+| D-6 | On-device models | Not used: insights are deterministic and must not depend on on-device AI. |
 
 **Defaults still in effect (no objection raised; can change any time):**
 

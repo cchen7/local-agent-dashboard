@@ -6,9 +6,8 @@ The coordinator owns task sequencing, shared decisions, code review, and PR merg
 Coding agents own one assigned worktree and return a scoped change with verification
 evidence. The product owner resolves changes to confirmed product decisions.
 
-2026-11-17: the owner asked the coordinator to launch standard-environment
-`gpt-6.1-sol` coding agents. This supersedes the earlier plan for manual agent launch.
-The coordinator also owns EXP-1. M0 local acceptance is now complete; consult CHECKPOINT.md and the actual PR state before starting M1.
+The following sections record the historical implementation plan. The coordinator
+also owned EXP-1. Consult the release tags for shipped behavior.
 
 The first commit establishes the previously uncommitted specification, repository
 instructions, and this handover. It is the prerequisite for linked worktrees, not

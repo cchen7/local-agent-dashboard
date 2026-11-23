@@ -21,25 +21,11 @@ assignment, stop editing and report it. Preserve any pre-existing changes.
 
 ## Launch and environment
 
-The requested model is `gpt-6.1-sol` in the normal `codex` environment. An agent
-spawned from a Foundry-backed parent can inherit `astra_foundry` even when its
-model is overridden. A completed preflight established this locally.
-
-The coordinator must start a fresh normal Codex task/process with the ordinary
-provider, rather than resume or fork the Foundry conversation. Verify both
-`session_meta.model_provider` and `turn_context.model`, plus completed tool execution,
-before assigning coding work. Do not copy credentials, auth files, or opaque
-encrypted conversation history between environments. Do not modify global config.
-
-Run from the assigned worktree. Standard CLI shape (use the locally verified
-ordinary provider ID, not a guessed provider):
-
-```sh
-codex --no-daemon --model gpt-6.1-sol -c 'model_provider="azure"'
-```
-
-The coordinator records actual launch/session status in a local checkpoint.
-This document is not proof that a coding worker has started or completed.
+Use the authorized development environment for the assigned worktree. A model
+override need not change the provider; check the recorded provider and model
+before handing off a task. Keep credentials, opaque history, private launcher
+settings and runtime checkpoints outside the public repository. Do not modify
+global configuration.
 
 ## Foundation prompt
 
