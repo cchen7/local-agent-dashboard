@@ -1,6 +1,6 @@
 # Coordinator checkpoint
 
-## Current state
+## Historical M0 state
 
 M0 local acceptance is complete; PR #2 is ready for final review/merge. Read its
 actual GitHub state before proceeding. The implementation is an empty native shell
@@ -45,7 +45,5 @@ Claude/Codex data locally before writing adapters. Golden accounting tests must 
 hand-computed and exact. Keep raw session content and credentials out of model
 context, logs, commits and PRs. Grok remains deferred until real local data exists.
 
-Use standard Codex `gpt-6.1-sol` through the verified ordinary provider (`azure`)
-for coding workers. Direct spawn from the coordinator retains its Foundry provider;
-use separate ordinary Codex processes in assigned worktrees. The coordinator owns
-review and merge. Existing publication/provider authorization remains in scope.
+Use the authorized development environment for each worktree. See the repository
+README and release tags for the shipped product, rather than this M0 checkpoint.

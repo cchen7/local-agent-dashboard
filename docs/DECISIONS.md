@@ -6,9 +6,7 @@ below record development decisions and explicitly approved clarifications.
 ## DEV-001 — Worktrees and ownership (2026-11-17)
 
 Keep the main checkout on `main` for coordination/review. Each coding task gets a
-separate branch and linked worktree under ignored `.worktrees/`. The owner initially
-selected manual handover, then explicitly requested coordinator-launched standard
-Codex `gpt-6.1-sol` workers. The coordinator owns EXP-1 and merges reviewed PRs.
+separate branch and linked worktree under ignored `.worktrees/`. The coordinator owns EXP-1 and merges reviewed PRs.
 No global config, runtime installation or automatic worktree cleanup is authorized.
 
 ## DEV-002 — Status precedence (owner approved 2026-11-17)
@@ -34,13 +32,9 @@ syntax, ranking, snippets and UI. The required CJK behavior is not weakened.
 
 ## DEV-005 — Standard Codex workers (2026-11-17)
 
-Fresh subagent model override inherited the coordinator's `astra_foundry` provider.
-Use separate ordinary `codex --no-daemon exec` processes with `gpt-6.1-sol` and the
-locally verified ordinary provider `azure`, with each cwd set to its assigned
-worktree. A completed preflight verified provider/model, successful commands and
-normal exit (FORMATS.md). The owner explicitly approved transmitting project
-instructions, code and necessary tool output through the existing standard proxy;
-raw agent-session content and credentials are excluded. Global config is unchanged.
+A model override can inherit its parent's provider. Workers should verify the
+configured provider and model in their assigned worktree. Keep provider names,
+routing configuration, authorizations and private evidence in local handoffs.
 
 ## DEV-006 — M0 storage baseline (2026-11-17)
 
