@@ -35,7 +35,7 @@ func freshAndReopened() throws {
             #expect(try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY identifier") ==
                 ["archive_retention", "context_measurement_model", "copilot_accounting", "exclusion_source_identity", "inherited_transcript", "live_topic_index", "original_tool_input", "project_pin_preferences", "project_usage_scope_edges", "running_session_activity", "saved_search_sidebar_filter", "session_exclusions", "session_record_identity", "session_titles", "session_usage_rollup", "source_removal", "source_root_identity", "status_inference", "structured_tool_actions", "tool_output_archive", "transcript_tool_pairs", "v1", "v2_jsonl_checkpoint", "v3_session_parent_hint", "v4_codex_index", "v9_token_minutes",
                  "v10_usage_readouts", "v11_token_quotes", "v12_cache_savings", "v13_usage_chart_changes",
-                 "usage_cost_peak_index", "reapply_mapped_workspace_exclusions"].sorted())
+                 "usage_cost_peak_index", "reapply_mapped_workspace_exclusions", "session_parent_indexes"].sorted())
             for name in ["sources", "source_root_identities", "source_files", "projects", "sessions", "events", "events_fts", "blobs",
                          "file_touches", "commands", "token_events", "token_minute", "rate_limit_snapshots",
                          "session_keywords", "term_df", "saved_searches", "app_meta", "copilot_usage_snapshots", "session_usage_rollup"] {
@@ -43,6 +43,19 @@ func freshAndReopened() throws {
             }
             #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?", arguments: ["登录"]) == 1)
             #expect(try Row.fetchAll(db, sql: "PRAGMA foreign_key_check").isEmpty)
+        }
+        // FR-STO-1: clear, expiry and exclusion must not scan `sessions` for its self references.
+        try reopened.databasePool.write { db in
+            try db.execute(sql: "CREATE TEMP TABLE picked(id INTEGER PRIMARY KEY)")
+            defer { try? db.execute(sql: "DROP TABLE temp.picked") }
+            for (column, index) in [("parent_session_id", "sessions_parent"), ("resumed_from_session_id", "sessions_resumed_from")] {
+                for filter in ["=?", " IN (SELECT id FROM temp.picked)"] {
+                    let sql = "EXPLAIN QUERY PLAN UPDATE sessions SET \(column)=NULL WHERE \(column)\(filter)"
+                    let plan = try String.fetchAll(db, sql: sql, arguments: filter == "=?" ? [1] : [],
+                                                   adapter: SuffixRowAdapter(fromIndex: 3))
+                    #expect(plan.contains { $0.hasPrefix("SEARCH sessions USING") && $0.contains(" INDEX \(index) (") }, "\(plan)")
+                }
+            }
         }
     }
 }

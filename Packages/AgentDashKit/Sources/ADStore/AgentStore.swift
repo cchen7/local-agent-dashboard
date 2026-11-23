@@ -229,6 +229,16 @@ public final class AgentStore: Sendable {
             try gate.finishRemovals(db: db)
             try UsageChartChanges.publish(db)
         }
+        migrator.registerMigration("session_parent_indexes", foreignKeyChecks: .immediate) { db in
+            // Each deleted session checks both self references; without an
+            // index, clear and expiry scan `sessions` once per deleted row.
+            // Adding an index cannot violate a foreign key, so skip GRDB's
+            // deferred whole-database check on upgrade.
+            try db.execute(sql: """
+                CREATE INDEX sessions_parent ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL;
+                CREATE INDEX sessions_resumed_from ON sessions(resumed_from_session_id) WHERE resumed_from_session_id IS NOT NULL;
+                """)
+        }
         try migrator.migrate(databasePool)
     }
 
