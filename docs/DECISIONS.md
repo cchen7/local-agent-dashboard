@@ -926,3 +926,10 @@ without UI or mounting volumes. Verify Access rejects a bookmark that
 resolves to a different folder instead of showing it as readable.
 Identity lookup can still recognize a renamed directory during permission
 renewal; a status check does not renew the grant.
+
+## DEV-101 — Use a layered macOS app icon (§11)
+
+The Finder and Dock icon uses an Icon Composer document with original
+vector layers: a glass surface, a search lens and a usage signal.
+Xcode compiles the appearance variants and applies the system mask.
+The menu bar keeps its monochrome symbol.

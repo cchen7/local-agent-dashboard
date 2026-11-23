@@ -4,6 +4,8 @@
 	classes = {};
 	objectVersion = 56;
 	objects = {
+		AD6200000000000000000001 = { isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		AD6200000000000000000002 = { isa = PBXBuildFile; fileRef = AD6200000000000000000001; };
 		AD6100000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticNativeSearch.swift; sourceTree = "<group>"; };
 		AD6100000000000000000002 = { isa = PBXBuildFile; fileRef = AD6100000000000000000001; };
 		AD6000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticRepricing.swift; sourceTree = "<group>"; };
@@ -193,6 +195,7 @@
 		};
 		C5E55183ECB076EB335DF6EE = {
 			isa = PBXGroup; children = (
+				AD6200000000000000000001,
 				652F55016243BF1B9F1BBEA4,
 				AD4C00000000000000000007,
 			); path = Resources; sourceTree = "<group>";
@@ -244,6 +247,7 @@
 		};
 		F9187E824FE171A6F0EFAE28 = {
 			isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (
+				AD6200000000000000000002,
 				BAB7530B9399702DECCC3C35,
 				AD4C00000000000000000008,
 			); runOnlyForDeploymentPostprocessing = 0;
@@ -367,6 +371,7 @@
 		};
 		03CA35BB2534EEA6D70E5210 = {
 			isa = XCBuildConfiguration; buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ENABLE_DEBUG_DYLIB = "NO";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -387,6 +392,7 @@
 		};
 		AD5500000000000000000002 = {
 			isa = XCBuildConfiguration; buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ENABLE_DEBUG_DYLIB = "NO";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard.SyntheticQA";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -407,6 +413,7 @@
 		};
 		C4105CD76E02D5765B7DA9D2 = {
 			isa = XCBuildConfiguration; buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.chenxin.AgentDashboard";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				CODE_SIGN_STYLE = "Automatic";

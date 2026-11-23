@@ -354,7 +354,8 @@ session metadata, turn model and last-usage counters, and treats compressed
 files as immutable. A session can have usage and task events without usable
 transcript messages in that channel. The local writer therefore chooses a
 transcript based on usable text and supersedes fallback content transactionally.
-This section and implementation are not cleared for publication.
+Only sanitized format notes and synthetic fixtures are tracked. Raw
+captures and detailed native accounting evidence stay local.
 
 The native Codex `session_index.jsonl` can repeat an `id` and includes
 `updated_at`; it is not a start-time or token-usage ledger. For a
