@@ -376,6 +376,23 @@ coverage are separate checks. A native Copilot shutdown total used by
 the fallback importer is a consistency reference, not an independent
 CLI-wide accounting ledger.
 
+In the 0.1.0 fixed-window spot check, the Codex itemized usage sum was
+within 1% of the native cumulative delta. The remaining differences came
+from rollouts whose first cumulative balance already exceeded their first
+itemized record. The importer keeps the itemized usage and does not assign
+that unexplained opening balance to the window.
+
+The sampled Claude statistics cache had no dated coverage of the selected
+window or separate daily cache counters. Raw response records agreed
+with the index; the independent CLI comparison remains open. In Copilot,
+the overlapping native SQLite rows exceeded the 1% tolerance. The extra
+rows matched an already represented call's model and counters within a
+millisecond, but used different turn indices and had no common event ID.
+Counting each matched event once explained the difference in a diagnostic
+projection. It does not establish the CLI's counting rule and is not a
+production deduplication rule. Keep the raw comparison open pending
+independent confirmation.
+
 ## Local source availability for M0
 
 2026-11-17: the real, sandboxed and hardened App's Sources panel successfully
