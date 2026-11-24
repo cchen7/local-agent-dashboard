@@ -35,7 +35,7 @@ The user runs several coding agents side by side — Claude Code, Codex (CLI and
 
 ### 1.2 Goals (v1)
 
-These are product goals. The [0.1.0 release scope](RELEASE-SCOPE.md)
+These are product goals. The [0.1.x release scope](RELEASE-SCOPE.md)
 includes Claude Code, Codex and GitHub Copilot CLI. Grok Build support
 remains a goal for a later release, after format capture and validation.
 
