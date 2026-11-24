@@ -1,33 +1,28 @@
 # Agent Dashboard
 
-[简体中文](README.md) · [Download for macOS](https://github.com/cchen7/local-agent-dashboard/releases/latest)
+[简体中文](README.md) · [Download](https://github.com/cchen7/local-agent-dashboard/releases/latest)
 
-Search your local Claude Code, Codex (CLI and desktop), and GitHub Copilot CLI sessions in one Mac app. Open a search hit at the original message, follow the recent work in a project, or compare token usage across agents.
+All your local Claude Code, Codex and GitHub Copilot CLI sessions in one Mac app. Find last week's error discussion in seconds, catch up on a project's recent work, and see how many tokens each agent used and roughly what they cost.
 
-## Install and index a source
+<img src="docs/screenshots/search-en.png" alt="Searching sessions and opening the matching message">
 
-Requires **macOS 27 or later on Apple silicon**. The interface is available in English and Simplified Chinese.
+## Features
 
-1. Download `AgentDashboard-0.1.0-macOS-arm64.dmg` from the [0.1.0 release](https://github.com/cchen7/local-agent-dashboard/releases/tag/v0.1.0). Open it, drag **AgentDashboard** to **Applications**, and launch the installed copy. The release is Developer ID signed and notarized by Apple.
-2. Select the local sources you want to include and choose **Start Indexing**. For a nonstandard location, use **Settings → Sources → Add Source**, choose the agent's root folder, and start indexing when ready. Adding a source does not scan it.
-3. Press `⌘F` in Sessions. For example, `agent:codex in:7d "migration"` finds mentions in the last seven days of Codex history. Open a result to read the surrounding messages. Use `⌘G` and `⇧⌘G` to step through hits, or save a frequent query as a Smart Group.
+- **Search every session.** Full-text search in English and Chinese opens the matching message; step through hits with `⌘G`. Narrow results with filters like `agent:codex in:7d "migration"`, and save frequent queries as Smart Groups.
+- **Follow each project.** Sessions, topics and recent progress, grouped by workspace.
+- **Token usage and cost.** Usage and throughput per agent, from the last hour to all time. Totals include cache reads and writes, and costs are estimated from public API prices. Also available from the menu bar.
+- **Stays on your Mac.** No network access and no AI models. Sessions are read, never modified, and common secrets are masked on screen by default.
 
-Projects groups sessions by workspace and shows recent activity. Token Usage includes cache reads and writes, and estimates costs using public API rates; it does not report a subscription bill. Usage without a known price is still counted. Search and usage are also available from the menu bar.
+<p>
+  <img src="docs/screenshots/usage-en.png" width="49%" alt="Token usage">
+  <img src="docs/screenshots/projects-en.png" width="49%" alt="Projects">
+</p>
 
-## What stays on the Mac
+## Install
 
-The app does not make network requests or call a model. It reads authorized sources without modifying them and stores its search index in its own sandbox. Display masking hides common credential patterns on screen; it does not redact stored or original text. Index redaction and workspace exclusion rules are available in privacy settings.
+Requires an Apple silicon Mac with macOS 27 or later.
 
-Cloud sessions, Grok Build, and transcript export are outside the [0.1.0 scope](docs/RELEASE-SCOPE.md). Claude Code local records are supported; an independent historical usage comparison is pending a matching time window with cache counters.
+1. Download the DMG from [Releases](https://github.com/cchen7/local-agent-dashboard/releases/latest) and drag AgentDashboard to Applications. The app is notarized by Apple.
+2. On first launch, choose the agents to index and click **Start Indexing**. If your sessions are stored elsewhere, add the folder in **Settings → Sources**.
 
-## Build
-
-Use Xcode 27 and the corresponding macOS SDK on Apple silicon. Dependency lockfiles are checked in. Resolving build dependencies for the first time may require internet access.
-
-```sh
-xcodebuild -project AgentDashboard.xcodeproj -scheme AgentDashboard \
-  -configuration Release -destination 'platform=macOS,arch=arm64' build
-swift test --package-path Packages/AgentDashKit
-```
-
-[Development and tests](AGENTS.md) · [Specification](docs/SPEC.md) · [Session formats](docs/FORMATS.md) · [MIT license](LICENSE) · [Third-party notices](App/Resources/THIRD-PARTY-NOTICES.txt)
+[MIT License](LICENSE) · [Third-party notices](App/Resources/THIRD-PARTY-NOTICES.txt) · [Developer guide](AGENTS.md)
