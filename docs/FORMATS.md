@@ -162,17 +162,21 @@ itemized record. The importer keeps the itemized usage and does not assign
 that unexplained opening balance to the window.
 
 For Claude Code, one live session was compared with the CLI's own `/cost`
-report at the same moment. Applying the SPEC §5.4 rules to a frozen copy of the
-session's on-disk records reproduced the app's totals exactly for every token
-component. Against the CLI report, the main-thread response count matched
-exactly, the main-thread cache share agreed (28.2% vs. 28%), and output tokens
-were within 0.4%. For the same model, the CLI reported about 10% more fresh
-input, 13% more cache reads and 10% more cache writes, and it listed requests
-from other models that no transcript record contains. These differences are
-attributed (unverified inference) to requests the CLI makes without writing
-them to the session's records. The app counts only on-disk records, so its
-Claude Code input and cache totals can be lower than the CLI's report while
-response counts and output agree.
+report taken at the same moment. Applying the SPEC §5.4 rules to a frozen copy
+of the session's on-disk records reproduced the app's totals exactly for every
+token component. The report's main-thread prompt-cache line gave the same
+request count as the records' main-thread responses, and its 28% cache share
+agreed with the records' 28.2% (cache reads as a share of all input tokens).
+The report's line for the session's model also covers subagent requests. There,
+output was within 0.4% of the records, but fresh input was about 10% higher,
+cache reads 13% higher and cache writes 10% higher. The report also listed
+requests from other models that no record contains. The likely cause is
+requests the CLI makes without writing them to the session's records; this is
+an unverified inference. The app reproduces every on-disk record, so the
+difference does not come from how it counts them. For 0.1.x, the input and
+cache differences, which exceed the §15.5 1% tolerance, are recorded here as a
+known difference. Session counts were not compared: the CLI's statistics cache
+does not cover this window.
 
 For the six overlapping Copilot samples, the app totals matched the native
 reference. Where raw SQLite rows disagreed, the CLI's own cumulative accounting
