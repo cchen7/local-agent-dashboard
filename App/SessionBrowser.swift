@@ -12,7 +12,7 @@ struct SessionListCell: View {
     let session: SessionListItem
     var snippet: [SearchSnippetPart] = []
     var projectName: String? = nil
-    var currency: PriceDisplayCurrency = .usd
+    var currency: PriceDisplayCurrency
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
