@@ -57,6 +57,8 @@ public extension AgentStore {
         var regions: [any DatabaseRegionConvertible] = [
             Table("events"), Table("sessions"), Table("projects"), Table("file_touches"), Table("app_meta"),
         ]
+        // Token order reads session_usage_rollup, which triggers update in the
+        // same transaction as every token_events change.
         if order == .tokens { regions.append(Table("token_events")) }
         return ValueObservation.tracking(regions: regions, fetch: { _ in () })
             .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))
@@ -252,15 +254,16 @@ public extension AgentStore {
     private static func searchVolumes(for keys: Dictionary<Int64, MatchTally>.Keys, db: Database) throws -> [Int64: Int64] {
         var volumes: [Int64: Int64] = [:]
         let ids = Array(keys)
-        // Limit the calculation to matching sessions; the existing session
-        // token index supports this lookup. Work before paginating results.
+        // Read the committed per-session rollup (DEV-078) instead of summing the
+        // ledger: one row per matching session, the same cache-inclusive total the
+        // Sessions rows show. Work before paginating results.
         for start in stride(from: 0, to: ids.count, by: 256) {
             try Task.checkCancellation()
             let batch = ids[start..<min(start + 256, ids.count)]
             let marks = Array(repeating: "?", count: batch.count).joined(separator: ",")
             let rows = try Row.fetchCursor(db, sql: """
-                SELECT session_id,sum(input_fresh+cache_read+cache_write+cache_write_1h+output) AS tokens
-                FROM token_events WHERE session_id IN (\(marks)) GROUP BY session_id
+                SELECT session_id,input_fresh+cache_read+cache_write+cache_write_1h+output AS tokens
+                FROM session_usage_rollup WHERE session_id IN (\(marks))
                 """, arguments: .init(batch))
             while let row = try rows.next() { volumes[row["session_id"] as Int64] = row["tokens"] }
         }
