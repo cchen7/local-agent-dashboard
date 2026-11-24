@@ -643,6 +643,8 @@ An explicitly authorized QA launch opens the existing Dashboard scene after
 startup, without relying on restored windows from the normal app. Native
 diagnostics use the test window, never a complete application accessibility
 tree. Keep normal Debug and Release entry and window behavior.
+Refined by DEV-107: normal builds contain no preview fixtures and refuse
+`--synthetic`.
 
 Bind the transcript's match scroll position before laying out a new page.
 An immediate scroll call after creating the scroll view could be dropped on
@@ -1007,8 +1009,9 @@ differences, so the code is not mass-reformatted. Its remaining suggestions
 Refines DEV-083. Preview seeding lives in a file compiled only with
 `AGENTDASH_SYNTHETIC_ONLY`, so Debug and Release contain neither the fixture
 data nor the code that writes it. Those builds now refuse `--synthetic`
-before the app delegate or model exists. Ignoring the flag would let a
-scripted test launch open the real index and sources while appearing
-isolated. No test, tool or procedure launched a normal build with the flag:
+before the app delegate or model exists. Without the refusal, such a launch
+would silently open an empty temporary index under the normal app's bundle
+identifier, container and preferences domain instead of an isolated test
+bundle. No test, tool or procedure launched a normal build with the flag:
 measurements and UI tests require the signed SyntheticQA bundle. Launches
 without the flag are unchanged.
