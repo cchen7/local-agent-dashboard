@@ -99,7 +99,6 @@ extension DashboardModel {
         let primary = SessionKey(agent: .codex, nativeID: "preview-import")
         let other = SessionKey(agent: .codex, nativeID: "preview-docs")
         let realNow = Int64(Date().timeIntervalSince1970 * 1000)
-        #if AGENTDASH_SYNTHETIC_ONLY
         if ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_DETAIL_FACTS"] == "1" {
             try store.write([
                 .session(.init(key: primary, sourceID: sourceID, environment: "Synthetic",
@@ -125,7 +124,6 @@ extension DashboardModel {
             ])
             return
         }
-        #endif
         let knownClock = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_PRESENTATION_ID"] != nil
             ? Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: 12, hour: 17, minute: 4)) : nil
         let now = knownClock.map { Int64($0.timeIntervalSince1970 * 1000) + 900_000 } ?? realNow
@@ -195,12 +193,8 @@ extension DashboardModel {
                     dedupeKey: "preview-usage:\(index):\(sample)")))
             }
         }
-        #if AGENTDASH_SYNTHETIC_ONLY
         let resetAfter: Int64 = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_LIMIT_EXPIRY"] == "1"
             ? 16_000 : 3_600_000
-        #else
-        let resetAfter: Int64 = 3_600_000
-        #endif
         records.append(.rateLimit(.init(agent: .codex, limitID: "synthetic-preview", window: .primary,
                                         timestamp: now - 60_000, windowMinutes: 300, usedPercent: 42,
                                         resetsAt: now + resetAfter, planType: "Synthetic")))
