@@ -148,7 +148,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.model.syntheticQALaunchReady = true
         }
         #endif
+        #if AGENTDASH_SYNTHETIC_ONLY
         if model.showsMenuBarThroughput { Task { await model.load() } }
+        #else
+        // DEV-109: open the index even when no window is restored, so sources
+        // left indexing resume at launch.
+        Task { await model.load() }
+        #endif
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

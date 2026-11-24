@@ -239,6 +239,12 @@ public final class AgentStore: Sendable {
                 CREATE INDEX sessions_resumed_from ON sessions(resumed_from_session_id) WHERE resumed_from_session_id IS NOT NULL;
                 """)
         }
+        migrator.registerMigration("source_resume_indexing", foreignKeyChecks: .immediate) { db in
+            // DEV-109: a source the user started and did not stop resumes at
+            // launch. Existing sources start unset; adding a column with a
+            // constant default cannot violate a foreign key.
+            try db.execute(sql: "ALTER TABLE sources ADD COLUMN resume_indexing INTEGER NOT NULL DEFAULT 0")
+        }
         try migrator.migrate(databasePool)
     }
 
@@ -521,7 +527,7 @@ public final class AgentStore: Sendable {
     public func removeRegisteredSource(_ id: Int64) throws {
         try databasePool.write { db in
             try db.execute(sql: """
-                UPDATE sources SET removed=1,enabled=0,access_kind='default_location',bookmark=NULL
+                UPDATE sources SET removed=1,enabled=0,access_kind='default_location',bookmark=NULL,resume_indexing=0
                 WHERE id=? AND removed=0
                 """, arguments: [id])
             guard db.changesCount == 1 else { throw StoreError.missingSource }

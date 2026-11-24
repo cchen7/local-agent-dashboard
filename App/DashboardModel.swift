@@ -45,6 +45,7 @@ final class DashboardModel {
     private(set) var toolOutputLimit: ToolOutputArchiveLimit = .standard
     private(set) var archiveMaintenanceFailed = false
     @ObservationIgnored private var archiveTask: Task<Void, Never>?
+    @ObservationIgnored private var resumeWrites: Task<Void, Never>?
     private(set) var editingSourceIDs: Set<Int64> = []
     var page: DashboardPage? = .sessions
     var sources: [Source] = []
@@ -73,6 +74,7 @@ final class DashboardModel {
         preferredSessionListWidth = prefix.flatMap {
             (UserDefaults.standard.object(forKey: $0 + "sessionListWidth") as? NSNumber)?.doubleValue
         }.flatMap { $0.isFinite && (300...420).contains($0) ? CGFloat($0) : nil }
+        sourceIndexing.onFollowFailure = { [weak self] id in self?.recordResumesIndexing(false, sourceID: id) }
     }
 
     func rememberSessionListWidth(_ width: CGFloat) {
@@ -310,7 +312,7 @@ final class DashboardModel {
                 return (store, try store.sources(), home, onboarding, runtime, initialPricing,
                         try store.displaySecretMaskingEnabled(), try store.indexSecretRedactionEnabled(),
                         try store.sessionExclusionPatterns(), try store.indexThinkingBlocksEnabled(), retention,
-                        try store.toolOutputArchiveLimit())
+                        try store.toolOutputArchiveLimit(), try store.sourceIDsResumingIndexing())
             }.value
             if CommandLine.arguments.contains("--synthetic"),
                let query = ProcessInfo.processInfo.environment["AGENTDASH_SYNTHETIC_SEARCH_QUERY"],
@@ -365,6 +367,9 @@ final class DashboardModel {
                 startIndexing(source)
             }
             #endif
+            // DEV-109: continue the sources the user left indexing, from their checkpoints.
+            let resuming = Set(result.12)
+            for source in sources where source.id.map(resuming.contains) == true { startIndexing(source) }
         } catch {
             storageFailed = true
             #if AGENTDASH_SYNTHETIC_ONLY
@@ -915,7 +920,24 @@ final class DashboardModel {
     func startIndexing(_ selection: Source) {
         guard !onboardingRequired, !changingPrivacy, !clearingIndex, let store, let id = selection.id, !editingSourceIDs.contains(id),
               let source = sources.first(where: { $0.id == id }) else { return }
-        sourceIndexing.start(source: source, store: store)
+        if sourceIndexing.start(source: source, store: store) { recordResumesIndexing(true, sourceID: id) }
+    }
+
+    /// An explicit stop is the only way a running source stops resuming at launch.
+    func stopIndexing(_ id: Int64) {
+        sourceIndexing.stop(id: id)
+        recordResumesIndexing(false, sourceID: id)
+    }
+
+    /// DEV-109: keep these small writes in call order without blocking the
+    /// main actor while an import batch holds the writer.
+    private func recordResumesIndexing(_ resumes: Bool, sourceID: Int64) {
+        guard let store else { return }
+        let previous = resumeWrites
+        resumeWrites = Task {
+            await previous?.value
+            await Task.detached(priority: .utility) { try? store.setResumesIndexing(resumes, sourceID: sourceID) }.value
+        }
     }
 
     func canRescan(_ source: Source) -> Bool {

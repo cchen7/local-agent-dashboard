@@ -287,7 +287,8 @@ Keep bookmark access alive through both activities and release it after
 Stop. Subscribe before discovery and coalesce byte-exact hints; unknown
 paths and ambiguous events go through discovery before import. Reject a
 replacement of the selected root, keep existing indexed history, and
-resume from committed checkpoints on the next explicit start.
+resume from committed checkpoints on the next explicit start. Launch
+behavior is refined by DEV-109.
 
 ## DEV-041 — Local Codex port and immutable compressed rollouts
 
@@ -1044,3 +1045,17 @@ timed in the app.
 On a signed, optimized SyntheticQA build with 1M token rows, period
 switching measured P95 78.6 ms (tokens) and 78.4 ms (cost). Chart data
 derivation took at most 0.8 ms of that, so the chart view is unchanged.
+
+## DEV-109 — Resume sources left indexing at launch (FR-SRC-2, NFR-2)
+
+Refines DEV-044 with the product owner's approval. Starting a source, from
+onboarding or Settings → Sources, sets `sources.resume_indexing`. Stop
+Indexing clears it, and so does a watched source that ends with an error;
+removing a source forgets it. Quitting the app leaves it set. At launch the
+app opens the index even when no window is restored and starts each enabled,
+registered source whose flag is set, from its committed checkpoints. A source
+the user stopped stays stopped, first-run onboarding is unchanged, and a
+library from 0.1.x has no flags, so its sources resume only after the next
+explicit start. The flag is written in call order off the main actor, so a
+quick start and stop cannot land reversed while an import batch holds the
+writer.
