@@ -1,7 +1,6 @@
 import ADCore
 import ADInsights
 import ADPricing
-import ADPrivacy
 import ADStore
 import Foundation
 import Observation
@@ -286,8 +285,6 @@ final class TokenUsageModel {
             return try store.usageLimitReadings(now: now, agent: agent, includeThroughput: includeThroughput)
         }
     }
-
-    func displayText(_ text: String) -> String { SecretMasker.mask(text) }
 
     private nonisolated static func background<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
         let task = Task.detached(priority: .userInitiated, operation: operation)

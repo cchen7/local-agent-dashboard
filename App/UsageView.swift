@@ -1,16 +1,21 @@
 import ADCore
 import ADInsights
 import ADPricing
+import ADPrivacy
 import ADStore
 import Charts
 import SwiftUI
 
 struct UsageView: View {
     @DashboardClock private var clock
+    @Environment(\.secretMaskingEnabled) private var maskSecrets
     @Bindable var model: TokenUsageModel
     let editRedlines: () -> Void
     let openPricing: () -> Void
     private typealias Width = UsageBreakdownColumns
+
+    /// Follow Privacy's display-masking setting, as the other pages do (§12.2).
+    private func displayText(_ text: String) -> String { maskSecrets ? SecretMasker.mask(text) : text }
 
     var body: some View {
         GeometryReader { viewport in
@@ -92,7 +97,7 @@ struct UsageView: View {
                 }
                 Picker("Project", selection: $model.usageProjectID) {
                     Text("All projects").tag(nil as Int64?)
-                    ForEach(model.projects) { Text(verbatim: model.displayText($0.name)).tag(Optional($0.id)) }
+                    ForEach(model.projects) { Text(verbatim: displayText($0.name)).tag(Optional($0.id)) }
                 }
                 if model.usageMetric == .cost, model.pricing.currencies.count > 1 {
                     UsageCurrencyPicker(pricing: model.pricing)
@@ -310,7 +315,7 @@ struct UsageView: View {
                 GridRow {
                     cell(columns.flexible, alignment: .leading) {
                         if let agent = row.agent { Text(agent.title).foregroundStyle(agent.badge.color) }
-                        else if let label = row.label { Text(verbatim: model.displayText(label)) }
+                        else if let label = row.label { Text(verbatim: displayText(label)) }
                         else { Text("Unassigned") }
                     }
                     breakdownValues(row.peak, totals: row.totals, sessions: row.sessions, metric: metric,
