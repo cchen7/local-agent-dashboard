@@ -293,6 +293,20 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(window.staticTexts["Synthetic checkout verified"].exists)
     }
 
+    func testProjectSessionsTabListsMemberSessionRows() throws {
+        _ = try launch(size: CGSize(width: 1120, height: 720), appearance: "dark", projects: true)
+        openLibrary("projects")
+        let tabs = element("projects.tabs")
+        let sessions = tabs.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Sessions")).firstMatch
+        XCTAssertTrue(sessions.waitForExistence(timeout: 5))
+        sessions.click()
+        let list = element("projects.sessions")
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        // Each row is one button whose label combines the session cell's texts.
+        let row = list.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Verify synthetic checkout")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+    }
+
     func testProjectUsageChangesPeriodAndShowsOnlyProjectFacts() throws {
         _ = try openProjectUsage(size: CGSize(width: 1120, height: 720), appearance: "dark")
         let summary = element("projects.usage.summary")

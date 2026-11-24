@@ -443,7 +443,7 @@ private struct ProjectDetail: View {
                 List(filtered) { item in
                     Button { openSession(item.id) } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            SessionListCell(session: item.session)
+                            SessionListCell(session: item.session, currency: currency)
                             if let worktree = item.worktree {
                                 Text("Worktree: \(worktree)").font(.caption).foregroundStyle(.secondary)
                             }
