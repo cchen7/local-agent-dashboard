@@ -1015,3 +1015,32 @@ identifier, container and preferences domain instead of an isolated test
 bundle. No test, tool or procedure launched a normal build with the flag:
 measurements and UI tests require the signed SyntheticQA bundle. Launches
 without the flag are unchanged.
+
+## DEV-108 — Optimize the measured bottleneck (NFR-3, NFR-4, NFR-5)
+
+The release first-index benchmark indexed the 5 GB synthetic corpus in
+78.6–99.8 s (50–64 MB/s) over four runs, within NFR-3; the index was 21% of
+the raw size. In a 30 s sample taken mid-run (about 35–65 s into an 80 s
+run), the single GRDB writer was busy 95% of the time, while the three parse
+threads were busy 25–30% and otherwise waited for it. Writer time was SQLite
+69.5% (FTS tokenizer 15.3%, WAL writes 9.7%; the rest was not attributed
+further), LZFSE archive compression 14.2% and price quoting 6.9%. Per-line
+decoder-state encoding (mostly Codex and Copilot) and discarded reasoning
+records run on parse threads, so changing them would reduce CPU but not
+import time in that window. They are unchanged; skipping lines before decoding
+would also stop counting malformed ones as unknown. Moving compression out of
+the writer is the largest non-SQLite candidate; it must keep DEV-031's
+in-transaction redaction decision.
+
+Token-volume search order reads `session_usage_rollup`, the total Sessions
+rows display, instead of summing the ledger per matching session. In the
+package benchmark (`swift test -c release`, warm P95 of 20 queries; two
+benchmark runs) with 1M synthetic token events, broad-OR P95 fell from
+138.0/142.8 ms to 54.6/46.7 ms and a mixed query from 105.4/112.5 ms to
+15.8/15.4 ms. This is query time, not NFR-4's in-app edit-to-result timing;
+the app's native search fixture has no token events, so token order was not
+timed in the app.
+
+On a signed, optimized SyntheticQA build with 1M token rows, period
+switching measured P95 78.6 ms (tokens) and 78.4 ms (cost). Chart data
+derivation took at most 0.8 ms of that, so the chart view is unchanged.

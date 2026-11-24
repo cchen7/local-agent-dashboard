@@ -248,6 +248,57 @@ func millionEntrySearchLatency() throws {
     }
 }
 
+@Test("NFR-4: token-volume order on one million synthetic token events",
+      .enabled(if: ProcessInfo.processInfo.environment["AGENTDASH_SEARCH_BENCHMARK"] == "1"),
+      .timeLimit(.minutes(5)))
+func millionTokenEventVolumeOrderLatency() throws {
+    let fixture = try SearchFixture()
+    defer { fixture.remove() }
+    try populateMillionSearchEntries(fixture)
+    // 500 calls per session. Fresh input permutes ids modulo the prime 2003, so
+    // every session total is distinct and the expected order has no ties.
+    try fixture.store.databasePool.write { db in
+        try db.execute(sql: """
+            WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<499)
+            INSERT INTO token_events(session_id,agent,ts,input_fresh,cache_read,cache_write,cache_write_1h,output,dedupe_key)
+            SELECT s.id,'codex',1795000000000+seq.n,(s.id*7919)%2003,seq.n%5,seq.n%3,seq.n%2,seq.n%7+1,
+                   printf('tokens:%lld:%d',s.id,seq.n)
+            FROM sessions s CROSS JOIN seq
+            """)
+        #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM token_events") == 1_000_000)
+    }
+    for (label, query, sessions) in [("broad OR", "auth OR middleware", 2_000), ("mixed", "登录 verify", 2_000)] {
+        let first = try fixture.run(query, order: .tokens)
+        #expect(first.sessionCount == sessions)
+        // The whole first page must follow the ledger's order.
+        #expect(!first.hits.isEmpty)
+        let expected = try fixture.store.databasePool.read { db in
+            try Int64.fetchAll(db, sql: """
+                SELECT session_id FROM token_events GROUP BY session_id
+                ORDER BY sum(input_fresh+cache_read+cache_write+cache_write_1h+output) DESC LIMIT ?
+                """, arguments: [first.hits.count])
+        }
+        let page = try fixture.store.databasePool.read { db in
+            try first.hits.map { hit in
+                try #require(try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE agent=? AND native_id=?",
+                                                arguments: [hit.id.agent.rawValue, hit.id.nativeID]))
+            }
+        }
+        #expect(page == expected)
+        var samples: [Double] = []
+        for _ in 0..<20 {
+            let start = ContinuousClock.now
+            let result = try fixture.run(query, order: .tokens)
+            let elapsed = start.duration(to: .now).components
+            samples.append(Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15)
+            #expect(result.sessionCount == sessions)
+        }
+        let p95 = samples.sorted()[18]
+        print("1M token events / \(label) by token volume: warm P95 \(p95) ms")
+        #expect(p95 < 150)
+    }
+}
+
 /// Export from the exact same workload used by the package latency check.
 @Test("NFR-4: export a verified million-message native search fixture",
       .enabled(if: ProcessInfo.processInfo.environment["AGENTDASH_NATIVE_SEARCH_EXPORT"] != nil))
@@ -315,8 +366,9 @@ private struct SearchFixture {
                      toolName: tool, text: text, dedupeKey: id))
     }
 
-    func run(_ query: String, limit: Int = 50, offset: Int = 0) throws -> SessionSearchResults {
-        try SessionSearch.run(query, in: store, scope: scope, limit: limit, offset: offset)
+    func run(_ query: String, order: SessionSearchOrder = .relevance, limit: Int = 50,
+             offset: Int = 0) throws -> SessionSearchResults {
+        try SessionSearch.run(query, in: store, scope: scope, order: order, limit: limit, offset: offset)
     }
 
     func remove() { try? FileManager.default.removeItem(at: directory) }
