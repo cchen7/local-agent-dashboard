@@ -1249,10 +1249,14 @@ final class SmokeTests: XCTestCase {
         let settings = app.windows["settingsWindow"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         settings.buttons["Sources"].click()
-        XCTAssertTrue(settings.staticTexts["source.index.files.1"].wait(for: \.label,
-                                                                       toEqual: "Indexed files: 1 of 2", timeout: 5))
-        XCTAssertEqual(settings.staticTexts["source.index.sessions.1"].label, "Indexed sessions: 1")
-        XCTAssertEqual(settings.staticTexts["source.index.unknown.1"].label, "Unknown records: 3")
+        // Static text may expose its content as the value rather than the label.
+        for (identifier, text) in [("source.index.files.1", "Indexed files: 1 of 2"),
+                                   ("source.index.sessions.1", "Indexed sessions: 1"),
+                                   ("source.index.unknown.1", "Unknown records: 3")] {
+            let shown = settings.staticTexts.matching(identifier: identifier)
+                .matching(NSPredicate(format: "label == %@ OR value == %@", text, text)).firstMatch
+            XCTAssertTrue(shown.waitForExistence(timeout: 5), identifier)
+        }
         XCTAssertTrue(settings.staticTexts["Partial files: 1"].exists)
     }
 
