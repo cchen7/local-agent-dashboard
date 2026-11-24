@@ -1216,7 +1216,8 @@ Launch → onboarding → sessions appear → search a Chinese word → open a s
 The UI test scheme uses the isolated SyntheticQA bundle. It must reject a
 launch without `--synthetic` before constructing the app delegate or loading
 preferences and indexes. Verify the signed test artifact's launch guard before
-desktop QA.
+desktop QA. Debug and Release builds contain no preview fixtures and reject
+`--synthetic` at the same early point.
 
 Unattended search and navigation smoke tests use the actual search field and
 index with prefilled synthetic text and UI controls. Also type and commit a

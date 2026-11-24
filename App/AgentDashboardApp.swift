@@ -8,7 +8,7 @@ struct AgentDashboardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.syntheticLaunchType) private var appDelegate
     @Environment(\.openWindow) private var openSyntheticWindow
     #else
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @NSApplicationDelegateAdaptor(AppDelegate.normalLaunchType) private var appDelegate
     #endif
     private var model: DashboardModel { appDelegate.model }
 
@@ -118,6 +118,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if CommandLine.arguments.contains("--synthetic-native-search-fixture") {
             Darwin.exit(SyntheticNativeSearch.runFixtureCommand())
+        }
+        return AppDelegate.self
+    }
+    #else
+    static var normalLaunchType: AppDelegate.Type {
+        // DEV-107: preview data exists only in the SyntheticQA bundle. Refuse
+        // a test launch here instead of opening the real index and sources.
+        guard !CommandLine.arguments.dropFirst().contains("--synthetic") else {
+            let message = "AgentDashboard refuses --synthetic; use the SyntheticQA build."
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            Darwin.exit(EX_USAGE)
         }
         return AppDelegate.self
     }

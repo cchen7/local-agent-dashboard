@@ -1001,3 +1001,14 @@ The code consistently uses four-space indentation and has no formatter
 configuration. A default `swift-format` lint reports mostly layout
 differences, so the code is not mass-reformatted. Its remaining suggestions
 (cursor `forEach`, file-scope `fileprivate`) do not change behavior.
+
+## DEV-107 — Keep synthetic previews out of normal builds (SEC-3, SEC-7, §15.4)
+
+Refines DEV-083. Preview seeding lives in a file compiled only with
+`AGENTDASH_SYNTHETIC_ONLY`, so Debug and Release contain neither the fixture
+data nor the code that writes it. Those builds now refuse `--synthetic`
+before the app delegate or model exists. Ignoring the flag would let a
+scripted test launch open the real index and sources while appearing
+isolated. No test, tool or procedure launched a normal build with the flag:
+measurements and UI tests require the signed SyntheticQA bundle. Launches
+without the flag are unchanged.
