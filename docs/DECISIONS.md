@@ -1015,3 +1015,25 @@ identifier, container and preferences domain instead of an isolated test
 bundle. No test, tool or procedure launched a normal build with the flag:
 measurements and UI tests require the signed SyntheticQA bundle. Launches
 without the flag are unchanged.
+
+## DEV-108 — Optimize the measured bottleneck (NFR-3, NFR-4, NFR-5)
+
+The 5 GB first index is bound by the single GRDB writer. A 30 s sample of
+the release benchmark found the writer busy 95% of the time, while the three
+parse threads were busy 25–30% and otherwise waited for it. Writer time was
+SQLite 69.5% (FTS tokenizer 15.3%, WAL writes 9.7%), LZFSE archive
+compression 14.2% and quoting 6.9%. Per-line decoder-state encoding (mostly
+Codex and Copilot) and discarded reasoning records run on parse threads, so
+changing them would reduce CPU but not import time. They are unchanged;
+skipping lines before decoding would also stop counting malformed ones as
+unknown. Moving compression out of the writer is the remaining throughput
+candidate; it must keep DEV-031's in-transaction redaction decision.
+
+Token-volume search order reads `session_usage_rollup`, the total Sessions
+rows display, instead of summing the ledger per matching session. With 1M
+synthetic token events, broad-OR P95 fell from 138.0/142.8 ms to 54.6/46.7
+ms and a mixed query from 105.4/112.5 ms to 15.8/15.4 ms.
+
+On a signed, optimized SyntheticQA build with 1M token rows, period
+switching measured P95 78.6 ms (tokens) and 78.4 ms (cost). Chart data
+derivation took at most 0.8 ms of that, so the chart view is unchanged.
