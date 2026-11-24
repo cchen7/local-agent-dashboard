@@ -57,8 +57,9 @@ public extension AgentStore {
         var regions: [any DatabaseRegionConvertible] = [
             Table("events"), Table("sessions"), Table("projects"), Table("file_touches"), Table("app_meta"),
         ]
-        // Token order reads session_usage_rollup, which triggers update in the
-        // same transaction as every token_events change.
+        // Token order reads session_usage_rollup. Every rollup change comes
+        // from a token_events write or a sessions delete in the same
+        // transaction, and both tables are tracked.
         if order == .tokens { regions.append(Table("token_events")) }
         return ValueObservation.tracking(regions: regions, fetch: { _ in () })
             .values(in: databasePool, bufferingPolicy: .bufferingNewest(1))

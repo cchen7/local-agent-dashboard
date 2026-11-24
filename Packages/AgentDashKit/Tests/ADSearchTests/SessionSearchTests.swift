@@ -270,19 +270,21 @@ func millionTokenEventVolumeOrderLatency() throws {
     for (label, query, sessions) in [("broad OR", "auth OR middleware", 2_000), ("mixed", "登录 verify", 2_000)] {
         let first = try fixture.run(query, order: .tokens)
         #expect(first.sessionCount == sessions)
+        // The whole first page must follow the ledger's order.
+        #expect(!first.hits.isEmpty)
         let expected = try fixture.store.databasePool.read { db in
             try Int64.fetchAll(db, sql: """
                 SELECT session_id FROM token_events GROUP BY session_id
-                ORDER BY sum(input_fresh+cache_read+cache_write+cache_write_1h+output) DESC LIMIT 3
-                """)
+                ORDER BY sum(input_fresh+cache_read+cache_write+cache_write_1h+output) DESC LIMIT ?
+                """, arguments: [first.hits.count])
         }
-        let leaders = try fixture.store.databasePool.read { db in
-            try first.hits.prefix(3).map { hit in
+        let page = try fixture.store.databasePool.read { db in
+            try first.hits.map { hit in
                 try #require(try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE agent=? AND native_id=?",
                                                 arguments: [hit.id.agent.rawValue, hit.id.nativeID]))
             }
         }
-        #expect(leaders == expected)
+        #expect(page == expected)
         var samples: [Double] = []
         for _ in 0..<20 {
             let start = ContinuousClock.now
