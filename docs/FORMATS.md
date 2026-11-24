@@ -161,9 +161,18 @@ from rollouts whose first cumulative balance already exceeded their first
 itemized record. The importer keeps the itemized usage and does not assign
 that unexplained opening balance to the window.
 
-For Claude Code, the local response records matched the index; an independent
-CLI comparison still needs a statistics source covering the same window with
-cache counters. This is a known limitation of the 0.1.0 validation.
+For Claude Code, one live session was compared with the CLI's own `/cost`
+report at the same moment. Applying the SPEC §5.4 rules to a frozen copy of the
+session's on-disk records reproduced the app's totals exactly for every token
+component. Against the CLI report, the main-thread response count matched
+exactly, the main-thread cache share agreed (28.2% vs. 28%), and output tokens
+were within 0.4%. For the same model, the CLI reported about 10% more fresh
+input, 13% more cache reads and 10% more cache writes, and it listed requests
+from other models that no transcript record contains. These differences are
+attributed (unverified inference) to requests the CLI makes without writing
+them to the session's records. The app counts only on-disk records, so its
+Claude Code input and cache totals can be lower than the CLI's report while
+response counts and output agree.
 
 For the six overlapping Copilot samples, the app totals matched the native
 reference. Where raw SQLite rows disagreed, the CLI's own cumulative accounting
