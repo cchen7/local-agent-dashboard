@@ -998,19 +998,21 @@ final class SmokeTests: XCTestCase {
     func testInheritedConversationExpandsOnlyConfirmedAndMaskedRows() throws {
         let window = try openInheritedTranscript(size: CGSize(width: 1120, height: 720), appearance: "dark")
         let disclosure = window.buttons["transcript.inherited.toggle"]
-        let copy = window.staticTexts["Confirmed inherited message"].firstMatch
-        let later = window.staticTexts["Later original message not copied"].firstMatch
+        // Session rows in the list use the same first prompts as titles.
+        let transcript = element("session.transcript.messages")
+        let copy = transcript.staticTexts["Confirmed inherited message"].firstMatch
+        let later = transcript.staticTexts["Later original message not copied"].firstMatch
         XCTAssertFalse(copy.exists)
         XCTAssertFalse(later.exists)
         disclosure.click()
         XCTAssertTrue(copy.waitForExistence(timeout: 5))
-        XCTAssertTrue(window.staticTexts["API_TOKEN=••••••"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(transcript.staticTexts["API_TOKEN=••••••"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(window.staticTexts["API_TOKEN=synthetic-inherited-secret"].exists)
         XCTAssertFalse(later.exists)
-        XCTAssertTrue(window.staticTexts["Own continuation message"].exists)
+        XCTAssertTrue(transcript.staticTexts["Own continuation message"].exists)
         disclosure.click()
         XCTAssertTrue(copy.waitForNonExistence(timeout: 5))
-        XCTAssertTrue(window.staticTexts["Own continuation message"].exists)
+        XCTAssertTrue(transcript.staticTexts["Own continuation message"].exists)
     }
 
     func testInheritedConversationAtNativeWindowSizes() throws {
@@ -1020,7 +1022,8 @@ final class SmokeTests: XCTestCase {
                 let disclosure = window.buttons["transcript.inherited.toggle"]
                 XCTAssertTrue(window.frame.contains(disclosure.frame))
                 disclosure.click()
-                XCTAssertTrue(window.staticTexts["Confirmed inherited message"].firstMatch.waitForExistence(timeout: 5))
+                XCTAssertTrue(element("session.transcript.messages").staticTexts["Confirmed inherited message"].firstMatch
+                    .waitForExistence(timeout: 5))
                 let shot = XCTAttachment(screenshot: window.screenshot())
                 shot.name = "inherited-transcript-\(appearance)-\(Int(size.width))x\(Int(size.height))"
                 shot.lifetime = .keepAlways
@@ -1046,7 +1049,8 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(dashboard.waitForNonExistence(timeout: 5))
         let child = element("sessions.list").staticTexts["continued-preview"].firstMatch
         XCTAssertTrue(child.waitForExistence(timeout: 10))
-        let own = window.staticTexts["Own continuation message"].firstMatch
+        // The list row title is the same text; look only in the open transcript.
+        let own = element("session.transcript.messages").staticTexts["Own continuation message"].firstMatch
         if !own.exists {
             XCTAssertTrue(child.wait(for: \.isHittable, toEqual: true, timeout: 5))
             child.click()
