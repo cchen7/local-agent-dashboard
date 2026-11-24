@@ -292,7 +292,8 @@ final class DashboardModel {
                 let runtime = LocalPricingRuntime(external: externalDirectory?.appendingPathComponent("pricing.json"),
                                                   bundled: bundled, store: store)
                 let initialPricing = await runtime.refresh()
-                // This writes only app-owned configuration. No source directory is read at launch.
+                // This writes only app-owned configuration. No source directory is read here;
+                // sources left indexing resume after loading (DEV-109).
                 if !defaults.isEmpty { try store.installDefaultSources(defaults) }
                 #if AGENTDASH_SYNTHETIC_ONLY
                 if synthetic && standardFixtures {
@@ -923,7 +924,7 @@ final class DashboardModel {
         if sourceIndexing.start(source: source, store: store) { recordResumesIndexing(true, sourceID: id) }
     }
 
-    /// An explicit stop is the only way a running source stops resuming at launch.
+    /// Stop Indexing clears the launch resume; so do access failures and removal (DEV-109).
     func stopIndexing(_ id: Int64) {
         sourceIndexing.stop(id: id)
         recordResumesIndexing(false, sourceID: id)
@@ -939,6 +940,9 @@ final class DashboardModel {
             await Task.detached(priority: .utility) { try? store.setResumesIndexing(resumes, sourceID: sourceID) }.value
         }
     }
+
+    /// Let a queued flag write, such as a Stop just before Quit, reach the index.
+    func finishResumeWrites() async { await resumeWrites?.value }
 
     func canRescan(_ source: Source) -> Bool {
         guard !onboardingRequired, !changingPrivacy, !clearingIndex, let id = source.id, store != nil, !editingSourceIDs.contains(id) else { return false }
@@ -1025,6 +1029,7 @@ final class DashboardModel {
               sources.contains(where: { $0.id == id }), editingSourceIDs.insert(id).inserted
         else { throw SourceSettingsEditFailure.missingSource }
         defer { editingSourceIDs.remove(id) }
+        recordResumesIndexing(false, sourceID: id)
         await sourceIndexing.stopAndWait(id: id)
         sources = try await Task.detached {
             try store.removeRegisteredSource(id)

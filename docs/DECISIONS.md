@@ -282,7 +282,8 @@ and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 ## DEV-044 — Start indexing from an explicit source action
 
 The Sources pane starts one in-process scan and watcher for the selected
-registered Claude Code source; launching the app does not read sessions.
+registered Claude Code source; launching the app does not read sessions
+(DEV-109 later resumes sources left indexing).
 Keep bookmark access alive through both activities and release it after
 Stop. Subscribe before discovery and coalesce byte-exact hints; unknown
 paths and ambiguous events go through discovery before import. Reject a
@@ -1050,8 +1051,12 @@ derivation took at most 0.8 ms of that, so the chart view is unchanged.
 
 Refines DEV-044 with the product owner's approval. Starting a source, from
 onboarding or Settings → Sources, sets `sources.resume_indexing`. Stop
-Indexing clears it, and so does a watched source that ends with an error;
-removing a source forgets it. Quitting the app leaves it set. At launch the
+Indexing clears it, and so does a watched source that stops on denied
+access, a stale bookmark or a replaced root, because each needs the user
+before indexing can continue. An unavailable source, such as one on a
+volume not yet mounted, keeps the flag and retries at the next launch.
+Removing a source forgets it. Quitting the app leaves it set, and waits up
+to 2 s for a queued flag write so a Stop just before Quit is kept. At launch the
 app opens the index even when no window is restored and starts each enabled,
 registered source whose flag is set, from its committed checkpoints. A source
 the user stopped stays stopped, first-run onboarding is unchanged, and a

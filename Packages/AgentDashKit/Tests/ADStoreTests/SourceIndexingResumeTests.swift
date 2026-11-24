@@ -35,6 +35,14 @@ func sourcesResumeOnlyAfterAnExplicitStartThatWasNotStopped() throws {
     try store.databasePool.read { db throws -> Void in
         #expect(try Int.fetchOne(db, sql: "SELECT resume_indexing FROM sources WHERE id=?", arguments: [ids[2]]) == 0)
     }
+    // A disabled source does not resume even with the flag set.
+    try store.databasePool.write { db in
+        try db.execute(sql: "UPDATE sources SET enabled=0 WHERE id=?", arguments: [ids[0]])
+    }
+    #expect(try store.sourceIDsResumingIndexing().isEmpty)
+    try store.databasePool.write { db in
+        try db.execute(sql: "UPDATE sources SET enabled=1 WHERE id=?", arguments: [ids[0]])
+    }
     // Recording intent for a removed or unknown source changes nothing.
     try store.setResumesIndexing(true, sourceID: ids[2])
     try store.setResumesIndexing(true, sourceID: 9_999)

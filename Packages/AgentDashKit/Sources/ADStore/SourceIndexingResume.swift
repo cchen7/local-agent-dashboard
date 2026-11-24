@@ -5,8 +5,9 @@ public extension AgentStore {
     /// next launch. A removed or unknown source is left unchanged.
     func setResumesIndexing(_ resumes: Bool, sourceID: Int64) throws {
         try databasePool.write { db in
-            try db.execute(sql: "UPDATE sources SET resume_indexing=? WHERE id=? AND removed=0",
-                           arguments: [resumes, sourceID])
+            // Skip a no-op so a launch resume does not wake `sources` observers.
+            try db.execute(sql: "UPDATE sources SET resume_indexing=? WHERE id=? AND removed=0 AND resume_indexing IS NOT ?",
+                           arguments: [resumes, sourceID, resumes])
         }
     }
 

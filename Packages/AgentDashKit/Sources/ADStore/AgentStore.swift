@@ -347,7 +347,7 @@ public final class AgentStore: Sendable {
             env_rules_json=excluded.env_rules_json, access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=excluded.enabled
             WHERE sources.removed=0
             """ : """
-            DO UPDATE SET access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=1, removed=0
+            DO UPDATE SET access_kind=excluded.access_kind, bookmark=excluded.bookmark, enabled=1, removed=0, resume_indexing=0
             WHERE sources.removed=1
             """
         return try databasePool.write { db in

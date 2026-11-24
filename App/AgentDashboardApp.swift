@@ -147,14 +147,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             self.model.syntheticQALaunchReady = true
         }
-        #endif
-        #if AGENTDASH_SYNTHETIC_ONLY
         if model.showsMenuBarThroughput { Task { await model.load() } }
         #else
         // DEV-109: open the index even when no window is restored, so sources
         // left indexing resume at launch.
         Task { await model.load() }
         #endif
+    }
+
+    private var terminationReplied = false
+
+    /// DEV-109: wait up to 2 s so a Stop pressed just before Quit is not lost.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        terminationReplied = false
+        Task { await model.finishResumeWrites(); replyToTermination(sender) }
+        Task { try? await Task.sleep(for: .seconds(2)); replyToTermination(sender) }
+        return .terminateLater
+    }
+
+    private func replyToTermination(_ sender: NSApplication) {
+        guard !terminationReplied else { return }
+        terminationReplied = true
+        sender.reply(toApplicationShouldTerminate: true)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

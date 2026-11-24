@@ -32,8 +32,9 @@ final class SourceIndexingController {
     private(set) var progress: [Int64: SourceIndexPresentation] = [:]
     @ObservationIgnored private var jobs: [Int64: Task<Void, Never>] = [:]
     @ObservationIgnored private var rescanRequests: [Int64: AsyncStream<Void>.Continuation] = [:]
-    /// DEV-109: told when a watched source stops because of an error.
-    @ObservationIgnored var onFollowFailure: ((Int64) -> Void)?
+    /// DEV-109: told when a watched source stops on a failure that needs the
+    /// user: denied access, a stale bookmark or a replaced root.
+    @ObservationIgnored var onFollowFailure: (@MainActor (Int64) -> Void)?
 
     static func supports(_ agent: AgentKind) -> Bool { agent == .claudeCode || agent == .codex || agent == .copilot }
 
@@ -112,7 +113,8 @@ final class SourceIndexingController {
             self?.jobs[id] = nil
             self?.progress[id] = Task.isCancelled ? .stopped :
                 failure.map(SourceIndexPresentation.failed) ?? completed.map(SourceIndexPresentation.rescanned) ?? .stopped
-            if case .follow = mode, failure != nil { self?.onFollowFailure?(id) }
+            // An unavailable source (e.g. an unmounted volume) keeps retrying at launch.
+            if case .follow = mode, let failure, failure != .unavailable { self?.onFollowFailure?(id) }
         }
         return true
     }
