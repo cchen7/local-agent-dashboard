@@ -7,13 +7,7 @@ import ADInsights
 enum SettingsPage: Hashable { case general, sources, thresholds, storage, privacy, pricing, about }
 
 struct SettingsView: View {
-    @State private var indexStatus: [Int64: IndexedSourceStatus] = [:]
-    @State private var indexStatusUnavailable = false
-    @State private var editingSource: Source?
-    @State private var removingSource: Source?
-    @State private var removalFailed = false
     @Bindable var model: DashboardModel
-    @State private var showsAddSource = false
 
     var body: some View {
         TabView(selection: $model.settingsPage) {
@@ -42,93 +36,9 @@ struct SettingsView: View {
             .tabItem { Label("General", systemImage: "gearshape") }
             .tag(SettingsPage.general)
 
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Sources").font(.title2)
-                Text("Choose a source to index. Its files stay read-only and the index stays on this Mac.")
-                    .foregroundStyle(.secondary)
-                List(model.sources) { source in
-                    let indexing = source.id.flatMap { model.sourceIndexing.progress[$0] }
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(verbatim: model.displayText(source.label)).font(.headline)
-                            Text(verbatim: model.displayText(source.rootURL.path)).font(.caption)
-                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            Text(verbatim: sourceAgentName(source.agent) + " · " + model.displayText(source.environment))
-                                .font(.caption).foregroundStyle(.secondary)
-                            status(model.access[source.id ?? -1] ?? .notChecked)
-                            if let indexing { indexingStatus(indexing) }
-                            if let health = source.id.flatMap({ indexStatus[$0] }) {
-                                SourceIndexStatusRows(status: health)
-                            }
-                        }
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 6) {
-                            if SourceIndexingController.supports(source.agent), let id = source.id {
-                                if indexing?.active == true {
-                                    Button("Stop Indexing") { model.sourceIndexing.stop(id: id) }
-                                        .disabled(indexing == .stopping)
-                                        .accessibilityIdentifier("source.stopIndexing")
-                                } else {
-                                    Button("Start Indexing") { model.startIndexing(source) }
-                                        .disabled(model.onboardingRequired || !source.enabled || model.editingSourceIDs.contains(id))
-                                        .accessibilityIdentifier("source.startIndexing")
-                                }
-                            }
-                            if SourceIndexingController.supports(source.agent) {
-                                Button("Rescan Source") { model.rescanSource(source) }
-                                    .disabled(!model.canRescan(source))
-                                    .accessibilityIdentifier("source.rescan")
-                            }
-                            Button("Edit Source Settings") { editingSource = source }
-                                .accessibilityIdentifier("source.edit")
-                                .disabled(source.id == nil || indexing?.active == true ||
-                                          source.id.map(model.editingSourceIDs.contains) == true)
-                            Button("Grant access again") { Task { await model.grantAccess(to: source) } }
-                                .disabled(indexing?.active == true || source.id.map(model.editingSourceIDs.contains) == true)
-                            Button("Remove Source") { removingSource = source }
-                                .accessibilityIdentifier("source.remove")
-                                .disabled(model.verifying || model.onboardingRequired ||
-                                          source.id.map(model.editingSourceIDs.contains) != false)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .sheet(item: $editingSource) { source in
-                    SourceSettingsEditor(source: source) { replacement in
-                        try await model.saveSourceSettings(source, replacement: replacement)
-                    }
-                }
-                HStack {
-                    Button("Verify Access") { Task { await model.verifyAccess() } }
-                        .disabled(model.verifying || model.sources.isEmpty)
-                    Spacer()
-                    Button("Add Source") { showsAddSource = true }
-                        .disabled(model.store == nil)
-                        .accessibilityIdentifier("source.add")
-                }
-                if model.verifying { ProgressView() }
-                if removalFailed { Text("Could not remove the source.").foregroundStyle(.red) }
-                if indexStatusUnavailable { Text("Could not read index status.").foregroundStyle(.red) }
-                if model.storageFailed { Text("Storage could not be opened. Quit and try again.").foregroundStyle(.red) }
-            }
-            .task(id: model.store != nil) { await observeIndexStatus() }
-            .padding()
-            .sheet(isPresented: $showsAddSource) { AddSourceSheet(model: model) }
-            .confirmationDialog("Remove this source?", isPresented: Binding(get: { removingSource != nil },
-                                                                               set: { if !$0 { removingSource = nil } }),
-                                titleVisibility: .visible, presenting: removingSource) { source in
-                Button("Remove Source", role: .destructive) {
-                    removalFailed = false
-                    Task {
-                        do { try await model.removeSource(source) }
-                        catch { removalFailed = true }
-                    }
-                }
-            } message: { _ in
-                Text("Indexing stops and saved folder access is forgotten. Previously indexed sessions and the original files are kept.")
-            }
-            .tabItem { Label("Sources", systemImage: "folder") }
-            .tag(SettingsPage.sources)
+            SourcesSettingsPane(model: model)
+                .tabItem { Label("Sources", systemImage: "folder") }
+                .tag(SettingsPage.sources)
 
             StatusThresholdSettingsPane(model: model)
                 .tabItem { Label("Thresholds", systemImage: "slider.horizontal.3") }
@@ -151,6 +61,106 @@ struct SettingsView: View {
                 .tag(SettingsPage.about)
         }
         .frame(width: 680, height: 480)
+    }
+}
+
+/// Its own view so frequent indexing updates don't re-evaluate the TabView
+/// and its toolbar items.
+private struct SourcesSettingsPane: View {
+    let model: DashboardModel
+    @State private var indexStatus: [Int64: IndexedSourceStatus] = [:]
+    @State private var indexStatusUnavailable = false
+    @State private var editingSource: Source?
+    @State private var removingSource: Source?
+    @State private var removalFailed = false
+    @State private var showsAddSource = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sources").font(.title2)
+            Text("Choose a source to index. Its files stay read-only and the index stays on this Mac.")
+                .foregroundStyle(.secondary)
+            List(model.sources) { source in
+                let indexing = source.id.flatMap { model.sourceIndexing.progress[$0] }
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(verbatim: model.displayText(source.label)).font(.headline)
+                        Text(verbatim: model.displayText(source.rootURL.path)).font(.caption)
+                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        Text(verbatim: sourceAgentName(source.agent) + " · " + model.displayText(source.environment))
+                            .font(.caption).foregroundStyle(.secondary)
+                        status(model.access[source.id ?? -1] ?? .notChecked)
+                        if let indexing { indexingStatus(indexing) }
+                        if let health = source.id.flatMap({ indexStatus[$0] }) {
+                            SourceIndexStatusRows(status: health)
+                        }
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 6) {
+                        if SourceIndexingController.supports(source.agent), let id = source.id {
+                            if indexing?.active == true {
+                                Button("Stop Indexing") { model.sourceIndexing.stop(id: id) }
+                                    .disabled(indexing == .stopping)
+                                    .accessibilityIdentifier("source.stopIndexing")
+                            } else {
+                                Button("Start Indexing") { model.startIndexing(source) }
+                                    .disabled(model.onboardingRequired || !source.enabled || model.editingSourceIDs.contains(id))
+                                    .accessibilityIdentifier("source.startIndexing")
+                            }
+                        }
+                        if SourceIndexingController.supports(source.agent) {
+                            Button("Rescan Source") { model.rescanSource(source) }
+                                .disabled(!model.canRescan(source))
+                                .accessibilityIdentifier("source.rescan")
+                        }
+                        Button("Edit Source Settings") { editingSource = source }
+                            .accessibilityIdentifier("source.edit")
+                            .disabled(source.id == nil || indexing?.active == true ||
+                                      source.id.map(model.editingSourceIDs.contains) == true)
+                        Button("Grant access again") { Task { await model.grantAccess(to: source) } }
+                            .disabled(indexing?.active == true || source.id.map(model.editingSourceIDs.contains) == true)
+                        Button("Remove Source") { removingSource = source }
+                            .accessibilityIdentifier("source.remove")
+                            .disabled(model.verifying || model.onboardingRequired ||
+                                      source.id.map(model.editingSourceIDs.contains) != false)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .sheet(item: $editingSource) { source in
+                SourceSettingsEditor(source: source) { replacement in
+                    try await model.saveSourceSettings(source, replacement: replacement)
+                }
+            }
+            HStack {
+                Button("Verify Access") { Task { await model.verifyAccess() } }
+                    .disabled(model.verifying || model.sources.isEmpty)
+                Spacer()
+                Button("Add Source") { showsAddSource = true }
+                    .disabled(model.store == nil)
+                    .accessibilityIdentifier("source.add")
+            }
+            if model.verifying { ProgressView() }
+            if removalFailed { Text("Could not remove the source.").foregroundStyle(.red) }
+            if indexStatusUnavailable { Text("Could not read index status.").foregroundStyle(.red) }
+            if model.storageFailed { Text("Storage could not be opened. Quit and try again.").foregroundStyle(.red) }
+        }
+        .task(id: model.store != nil) { await observeIndexStatus() }
+        .padding()
+        .sheet(isPresented: $showsAddSource) { AddSourceSheet(model: model) }
+        .confirmationDialog("Remove this source?", isPresented: Binding(get: { removingSource != nil },
+                                                                           set: { if !$0 { removingSource = nil } }),
+                            titleVisibility: .visible, presenting: removingSource) { source in
+            Button("Remove Source", role: .destructive) {
+                removalFailed = false
+                Task {
+                    do { try await model.removeSource(source) }
+                    catch { removalFailed = true }
+                }
+            }
+        } message: { _ in
+            Text("Indexing stops and saved folder access is forgotten. Previously indexed sessions and the original files are kept.")
+        }
     }
 
     @ViewBuilder private func indexingStatus(_ value: SourceIndexPresentation) -> some View {
