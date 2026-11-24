@@ -1,6 +1,6 @@
-# Agent Dashboard 0.1.0 release scope
+# Agent Dashboard 0.1.x release scope
 
-The 0.1.0 candidate is a local, read-only app for Apple silicon Macs
+Agent Dashboard 0.1.x is a local, read-only app for Apple silicon Macs
 running macOS 27. It indexes the following local records:
 
 | Source | Supported input |
@@ -8,7 +8,7 @@ running macOS 27. It indexes the following local records:
 | Claude Code | Local project session records and supported subagent records. |
 | Codex | Local rollouts from Codex CLI and the desktop app, including supported compressed rollouts. |
 | GitHub Copilot CLI | Local session event streams. A workspace that has only metadata is not an indexed transcript or usage source. |
-| Grok Build | Not supported in 0.1.0. The format capture and adapter are deferred under DEV-008. |
+| Grok Build | Not supported in 0.1.x. The format capture and adapter are deferred under DEV-008. |
 
 Search covers English and Chinese text in the indexed records. The app
 shows session and project history, token usage, and estimated cost. A
@@ -19,7 +19,7 @@ Cloud sessions and transcript export are outside this release. The app
 does not change an agent's source files or make network requests.
 
 The broader product spec still includes Grok Build as a planned source.
-For 0.1.0, the data acceptance checklist applies to the three supported
+For 0.1.x, the data acceptance checklist applies to the three supported
 sources above; the counting tolerance and per-agent pricing checks
 still apply. The [release checklist](SPEC.md#155-release-checklist)
 and [distribution checks](RELEASE-VERIFY.md) determine release readiness.

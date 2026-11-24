@@ -1,6 +1,6 @@
 # Verify a Developer ID release ZIP
 
-The public 0.1.0 download is a read-only DMG. The ZIP described below is
+The public download is a read-only DMG. The ZIP described below is
 the intermediate used to check the signed app before packaging it.
 
 The check is for a final ZIP containing one ordinary arm64
@@ -72,9 +72,9 @@ directory, run:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-hdiutil verify AgentDashboard-0.1.0-macOS-arm64.dmg
-codesign --verify --strict AgentDashboard-0.1.0-macOS-arm64.dmg
-xcrun stapler validate AgentDashboard-0.1.0-macOS-arm64.dmg
+hdiutil verify AgentDashboard-<version>-macOS-arm64.dmg
+codesign --verify --strict AgentDashboard-<version>-macOS-arm64.dmg
+xcrun stapler validate AgentDashboard-<version>-macOS-arm64.dmg
 ```
 
 The mounted volume contains the app and an Applications shortcut. The signed
