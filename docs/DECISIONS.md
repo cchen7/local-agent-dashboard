@@ -1064,3 +1064,15 @@ library from 0.1.x has no flags, so its sources resume only after the next
 explicit start. The flag is written in call order off the main actor, so a
 quick start and stop cannot land reversed while an import batch holds the
 writer.
+
+## DEV-110 — Write only changed topic terms (§10.2, DEV-076)
+
+A topic refresh replaced every term row of the session and, through the
+triggers, its document frequencies. A long live session holds up to 65,536
+terms, so each new message rewrote all of them; the signed 0.1.2 candidate
+wrote about 144 MB per refresh while one long Claude Code session was
+active. The ledger now compares the new counts with the stored ones and
+inserts, updates or deletes only the differing terms. Document frequency
+follows term presence through the same insert and delete triggers, so the
+stored ledger and frequencies are identical to a full replacement.
+

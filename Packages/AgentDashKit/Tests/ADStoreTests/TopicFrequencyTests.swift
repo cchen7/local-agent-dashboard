@@ -42,3 +42,41 @@ func topicLedgerTracksExactDocumentFrequency() async throws {
     }
     #expect(after == ["beta:1", "shared:1"])
 }
+
+@Test("§10.2 / DEV-110: a topic refresh writes only the terms that changed")
+func topicRefreshWritesOnlyChangedTerms() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("topic-diff-\(UUID())")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try AgentStore(databaseURL: directory.appendingPathComponent("index.sqlite"))
+    let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic", rootURL: directory.appendingPathComponent("s")))
+    let key = SessionKey(agent: .codex, nativeID: "synthetic-long-session")
+    try store.write([.session(.init(key: key, sourceID: source, environment: "Synthetic"))])
+    let sessionID = try #require(try store.databasePool.read { db in
+        try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE native_id=?", arguments: [key.nativeID])
+    })
+    var terms = Dictionary(uniqueKeysWithValues: (0..<2_000).map { ("term\($0)", Double($0 % 7 + 1)) })
+    try store.databasePool.write { db in try TopicLedger.replace(terms, sessionID: sessionID, db: db) }
+
+    // One more message: a count grows, a term appears and one disappears.
+    terms["term1", default: 0] += 1
+    terms["fresh"] = 1
+    terms["term2"] = nil
+    let changes = try store.databasePool.write { db -> Int in
+        let before = db.totalChangesCount
+        try TopicLedger.replace(terms, sessionID: sessionID, db: db)
+        return db.totalChangesCount - before
+    }
+    // Update, insert and delete, plus the two document-frequency triggers;
+    // replacing every row wrote about 8,000 rows here.
+    #expect(changes <= 6)
+    try store.databasePool.read { db throws -> Void in
+        let ledger = try Row.fetchAll(db, sql: "SELECT term,count FROM topic_term_counts WHERE session_id=?",
+                                      arguments: [sessionID])
+        #expect(Dictionary(uniqueKeysWithValues: ledger.map { ($0["term"] as String, $0["count"] as Double) }) == terms)
+        let df = try Row.fetchAll(db, sql: "SELECT term,df FROM term_df")
+        #expect(Dictionary(uniqueKeysWithValues: df.map { ($0["term"] as String, $0["df"] as Int) })
+            == terms.mapValues { _ in 1 })
+    }
+}
+
