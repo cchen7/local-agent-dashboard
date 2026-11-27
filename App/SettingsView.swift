@@ -99,7 +99,7 @@ private struct SourcesSettingsPane: View {
                     VStack(alignment: .trailing, spacing: 6) {
                         if SourceIndexingController.supports(source.agent), let id = source.id {
                             if indexing?.active == true {
-                                Button("Stop Indexing") { model.sourceIndexing.stop(id: id) }
+                                Button("Stop Indexing") { model.stopIndexing(id) }
                                     .disabled(indexing == .stopping)
                                     .accessibilityIdentifier("source.stopIndexing")
                             } else {

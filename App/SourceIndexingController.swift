@@ -32,11 +32,15 @@ final class SourceIndexingController {
     private(set) var progress: [Int64: SourceIndexPresentation] = [:]
     @ObservationIgnored private var jobs: [Int64: Task<Void, Never>] = [:]
     @ObservationIgnored private var rescanRequests: [Int64: AsyncStream<Void>.Continuation] = [:]
+    /// DEV-109: told when a watched source stops on a failure that needs the
+    /// user: denied access, a stale bookmark or a replaced root.
+    @ObservationIgnored var onFollowFailure: (@MainActor (Int64) -> Void)?
 
     static func supports(_ agent: AgentKind) -> Bool { agent == .claudeCode || agent == .codex || agent == .copilot }
 
-    func start(source: Source, store: AgentStore, mode: JSONLSourceIndexing.Mode = .follow) {
-        guard source.enabled, Self.supports(source.agent), let id = source.id, jobs[id] == nil else { return }
+    @discardableResult
+    func start(source: Source, store: AgentStore, mode: JSONLSourceIndexing.Mode = .follow) -> Bool {
+        guard source.enabled, Self.supports(source.agent), let id = source.id, jobs[id] == nil else { return false }
         progress[id] = .starting
         let updates = AsyncStream<SourceIndexUpdate>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let requests = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -109,7 +113,10 @@ final class SourceIndexingController {
             self?.jobs[id] = nil
             self?.progress[id] = Task.isCancelled ? .stopped :
                 failure.map(SourceIndexPresentation.failed) ?? completed.map(SourceIndexPresentation.rescanned) ?? .stopped
+            // Other failures, such as a store or file-event error, keep retrying at launch.
+            if case .follow = mode, let failure, failure != .unavailable { self?.onFollowFailure?(id) }
         }
+        return true
     }
 
     func canRescan(_ source: Source) -> Bool {

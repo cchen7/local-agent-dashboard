@@ -63,13 +63,35 @@ public extension AgentStore {
 }
 
 enum TopicLedger {
+    /// Write only the terms that changed. A long session gains a few terms per
+    /// message; deleting and reinserting all of them (and their document
+    /// frequencies) rewrote tens of MB per refresh (DEV-110). Document
+    /// frequency follows term presence, so a count change leaves it alone.
     static func replace(_ terms: [String: Double], sessionID: Int64, db: Database) throws {
-        try db.cachedStatement(sql: "DELETE FROM topic_term_counts WHERE session_id=?").execute(arguments: [sessionID])
+        // Key by UTF-8 bytes like SQLite's BINARY `term`, not by Swift's
+        // canonical String equality, so a respelled term is deleted and inserted.
+        var stale: [Data: (term: String, count: Double)] = [:]
+        let current = try Row.fetchCursor(db.cachedStatement(sql: "SELECT term,count FROM topic_term_counts WHERE session_id=?"),
+                                          arguments: [sessionID])
+        while let row = try current.next() {
+            let term: String = row["term"]
+            stale[Data(term.utf8)] = (term, row["count"])
+        }
         try db.cachedStatement(sql: "DELETE FROM session_keywords WHERE session_id=?").execute(arguments: [sessionID])
         let insert = try db.cachedStatement(sql: "INSERT INTO topic_term_counts(session_id,term,count) VALUES(?,?,?)")
+        let update = try db.cachedStatement(sql: "UPDATE topic_term_counts SET count=? WHERE session_id=? AND term=?")
         for (term, count) in terms {
             try Task.checkCancellation()
-            try insert.execute(arguments: [sessionID, term, count])
+            switch stale.removeValue(forKey: Data(term.utf8))?.count {
+            case nil: try insert.execute(arguments: [sessionID, term, count])
+            case count?: break
+            case _?: try update.execute(arguments: [count, sessionID, term])
+            }
+        }
+        let delete = try db.cachedStatement(sql: "DELETE FROM topic_term_counts WHERE session_id=? AND term=?")
+        for entry in stale.values {
+            try Task.checkCancellation()
+            try delete.execute(arguments: [sessionID, entry.term])
         }
         try db.cachedStatement(sql: "INSERT OR IGNORE INTO topic_documents VALUES(?)").execute(arguments: [sessionID])
     }

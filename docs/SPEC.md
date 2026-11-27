@@ -546,7 +546,7 @@ A WAL-mode database still needs to write its `-shm` file even when opened read-o
 
 ## 7. Ingestion pipeline (near real time)
 
-1. **Launch:** resolve every source's access → run `discover` on each root → diff against `source_files` → queue new and changed files, **most recently modified first** so recent sessions appear quickly.
+1. **Launch:** for each enabled source the user left indexing (DEV-109), resolve its access → run `discover` on its root → diff against `source_files` → queue new and changed files, **most recently modified first** so recent sessions appear quickly. A stopped or newly registered source waits for an explicit start.
 2. **Watch:** one FSEvents stream per root. Use validated, private root-relative file hints to debounce per file (JSONL 300 ms; whole-file JSON rewrites 1 s). Rescan the root on lost, coalesced or ambiguous events. File hints are not authorization to open a path.
 3. **Read:** JSONL incrementally per ADP-2; rewritten JSON files are re-parsed and upserted by dedupe key.
    JSONL checkpoints retain file identity, parser version, previous timestamp and bounded decoder state. Read the expected checkpoint before opening and taking the file snapshot; compare it again in the write transaction. Only complete lines advance the position. A batch that loses a race to another scan cannot change indexed records or the checkpoint.

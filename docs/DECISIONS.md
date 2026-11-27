@@ -282,12 +282,14 @@ and checkpoint commit together. Keep archived, nonempty and unrelated rows.
 ## DEV-044 — Start indexing from an explicit source action
 
 The Sources pane starts one in-process scan and watcher for the selected
-registered Claude Code source; launching the app does not read sessions.
+registered Claude Code source; launching the app does not read sessions
+(DEV-109 later resumes sources left indexing).
 Keep bookmark access alive through both activities and release it after
 Stop. Subscribe before discovery and coalesce byte-exact hints; unknown
 paths and ambiguous events go through discovery before import. Reject a
 replacement of the selected root, keep existing indexed history, and
-resume from committed checkpoints on the next explicit start.
+resume from committed checkpoints on the next explicit start. Launch
+behavior is refined by DEV-109.
 
 ## DEV-041 — Local Codex port and immutable compressed rollouts
 
@@ -1044,3 +1046,35 @@ timed in the app.
 On a signed, optimized SyntheticQA build with 1M token rows, period
 switching measured P95 78.6 ms (tokens) and 78.4 ms (cost). Chart data
 derivation took at most 0.8 ms of that, so the chart view is unchanged.
+
+## DEV-109 — Resume sources left indexing at launch (FR-SRC-2, NFR-2)
+
+Refines DEV-044 with the product owner's approval. Starting a source, from
+onboarding or Settings → Sources, sets `sources.resume_indexing`. Stop
+Indexing clears it, and so does a watched source that stops on denied
+access, a stale bookmark or a replaced root, because each needs the user
+before indexing can continue. A missing folder or unmounted volume is
+reported as one of these, so it also stops resuming until started again.
+Other failures, such as a store or file-event error, keep the flag and
+retry at the next launch.
+Removing a source forgets it. Quitting the app leaves it set, and waits up
+to 2 s for a queued flag write so a Stop just before Quit is kept. At launch the
+app opens the index even when no window is restored and starts each enabled,
+registered source whose flag is set, from its committed checkpoints. A source
+the user stopped stays stopped, first-run onboarding is unchanged, and a
+library from 0.1.x has no flags, so its sources resume only after the next
+explicit start. The flag is written in call order off the main actor, so a
+quick start and stop cannot land reversed while an import batch holds the
+writer.
+
+## DEV-110 — Write only changed topic terms (§10.2, DEV-076)
+
+A topic refresh replaced every term row of the session and, through the
+triggers, its document frequencies. A long live session holds up to 65,536
+terms, so each new message rewrote all of them; the signed 0.1.2 candidate
+wrote about 144 MB per refresh while one long Claude Code session was
+active. The ledger now compares the new counts with the stored ones and
+inserts, updates or deletes only the differing terms. Document frequency
+follows term presence through the same insert and delete triggers, so the
+stored ledger and frequencies are identical to a full replacement.
+
