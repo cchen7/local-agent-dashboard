@@ -395,8 +395,8 @@
 				GENERATE_INFOPLIST_FILE = "YES";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_CFBundleDisplayName = "Agent Dashboard";
-				MARKETING_VERSION = "0.1.1";
-				CURRENT_PROJECT_VERSION = "2";
+				MARKETING_VERSION = "0.1.2";
+				CURRENT_PROJECT_VERSION = "3";
 				SUPPORTED_PLATFORMS = "macosx";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
@@ -416,8 +416,8 @@
 				GENERATE_INFOPLIST_FILE = "YES";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_CFBundleDisplayName = "Agent Dashboard QA";
-				MARKETING_VERSION = "0.1.1";
-				CURRENT_PROJECT_VERSION = "2";
+				MARKETING_VERSION = "0.1.2";
+				CURRENT_PROJECT_VERSION = "3";
 				SUPPORTED_PLATFORMS = "macosx";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
@@ -436,8 +436,8 @@
 				GENERATE_INFOPLIST_FILE = "YES";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_CFBundleDisplayName = "Agent Dashboard";
-				MARKETING_VERSION = "0.1.1";
-				CURRENT_PROJECT_VERSION = "2";
+				MARKETING_VERSION = "0.1.2";
+				CURRENT_PROJECT_VERSION = "3";
 				SUPPORTED_PLATFORMS = "macosx";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				LOCALIZATION_PREFERS_STRING_CATALOGS = "YES";
