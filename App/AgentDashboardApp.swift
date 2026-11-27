@@ -155,19 +155,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
-    private var terminationReplied = false
+    private var terminationPending = false
 
     /// DEV-109: wait up to 2 s so a Stop pressed just before Quit is not lost.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        terminationReplied = false
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
         Task { await model.finishResumeWrites(); replyToTermination(sender) }
         Task { try? await Task.sleep(for: .seconds(2)); replyToTermination(sender) }
         return .terminateLater
     }
 
     private func replyToTermination(_ sender: NSApplication) {
-        guard !terminationReplied else { return }
-        terminationReplied = true
+        guard terminationPending else { return }
+        terminationPending = false
         sender.reply(toApplicationShouldTerminate: true)
     }
 

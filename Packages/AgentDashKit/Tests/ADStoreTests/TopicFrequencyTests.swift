@@ -67,9 +67,9 @@ func topicRefreshWritesOnlyChangedTerms() throws {
         try TopicLedger.replace(terms, sessionID: sessionID, db: db)
         return db.totalChangesCount - before
     }
-    // Update, insert and delete, plus the two document-frequency triggers;
-    // replacing every row wrote about 8,000 rows here.
-    #expect(changes <= 6)
+    // Update, insert and delete, plus the insert and delete document-frequency
+    // triggers; replacing every row wrote about 8,000 rows here.
+    #expect(changes == 5)
     try store.databasePool.read { db throws -> Void in
         let ledger = try Row.fetchAll(db, sql: "SELECT term,count FROM topic_term_counts WHERE session_id=?",
                                       arguments: [sessionID])
@@ -77,6 +77,36 @@ func topicRefreshWritesOnlyChangedTerms() throws {
         let df = try Row.fetchAll(db, sql: "SELECT term,df FROM term_df")
         #expect(Dictionary(uniqueKeysWithValues: df.map { ($0["term"] as String, $0["df"] as Int) })
             == terms.mapValues { _ in 1 })
+    }
+}
+
+@Test("§10.2 / DEV-110: shared terms keep exact document frequency and byte spellings")
+func topicDiffKeepsSharedFrequencyAndSpelling() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("topic-shared-\(UUID())")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try AgentStore(databaseURL: directory.appendingPathComponent("index.sqlite"))
+    let source = try store.upsertSource(.init(agent: .codex, label: "Synthetic", rootURL: directory.appendingPathComponent("s")))
+    let keys = [SessionKey(agent: .codex, nativeID: "synthetic-one"), SessionKey(agent: .codex, nativeID: "synthetic-two")]
+    try store.write(keys.map { .session(.init(key: $0, sourceID: source, environment: "Synthetic")) })
+    let ids = try store.databasePool.read { db in
+        try keys.map { try #require(try Int64.fetchOne(db, sql: "SELECT id FROM sessions WHERE native_id=?", arguments: [$0.nativeID])) }
+    }
+    let composed = "caf\u{E9}", decomposed = "cafe\u{301}"   // canonically equal, different bytes
+    try store.databasePool.write { db in
+        try TopicLedger.replace(["shared": 1, "dropped": 1, composed: 1], sessionID: ids[0], db: db)
+        try TopicLedger.replace(["shared": 2, "dropped": 1], sessionID: ids[1], db: db)
+        // The first session changes a shared count, drops a shared term and respells one.
+        try TopicLedger.replace(["shared": 3, decomposed: 1], sessionID: ids[0], db: db)
+    }
+    try store.databasePool.read { db throws -> Void in
+        let df = try Row.fetchAll(db, sql: "SELECT term,df FROM term_df").map { (Data(($0["term"] as String).utf8), $0["df"] as Int) }
+        #expect(Dictionary(uniqueKeysWithValues: df) ==
+                 [Data("shared".utf8): 2, Data("dropped".utf8): 1, Data(decomposed.utf8): 1])
+        let first = try String.fetchAll(db, sql: "SELECT term FROM topic_term_counts WHERE session_id=?", arguments: [ids[0]])
+        #expect(Set(first.map { Data($0.utf8) }) == [Data("shared".utf8), Data(decomposed.utf8)])
+        #expect(try Double.fetchOne(db, sql: "SELECT count FROM topic_term_counts WHERE session_id=? AND term='shared'",
+                                    arguments: [ids[0]]) == 3)
     }
 }
 

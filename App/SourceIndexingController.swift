@@ -113,7 +113,7 @@ final class SourceIndexingController {
             self?.jobs[id] = nil
             self?.progress[id] = Task.isCancelled ? .stopped :
                 failure.map(SourceIndexPresentation.failed) ?? completed.map(SourceIndexPresentation.rescanned) ?? .stopped
-            // An unavailable source (e.g. an unmounted volume) keeps retrying at launch.
+            // Other failures (store, file events, discovery) keep retrying at launch.
             if case .follow = mode, let failure, failure != .unavailable { self?.onFollowFailure?(id) }
         }
         return true

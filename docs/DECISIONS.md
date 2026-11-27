@@ -1053,8 +1053,10 @@ Refines DEV-044 with the product owner's approval. Starting a source, from
 onboarding or Settings → Sources, sets `sources.resume_indexing`. Stop
 Indexing clears it, and so does a watched source that stops on denied
 access, a stale bookmark or a replaced root, because each needs the user
-before indexing can continue. An unavailable source, such as one on a
-volume not yet mounted, keeps the flag and retries at the next launch.
+before indexing can continue. A missing folder or unmounted volume is
+reported as one of these, so it also stops resuming until started again.
+Other failures, such as a store, file-event or discovery error, keep the
+flag and retry at the next launch.
 Removing a source forgets it. Quitting the app leaves it set, and waits up
 to 2 s for a queued flag write so a Stop just before Quit is kept. At launch the
 app opens the index even when no window is restored and starts each enabled,
